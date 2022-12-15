@@ -1298,6 +1298,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "postgres-protocol"
+version = "0.6.4"
+source = "git+https://github.com/sfackler/rust-postgres.git?rev=8ab8f1a5552545986ba660cf2ad45ae2c8e54160#8ab8f1a5552545986ba660cf2ad45ae2c8e54160"
+dependencies = [
+ "base64 0.20.0",
+ "byteorder",
+ "bytes",
+ "fallible-iterator",
+ "hmac",
+ "md-5",
+ "memchr",
+ "rand",
+ "sha2",
+ "stringprep",
+]
+
+[[package]]
 name = "postgres-types"
 version = "0.2.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1305,7 +1322,7 @@ checksum = "73d946ec7d256b04dfadc4e6a3292324e6f417124750fc5c0950f981b703a0f1"
 dependencies = [
  "bytes",
  "fallible-iterator",
- "postgres-protocol",
+ "postgres-protocol 0.6.4 (registry+https://github.com/rust-lang/crates.io-index)",
 ]
 
 [[package]]
@@ -1726,7 +1743,7 @@ dependencies = [
  "anyhow",
  "bytes",
  "fallible-iterator",
- "postgres-protocol",
+ "postgres-protocol 0.6.4 (git+https://github.com/sfackler/rust-postgres.git?rev=8ab8f1a5552545986ba660cf2ad45ae2c8e54160)",
  "postgres-types",
  "tracing",
  "tracing-subscriber",
@@ -1752,7 +1769,7 @@ dependencies = [
  "parking_lot",
  "pgwire",
  "pin-project-lite",
- "postgres-protocol",
+ "postgres-protocol 0.6.4 (registry+https://github.com/rust-lang/crates.io-index)",
  "proptest",
  "prost",
  "rand",

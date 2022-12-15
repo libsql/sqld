@@ -78,7 +78,7 @@ impl sqlite3 {
     fn connect(addr: &str) -> Result<Self> {
         let mut conn = postgres::Connection::connect(addr)?;
         conn.send_startup()?;
-        let (_metadata, rows) = conn.wait_until_ready()?;
+        let rows = conn.wait_until_ready()?;
         assert!(rows.is_empty());
         let inner = Rc::new(Database::new(conn));
         Ok(Self { inner })
@@ -102,15 +102,14 @@ struct Statement {
     parent: Rc<Database>,
     sql: String,
     state: StatementState,
-    metadata: Option<Metadata>,
+    metadata: Metadata,
     current_row: Option<(DataRowBody, Vec<Option<Range<usize>>>)>,
     rows: VecDeque<DataRowBody>,
 }
 
 impl Statement {
-    fn new(parent: Rc<Database>, sql: String) -> Self {
+    fn new(parent: Rc<Database>, sql: String, metadata: Metadata) -> Self {
         let state = StatementState::Prepared;
-        let metadata = None;
         let current_row = None;
         let rows = VecDeque::default();
         Self {
@@ -314,8 +313,34 @@ pub extern "C" fn sqlite3_prepare_v2(
         return SQLITE_ERROR;
     });
     let sql = sql.to_string();
+    let database_ = database.clone();
+    let mut conn = database_.conn.borrow_mut();
+    unwrap_ok_or!(conn.send_parse(&sql), e, {
+        set_error_message(e);
+        return SQLITE_ERROR;
+    });
+    unwrap_ok_or!(conn.send_flush(), e, {
+        set_error_message(e);
+        return SQLITE_ERROR;
+    });
+    unwrap_ok_or!(conn.wait_until_parse_complete(), e, {
+        set_error_message(e);
+        return SQLITE_ERROR;
+    });
+    unwrap_ok_or!(conn.send_describe(), e, {
+        set_error_message(e);
+        return SQLITE_ERROR;
+    });
+    unwrap_ok_or!(conn.send_flush(), e, {
+        set_error_message(e);
+        return SQLITE_ERROR;
+    });
+    let metadata = unwrap_ok_or!(conn.wait_until_row_description(), e, {
+        set_error_message(e);
+        return SQLITE_ERROR;
+    });
     unsafe {
-        let stmt = Statement::new(database, sql);
+        let stmt = Statement::new(database, sql, metadata);
         let ptr = Box::new(sqlite3_stmt { inner: stmt });
         *ppStmt = Box::into_raw(ptr);
     }
@@ -353,15 +378,23 @@ pub extern "C" fn sqlite3_step(stmt: *mut sqlite3_stmt) -> c_int {
         StatementState::Prepared => {
             let database = stmt.parent.clone();
             let mut conn = database.conn.borrow_mut();
-            unwrap_ok_or!(conn.send_simple_query(&stmt.sql), e, {
+            let params: Vec<String> = vec![];
+            unwrap_ok_or!(conn.send_bind(params), e, {
                 set_error_message(e);
                 return SQLITE_ERROR;
             });
-            let (metadata, rows) = unwrap_ok_or!(conn.wait_until_ready(), e, {
+            unwrap_ok_or!(conn.send_execute(), e, {
                 set_error_message(e);
                 return SQLITE_ERROR;
             });
-            stmt.metadata = Some(metadata);
+            unwrap_ok_or!(conn.send_sync(), e, {
+                set_error_message(e);
+                return SQLITE_ERROR;
+            });
+            let rows = unwrap_ok_or!(conn.wait_until_ready(), e, {
+                set_error_message(e);
+                return SQLITE_ERROR;
+            });
             stmt.rows = rows;
             if let Some(row) = stmt.rows.pop_front() {
                 let column_ranges = parse_column_ranges(&row);
@@ -489,11 +522,7 @@ define_stub!(sqlite3_bind_zeroblob64);
 pub extern "C" fn sqlite3_column_count(stmt: *mut sqlite3_stmt) -> c_int {
     trace!("TRACE sqlite3_column_count");
     let stmt = to_stmt(stmt);
-    if let Some(metadata) = stmt.metadata.as_ref() {
-        metadata.col_types.len().try_into().unwrap()
-    } else {
-        0
-    }
+    stmt.metadata.col_types.len().try_into().unwrap()
 }
 
 #[no_mangle]
@@ -509,7 +538,7 @@ const SQLITE3_TEXT: c_int = 3;
 pub extern "C" fn sqlite3_column_type(stmt: *mut sqlite3_stmt, n: c_int) -> c_int {
     trace!("TRACE sqlite3_column_type");
     let stmt = to_stmt(stmt);
-    let ty = &stmt.metadata.as_ref().unwrap().col_types[n as usize];
+    let ty = &stmt.metadata.col_types[n as usize];
     match ty.oid() {
         25 => SQLITE3_TEXT,
         1700 => SQLITE_INTEGER,
@@ -542,6 +571,8 @@ pub extern "C" fn sqlite3_column_bytes(stmt: *mut sqlite3_stmt, n: c_int) -> c_i
 #[no_mangle]
 pub extern "C" fn sqlite3_column_int64(stmt: *mut sqlite3_stmt, n: c_int) -> sqlite3_int64 {
     trace!("TRACE sqlite3_column_int64");
+    0
+    /* FIXME: binary format support
     let stmt = to_stmt(stmt);
     if let Some((row, column_ranges)) = &stmt.current_row {
         let range = column_ranges[n as usize].as_ref().unwrap();
@@ -553,6 +584,7 @@ pub extern "C" fn sqlite3_column_int64(stmt: *mut sqlite3_stmt, n: c_int) -> sql
     } else {
         0
     }
+    */
 }
 
 #[no_mangle]
