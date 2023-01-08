@@ -33,6 +33,7 @@ pub enum Backend {
 pub async fn run_server(
     db_path: PathBuf,
     tcp_addr: SocketAddr,
+    http_addr: Option<SocketAddr>,
     ws_addr: Option<SocketAddr>,
     backend: Backend,
     #[cfg(feature = "mwal_backend")] mwal_addr: Option<String>,
@@ -41,6 +42,10 @@ pub async fn run_server(
 ) -> Result<()> {
     let mut server = Server::new();
     server.bind_tcp(tcp_addr).await?;
+
+    if let Some(addr) = http_addr {
+        server.bind_http(addr).await?;
+    }
 
     if let Some(addr) = ws_addr {
         server.bind_ws(addr).await?;

@@ -16,9 +16,11 @@ use crate::server::ws::WsStreamAdapter;
 
 use self::tcp::TcpAdapter;
 use self::ws::WsAdapter;
+use self::http::HttpAdapter;
 
 mod tcp;
 mod ws;
+mod http;
 
 type Listener = Box<dyn Stream<Item = io::Result<(NetStream, SocketAddr)>> + Unpin>;
 
@@ -36,6 +38,13 @@ impl Server {
     pub async fn bind_tcp(&mut self, addr: impl ToSocketAddrs) -> Result<&mut Self> {
         let listener = TcpListener::bind(addr).await?;
         self.listeners.push(Box::new(TcpAdapter::new(listener)));
+
+        Ok(self)
+    }
+
+    pub async fn bind_http(&mut self, addr: impl ToSocketAddrs) -> Result<&mut Self> {
+        let listener = TcpListener::bind(addr).await?;
+        self.listeners.push(Box::new(HttpAdapter::new(listener)));
 
         Ok(self)
     }

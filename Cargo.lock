@@ -2211,6 +2211,7 @@ dependencies = [
  "crossbeam",
  "futures",
  "hex",
+ "hyper",
  "mvfs",
  "mwal",
  "once_cell",

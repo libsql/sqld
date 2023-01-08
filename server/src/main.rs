@@ -13,6 +13,9 @@ struct Cli {
     /// The address and port the PostgreSQL server listens to.
     #[clap(long, short, default_value = "127.0.0.1:5000")]
     pg_listen_addr: SocketAddr,
+    /// The address and port the HTTP server listens to.
+    #[clap(long, short)]
+    http_listen_addr: Option<SocketAddr>,
     /// The address and port the PostgreSQL over WebSocket server listens to.
     #[clap(long, short)]
     ws_listen_addr: Option<SocketAddr>,
@@ -52,6 +55,7 @@ async fn main() -> Result<()> {
     sqld::run_server(
         args.db_path,
         args.pg_listen_addr,
+        args.http_listen_addr,
         args.ws_listen_addr,
         args.backend,
         #[cfg(feature = "mwal_backend")]
