@@ -188,7 +188,11 @@ fn make_page_header<'a>(entries: impl Iterator<Item = &'a WalLogEntry>) -> *mut 
                 dirty: current_pg,
                 pager: std::ptr::null(),
                 pgno: *page_no,
+                page_hash: 0,
                 flags: 0,
+                n_ref: 0,
+                dirty_next: std::ptr::null_mut(),
+                dirty_prev: std::ptr::null_mut(),
             };
             headers_count += 1;
             current_pg = Box::into_raw(Box::new(page));

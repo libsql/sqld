@@ -161,7 +161,11 @@ pub struct PgHdr {
     pub dirty: *mut PgHdr,
     pub pager: *const c_void,
     pub pgno: u32,
+    pub page_hash: u32,
     pub flags: u16,
+    pub n_ref: u16,
+    pub dirty_next: *mut PgHdr,
+    pub dirty_prev: *mut PgHdr,
 }
 
 extern "C" {
