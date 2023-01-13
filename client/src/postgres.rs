@@ -1,9 +1,9 @@
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
 use bytes::BytesMut;
 use fallible_iterator::FallibleIterator;
 use postgres_protocol::message::backend::DataRowBody;
 use postgres_protocol::message::{backend, frontend};
-use postgres_types::Type;
+use postgres_types::{BorrowToSql, Type};
 use std::collections::{HashMap, VecDeque};
 use std::io::prelude::*;
 use std::net::TcpStream;
@@ -56,14 +56,120 @@ impl Connection {
         Ok(())
     }
 
-    pub fn send_simple_query(&mut self, sql: &str) -> Result<()> {
+    pub fn send_parse(&mut self, sql: &str) -> Result<()> {
         let mut msg = BytesMut::new();
-        frontend::query(sql, &mut msg)?;
+        let param_types = vec![];
+        // FIXME: allocate a unique name for every statement and use it.
+        frontend::parse("", sql, param_types, &mut msg)?;
         self.stream.write_all(&msg)?;
         Ok(())
     }
 
-    pub fn wait_until_ready(&mut self) -> Result<(Metadata, VecDeque<DataRowBody>)> {
+    pub fn send_bind<P, I>(&mut self, params: I) -> Result<()>
+    where
+        P: BorrowToSql,
+        I: IntoIterator<Item = P>,
+    {
+        let mut msg = BytesMut::new();
+        let portal = "";
+        let statement = "";
+        let param_formats = vec![];
+        let param_types: Vec<Type> = vec![];
+        let params = params.into_iter();
+        frontend::bind(
+            &portal,
+            &statement,
+            param_formats,
+            params.zip(param_types).enumerate(),
+            |(_idx, (_param, _ty)), _buf| Ok(postgres_protocol::IsNull::No),
+            Some(1),
+            &mut msg,
+        )
+        .map_err(|_| anyhow!("bind failed"))?;
+        self.stream.write_all(&msg)?;
+        Ok(())
+    }
+
+    pub fn send_describe(&mut self) -> Result<()> {
+        let mut msg = BytesMut::new();
+        frontend::describe('S' as u8, "", &mut msg)?;
+        self.stream.write_all(&msg)?;
+        Ok(())
+    }
+
+    pub fn send_execute(&mut self) -> Result<()> {
+        let mut msg = BytesMut::new();
+        frontend::execute("", 0, &mut msg)?;
+        self.stream.write_all(&msg)?;
+        Ok(())
+    }
+
+    pub fn send_flush(&mut self) -> Result<()> {
+        let mut msg = BytesMut::new();
+        frontend::flush(&mut msg);
+        self.stream.write_all(&msg)?;
+        Ok(())
+    }
+
+    pub fn send_sync(&mut self) -> Result<()> {
+        let mut msg = BytesMut::new();
+        frontend::sync(&mut msg);
+        self.stream.write_all(&msg)?;
+        Ok(())
+    }
+
+    pub fn wait_until_parse_complete(&mut self) -> Result<()> {
+        loop {
+            let msg = backend::Message::parse(&mut self.rx_buf)?;
+            match msg {
+                Some(backend::Message::ParseComplete) => {
+                    trace!("TRACE postgres -> ParseComplete");
+                    break;
+                }
+                Some(_) => todo!(),
+                None => {
+                    // FIXME: Optimize with spare_capacity_mut() to make zero-copy.
+                    let mut buf = [0u8; 1024];
+                    let nr = self.stream.read(&mut buf)?;
+                    self.rx_buf.extend_from_slice(&buf[0..nr]);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    pub fn wait_until_row_description(&mut self) -> Result<Metadata> {
+        loop {
+            let msg = backend::Message::parse(&mut self.rx_buf)?;
+            match msg {
+                Some(backend::Message::RowDescription(row_description)) => {
+                    let mut metadata = Metadata::new();
+                    let mut fields = row_description.fields();
+                    while let Some(field) = fields.next().unwrap() {
+                        metadata.col_names.push(field.name().into());
+                        let ty = Type::from_oid(field.type_oid()).unwrap();
+                        metadata.col_types.push(ty);
+                    }
+                    return Ok(metadata);
+                }
+                Some(backend::Message::ParameterDescription(_)) => {
+                    // TODO
+                }
+                Some(backend::Message::NoData) => {
+                    return Ok(Metadata::new());
+                }
+                Some(_) => todo!(),
+                None => {
+                    // FIXME: Optimize with spare_capacity_mut() to make zero-copy.
+                    let mut buf = [0u8; 1024];
+                    let nr = self.stream.read(&mut buf)?;
+                    self.rx_buf.extend_from_slice(&buf[0..nr]);
+                }
+            }
+        }
+    }
+
+    pub fn wait_until_ready(&mut self) -> Result<VecDeque<DataRowBody>> {
         let mut metadata = Metadata::new();
         let mut rows = VecDeque::default();
         loop {
@@ -71,7 +177,7 @@ impl Connection {
             match msg {
                 Some(msg) => {
                     if !self.process_msg(msg, &mut metadata, &mut rows) {
-                        return Ok((metadata, rows));
+                        return Ok(rows);
                     }
                 }
                 None => {
@@ -107,7 +213,9 @@ impl Connection {
             backend::Message::BackendKeyData(_) => {
                 trace!("TRACE postgres -> BackendKeyData");
             }
-            backend::Message::BindComplete => todo!(),
+            backend::Message::BindComplete => {
+                trace!("TRACE postgres -> BindComplete");
+            }
             backend::Message::CloseComplete => todo!(),
             backend::Message::CommandComplete(_) => {
                 trace!("TRACE postgres -> CommandComplete");
@@ -124,16 +232,24 @@ impl Connection {
             backend::Message::ErrorResponse(_) => {
                 trace!("TRACE postgres -> ErrorResponse");
             }
-            backend::Message::NoData => todo!(),
+            backend::Message::NoData => {
+                trace!("TRACE postgres -> NoData");
+            }
             backend::Message::NoticeResponse(_) => {
                 trace!("TRACE postgres -> NoticeResponse");
             }
-            backend::Message::NotificationResponse(_) => todo!(),
-            backend::Message::ParameterDescription(_) => todo!(),
+            backend::Message::NotificationResponse(_) => {
+                trace!("TRACE postgres -> NotificationResponse");
+            }
+            backend::Message::ParameterDescription(_) => {
+                trace!("TRACE postgres -> ParameterDescription");
+            }
             backend::Message::ParameterStatus(_) => {
                 trace!("TRACE postgres -> ParameterStatus");
             }
-            backend::Message::ParseComplete => todo!(),
+            backend::Message::ParseComplete => {
+                trace!("TRACE postgres -> ParseComplete");
+            }
             backend::Message::PortalSuspended => todo!(),
             backend::Message::ReadyForQuery(_) => {
                 trace!("TRACE postgres -> ReadyForQuery");
