@@ -119,7 +119,7 @@ where
 
 fn parse_params(types: &[Type], data: &[Option<Bytes>]) -> Params {
     let mut params = Params::empty();
-    for (val, ty) in data.iter().zip(types) {
+    for (index, (val, ty)) in data.iter().zip(types).enumerate() {
         let value = if val.is_none() {
             Value::Null
         } else if ty == &Type::VARCHAR {
@@ -137,7 +137,7 @@ fn parse_params(types: &[Type], data: &[Option<Bytes>]) -> Params {
             unimplemented!("unsupported type")
         };
 
-        params.push(None, value);
+        params.push(index.to_string(), value);
     }
 
     params

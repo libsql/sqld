@@ -47,7 +47,9 @@ fn execute_query(conn: &rusqlite::Connection, stmt: &Statement, params: Params) 
         })
         .collect::<Vec<_>>();
 
-    params.bind(&mut prepared).unwrap();
+    params
+        .bind(&mut prepared)
+        .map_err(|e| QueryError::new(ErrorCode::SQLError, e))?;
 
     let mut qresult = prepared.raw_query();
 

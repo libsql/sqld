@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use base64::prelude::BASE64_STANDARD_NO_PAD;
 use base64::Engine;
 use serde::de::Error as _;
@@ -18,7 +20,7 @@ pub struct QueryObject {
 
 #[derive(Debug, Default)]
 pub struct QueryParams {
-    pub inner: Vec<(Option<String>, query::Value)>,
+    pub inner: HashMap<String, query::Value>,
 }
 
 /// Wrapper type to deserialize a payload into a query::Value
@@ -127,9 +129,11 @@ impl<'de> Deserialize<'de> for QueryParams {
             where
                 A: serde::de::SeqAccess<'de>,
             {
-                let mut inner = Vec::new();
+                let mut inner = HashMap::new();
+                let mut index = 1;
                 while let Some(val) = seq.next_element::<ValueDeserializer>()? {
-                    inner.push((None, val.0));
+                    inner.insert(index.to_string(), val.0);
+                    index += 1;
                 }
 
                 Ok(QueryParams { inner })
@@ -139,9 +143,9 @@ impl<'de> Deserialize<'de> for QueryParams {
             where
                 A: serde::de::MapAccess<'de>,
             {
-                let mut inner = Vec::new();
+                let mut inner = HashMap::new();
                 while let Some((k, v)) = map.next_entry::<String, ValueDeserializer>()? {
-                    inner.push((Some(k), v.0))
+                    inner.insert(k, v.0);
                 }
 
                 Ok(QueryParams { inner })

@@ -1,7 +1,10 @@
+use std::borrow::Cow;
+use std::collections::HashMap;
 use std::convert::Infallible;
+use std::fmt;
 use std::str::FromStr;
-use std::{fmt, usize};
 
+use anyhow::Context;
 use futures::stream;
 use pgwire::api::results::{text_query_response, FieldInfo, Response, TextDataRowEncoder};
 use pgwire::api::Type as PgType;
@@ -251,7 +254,7 @@ pub struct Query {
 
 #[derive(Debug)]
 pub struct Params {
-    params: Vec<(Option<String>, Value)>,
+    params: HashMap<String, Value>,
 }
 
 impl ToSql for Value {
@@ -270,52 +273,53 @@ impl ToSql for Value {
 
 impl Params {
     pub fn empty() -> Self {
-        Self { params: Vec::new() }
+        Self {
+            params: HashMap::new(),
+        }
     }
 
-    pub fn new(params: Vec<(Option<String>, Value)>) -> Self {
+    pub fn new(params: HashMap<String, Value>) -> Self {
         Self { params }
     }
 
-    pub fn push(&mut self, name: Option<String>, value: Value) {
-        self.params.push((name, value));
-    }
-
-    fn get_name(&self, k: &str) -> Option<&Value> {
-        // strip prefix ('$', '?', ..)
-        let mut chars = k.chars();
-        chars.next();
-        let stripped = chars.as_str();
-
-        if let Ok(index) = stripped.parse::<usize>() {
-            return self.get_pos(index);
-        }
-
-        self.params.iter().find_map(|(name, val)| match name {
-            Some(name) if name == stripped => Some(val),
-            _ => None,
-        })
-    }
-
-    fn get_pos(&self, i: usize) -> Option<&Value> {
-        self.params.get(i - 1).map(|(_, val)| val)
+    pub fn push(&mut self, name: String, value: Value) {
+        self.params.insert(name, value);
     }
 
     pub fn bind(&self, stmt: &mut rusqlite::Statement) -> anyhow::Result<()> {
         let param_count = stmt.parameter_count();
+        if param_count > self.params.len() {
+            anyhow::bail!("missing parameters");
+        }
+
+        if param_count < self.params.len() {
+            anyhow::bail!("too many parameter");
+        }
+
         if param_count > 0 {
             for index in 1..=param_count {
                 // get by name
-                if let Some(name) = stmt.parameter_name(index) {
-                    if let Some(val) = self.get_name(name) {
-                        stmt.raw_bind_parameter(index, val)?;
-                    }
+                let name = match stmt.parameter_name(index) {
+                    Some(s) => Cow::Borrowed(s),
+                    None => Cow::Owned(index.to_string()),
+                };
+
+                let mut chars = name.chars();
+                chars.next();
+                let stripped = chars.as_str();
+                // check if name refers to a position
+                let name = if stripped.parse::<usize>().is_ok() {
+                    stripped
                 } else {
-                    // get by pos
-                    if let Some(val) = self.get_pos(index) {
-                        stmt.raw_bind_parameter(index, val)?;
-                    }
-                }
+                    &name
+                };
+
+                let value = self
+                    .params
+                    .get(name)
+                    .with_context(|| format!("parameter `{name}` was not found"))?;
+
+                stmt.raw_bind_parameter(index, value)?;
             }
         }
 
