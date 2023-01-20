@@ -1,11 +1,11 @@
-import * as sqlite3 from "sqlite3";
+import DatabaseConstructor, {Database} from "better-sqlite3";
 import { ResultSet } from "../libsql-js";
 import { Driver } from "./Driver";
 
 export class SqliteDriver implements Driver {
-    db: sqlite3.Database;
+    db: Database;
     constructor(url: string) {
-        this.db = new sqlite3.Database(url, sqlite3.OPEN_READWRITE | sqlite3.OPEN_CREATE | sqlite3.OPEN_FULLMUTEX | sqlite3.OPEN_URI);
+        this.db = new DatabaseConstructor(url)
     }
     async transaction(sqls: string[]): Promise<ResultSet[]> {
         const result = [];
@@ -17,17 +17,34 @@ export class SqliteDriver implements Driver {
     }
     async execute(sql: string): Promise<ResultSet> {
         return await new Promise(resolve => {
-            this.db.all(sql, (err, rows) => {
-                // FIXME: error handling
-                const rs = {
-                    results: rows,
-                    success: true,
-                    meta: {
-                        duration: 0,
-                    },
-                };
-                resolve(rs);
-            })
+            const stmt = this.db.prepare(sql);
+            let columns: string[] = [];
+            let rows: any[] = [];
+            try {
+                columns = stmt.columns().map(c => c.name);
+                rows = stmt.all().map(row => {
+                    return columns.map(column => row[column]);
+                });
+	    } catch (error) {
+		// The better-sqlite3 API has a interface issue where SQL
+		// statements that don't return results throw an exception,
+		// but there is no way to check if that's the case. Therefore,
+		// let's use this ugly hack where we catch the exception and
+		// keep going.
+                if (error != "TypeError: The columns() method is only for statements that return data") {
+                    throw error;
+                }
+            }
+            // FIXME: error handling
+            const rs = {
+                columns,
+                rows,
+                success: true,
+                meta: {
+                    duration: 0,
+                },
+            };
+            resolve(rs);
         });
     }
 }
