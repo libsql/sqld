@@ -111,6 +111,8 @@ async fn main() -> Result<()> {
         .init();
     let args = Cli::parse();
 
+    bottomless::static_init::register_bottomless_methods();
+
     #[cfg(feature = "mwal_backend")]
     match (&args.backend, args.mwal_addr.is_some()) {
         (sqld::Backend::Mwal, false) => {

@@ -74,7 +74,8 @@ pub(crate) fn open_with_regular_wal(
             ppdb,
             flags.bits(),
             std::ptr::null(),
-            WalMethodsHook::METHODS_NAME.as_ptr(),
+            // FIXME: hack
+            "bottomless\0".as_ptr() as *const _,
         );
         assert_eq!(open_err, 0);
         let conn = Connection::from_handle(pdb)?;
