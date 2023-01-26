@@ -14,6 +14,9 @@ pub fn parse_auth(auth: Option<String>) -> Result<Arc<dyn Authorizer + Sync + Se
                 "basic" => Ok(Arc::new(BasicAuthAuthorizer {
                     expected_auth: format!("Basic {}", param).to_lowercase(),
                 })),
+                "bearer" => Ok(Arc::new(BasicAuthAuthorizer {
+                    expected_auth: format!("Bearer {}", param).to_lowercase(),
+                })),
                 _ => Err(anyhow!("unsupported HTTP auth scheme: {}", scheme)),
             },
             None if auth == "always" => Ok(Arc::new(AlwaysAllowAuthorizer {})),
@@ -32,7 +35,8 @@ impl Authorizer for AlwaysAllowAuthorizer {
     }
 }
 
-/// Basic authentication authorizer.
+/// Basic authentication authorizer, simply verifying
+/// if the header is equal to the expected value.
 pub struct BasicAuthAuthorizer {
     // Expected value in `Authorization` header.
     expected_auth: String,
