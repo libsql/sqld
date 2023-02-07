@@ -80,6 +80,7 @@ impl PeriodicDbUpdater {
 
 struct ReadReplicationHook {
     logger: WalLogClient<Channel>,
+    current_gen: u64,
     fetch_frame_index: u64,
     /// Persistent last committed index used for restarts.
     /// The File should contain two little-endian u64:
@@ -252,6 +253,8 @@ impl ReadReplicationHook {
             last_applied_index,
             buffer: Default::default(),
             rt: Handle::current(),
+            // TODO: read from file
+            current_gen: 0,
         })
     }
 
@@ -304,5 +307,30 @@ impl ReadReplicationHook {
         );
 
         Ok(())
+    }
+
+    #[allow(dead_code)]
+    fn is_valid_new_gen(&mut self, gen: u64, gen_start_frame_index: u64) -> bool {
+        if self.current_gen != gen {
+            if let Some(last_applied) = self.last_applied_index {
+                if last_applied <= gen_start_frame_index {
+                    // TODO persist to file.
+                    self.current_gen = gen;
+                    true
+                } else {
+                    // The last frame we applied for the previous generation has a higher index
+                    // than the first frame of the new generation. The primary lost data, and this
+                    // leaves us in an inconsistent state. This is an error, and we must
+                    // hard_reset the replica.
+                    false
+                }
+            } else {
+                // we haven't started replicating anything yet
+                false
+            }
+        } else {
+            // same gen, nothing to do.
+            false
+        }
     }
 }
