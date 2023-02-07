@@ -2,8 +2,6 @@ mod replication;
 
 use std::future::{ready, Ready};
 use std::path::PathBuf;
-#[cfg(feature = "mwal_backend")]
-use std::sync::Arc;
 use std::time::Duration;
 
 use crossbeam::channel::TryRecvError;
@@ -27,9 +25,6 @@ use replication::PeriodicDbUpdater;
 pub struct WriteProxyDbFactory {
     write_proxy: ProxyClient<Channel>,
     db_path: PathBuf,
-    #[cfg(feature = "mwal_backend")]
-    vwal_methods:
-        Option<Arc<std::sync::Mutex<sqld_libsql_bindings::mwal::ffi::libsql_wal_methods>>>,
     /// abort handle: abort db update loop on drop
     _abort_handle: crossbeam::channel::Sender<()>,
 }
@@ -42,9 +37,6 @@ impl WriteProxyDbFactory {
         key_path: Option<PathBuf>,
         ca_cert_path: Option<PathBuf>,
         db_path: PathBuf,
-        #[cfg(feature = "mwal_backend")] vwal_methods: Option<
-            Arc<std::sync::Mutex<sqld_libsql_bindings::mwal::ffi::libsql_wal_methods>>,
-        >,
     ) -> anyhow::Result<Self> {
         let mut endpoint = Channel::from_shared(addr.to_string())?;
         if tls {
@@ -82,8 +74,6 @@ impl WriteProxyDbFactory {
         Ok(Self {
             write_proxy,
             db_path,
-            #[cfg(feature = "mwal_backend")]
-            vwal_methods,
             _abort_handle,
         })
     }
@@ -98,8 +88,6 @@ impl DbFactory for WriteProxyDbFactory {
         ready(WriteProxyDatabase::new(
             self.write_proxy.clone(),
             self.db_path.clone(),
-            #[cfg(feature = "mwal_backend")]
-            self.vwal_methods.clone(),
         ))
     }
 }
@@ -112,20 +100,8 @@ pub struct WriteProxyDatabase {
 }
 
 impl WriteProxyDatabase {
-    fn new(
-        write_proxy: ProxyClient<Channel>,
-        path: PathBuf,
-        #[cfg(feature = "mwal_backend")] vwal_methods: Option<
-            Arc<std::sync::Mutex<sqld_libsql_bindings::mwal::ffi::libsql_wal_methods>>,
-        >,
-    ) -> Result<Self> {
-        let read_db = LibSqlDb::new(
-            path,
-            #[cfg(feature = "mwal_backend")]
-            vwal_methods,
-            (),
-            false, // no bottomless replication for replicas
-        )?;
+    fn new(write_proxy: ProxyClient<Channel>, path: PathBuf) -> Result<Self> {
+        let read_db = LibSqlDb::new(path, (), false)?;
         Ok(Self {
             read_db,
             write_proxy,

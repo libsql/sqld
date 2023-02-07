@@ -13,6 +13,8 @@ use database::write_proxy::WriteProxyDbFactory;
 use futures::stream::FuturesUnordered;
 use futures::{Future, StreamExt};
 use once_cell::sync::Lazy;
+#[cfg(feature = "mwal_backend")]
+use once_cell::sync::OnceCell;
 use query::{Queries, QueryResult};
 use rpc::run_rpc_server;
 use tokio::sync::Notify;
@@ -55,6 +57,11 @@ type Handles = FuturesUnordered<JoinHandle<anyhow::Result<()>>>;
 ///
 /// /!\ use with caution.
 pub(crate) static HARD_RESET: Lazy<Arc<Notify>> = Lazy::new(|| Arc::new(Notify::new()));
+
+#[cfg(feature = "mwal_backend")]
+pub(crate) static VWAL_METHODS: OnceCell<
+    Option<Arc<Mutex<sqld_libsql_bindings::mwal::ffi::libsql_wal_methods>>>,
+> = OnceCell::new();
 
 pub struct Config {
     pub db_path: PathBuf,
@@ -121,7 +128,7 @@ async fn hard_reset(config: &Config, mut handles: Handles) -> anyhow::Result<()>
 
     tracing::info!("Shutting down all services...");
     handles.iter_mut().for_each(|h| h.abort());
-    while let Some(_) = handles.next().await {}
+    while handles.next().await.is_some() {}
     tracing::info!("All services have been shut down.");
 
     let db_path = &config.db_path;
@@ -162,8 +169,6 @@ async fn start_primary(config: &Config, handles: &mut Handles, addr: &str) -> an
         config.writer_rpc_key.clone(),
         config.writer_rpc_ca_cert.clone(),
         config.db_path.clone(),
-        #[cfg(feature = "mwal_backend")]
-        vwal_methods,
     )
     .await
     .context("failed to start WriteProxy DB")?;
@@ -180,23 +185,13 @@ async fn start_replica(config: &Config, handles: &mut Handles) -> anyhow::Result
     let enable_bottomless = config.enable_bottomless_replication;
     let db_factory = move || {
         let db_path = path_clone.clone();
-        #[cfg(feature = "mwal_backend")]
-        let vwal_methods = vwal_methods.clone();
         let hook = WalLoggerHook::new(logger.clone());
-        async move {
-            LibSqlDb::new(
-                db_path,
-                #[cfg(feature = "mwal_backend")]
-                vwal_methods,
-                hook,
-                enable_bottomless,
-            )
-        }
+        async move { LibSqlDb::new(db_path, hook, enable_bottomless) }
     };
     let service = DbFactoryService::new(db_factory.clone());
     if let Some(ref addr) = config.rpc_server_addr {
         let handle = tokio::spawn(run_rpc_server(
-            addr.clone(),
+            *addr,
             config.rpc_server_tls,
             config.rpc_server_cert.clone(),
             config.rpc_server_key.clone(),
@@ -215,17 +210,20 @@ async fn start_replica(config: &Config, handles: &mut Handles) -> anyhow::Result
 
 pub async fn run_server(config: Config) -> anyhow::Result<()> {
     tracing::trace!("Backend: {:?}", config.backend);
-    #[cfg(feature = "mwal_backend")]
-    if config.backend == Backend::Mwal {
-        std::env::set_var("MVSQLITE_DATA_PLANE", config.mwal_addr.as_ref().unwrap());
-    }
 
     #[cfg(feature = "mwal_backend")]
-    let vwal_methods = config.mwal_addr.as_ref().map(|_| {
-        Arc::new(Mutex::new(
-            sqld_libsql_bindings::mwal::ffi::libsql_wal_methods::new(),
-        ))
-    });
+    {
+        if config.backend == Backend::Mwal {
+            std::env::set_var("MVSQLITE_DATA_PLANE", config.mwal_addr.as_ref().unwrap());
+        }
+        VWAL_METHODS
+            .set(config.mwal_addr.as_ref().map(|_| {
+                Arc::new(Mutex::new(
+                    sqld_libsql_bindings::mwal::ffi::libsql_wal_methods::new(),
+                ))
+            }))
+            .map_err(|_| anyhow::anyhow!("wal_methods initialized twice"))?;
+    }
 
     if config.enable_bottomless_replication {
         bottomless::static_init::register_bottomless_methods();
