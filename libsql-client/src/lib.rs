@@ -26,6 +26,9 @@ pub use connection::Connection;
 #[cfg(feature = "workers_backend")]
 pub mod workers;
 
+#[cfg(feature = "local_backend")]
+pub mod local;
+
 /// Metadata of a database request
 #[derive(Clone, Debug, Default)]
 pub struct Meta {
