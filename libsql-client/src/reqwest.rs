@@ -1,5 +1,6 @@
 use async_trait::async_trait;
 use base64::Engine;
+use reqwest::Url;
 
 use super::{parse_query_result, QueryResult, Statement};
 
@@ -7,7 +8,7 @@ use super::{parse_query_result, QueryResult, Statement};
 /// communicate with the database.
 #[derive(Clone, Debug)]
 pub struct Connection {
-    url: String,
+    url: Url,
     auth: String,
 }
 
@@ -32,6 +33,8 @@ impl Connection {
         } else {
             url
         };
+        // FIXME: handle error
+        let url = Url::parse(&url).unwrap();
         Self {
             url,
             auth: format!(
@@ -99,7 +102,7 @@ impl super::Connection for Connection {
         body += "]}";
         let client = reqwest::Client::new();
         let response = client
-            .post(&self.url)
+            .post(self.url.join("/queries")?)
             .body(body)
             .header("Authorization", &self.auth)
             .send()
