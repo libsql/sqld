@@ -2,6 +2,7 @@ from typing import Any, Dict, List, Optional
 import aiohttp
 import base64
 import json
+import urllib.parse
 
 from .driver import _Driver, _RawStmt
 from .errors import ClientResponseError, ClientHttpError
@@ -20,7 +21,8 @@ class _HttpDriver(_Driver):
             "statements": [_encode_stmt(stmt) for stmt in stmts],
         }
 
-        async with await self._session.post(self._url + "/queries", json=req_body) as resp:
+        url = urllib.parse.urljoin(self._url, "/queries")
+        async with await self._session.post(url , json=req_body) as resp:
             if not resp.ok:
                 resp_body = await resp.read()
                 try:
