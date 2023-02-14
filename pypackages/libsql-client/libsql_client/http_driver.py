@@ -20,7 +20,7 @@ class _HttpDriver(_Driver):
             "statements": [_encode_stmt(stmt) for stmt in stmts],
         }
 
-        async with await self._session.post(self._url, json=req_body) as resp:
+        async with await self._session.post(self._url + "/queries", json=req_body) as resp:
             if not resp.ok:
                 resp_body = await resp.read()
                 try:
