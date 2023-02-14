@@ -7,8 +7,8 @@ use serde_json::json;
 async fn proxy_write(app: App) {
     let replica_ip = app.service("replica").unwrap().ip().await.unwrap();
     let primary_ip = app.service("primary").unwrap().ip().await.unwrap();
-    let primary_url = format!("http://{primary_ip}:8080/");
-    let replica_url = format!("http://{replica_ip}:8080/");
+    let primary_url = format!("http://{primary_ip}:8080/queries");
+    let replica_url = format!("http://{replica_ip}:8080/queries");
     let client = reqwest::Client::new();
 
     // perform a write to the writer and ensure it's proxied to to primary
@@ -56,7 +56,7 @@ async fn replica_catch_up(app: App) {
     let replica = app.service("replica").unwrap();
     replica.pause().await.unwrap();
     let primary_ip = app.service("primary").unwrap().ip().await.unwrap();
-    let primary_url = format!("http://{primary_ip}:8080/");
+    let primary_url = format!("http://{primary_ip}:8080/queries");
     let client = reqwest::Client::new();
 
     let payload = json!({ "statements": ["create table test (x)"] });
@@ -97,7 +97,7 @@ async fn replica_catch_up(app: App) {
     tokio::time::sleep(Duration::from_secs(3)).await;
 
     let replica_ip = replica.ip().await.unwrap();
-    let replica_url = format!("http://{replica_ip}:8080/");
+    let replica_url = format!("http://{replica_ip}:8080/queries");
     // check that everything is there
     let payload = json!({ "statements": [format!("select * from test")] });
     let resp = client

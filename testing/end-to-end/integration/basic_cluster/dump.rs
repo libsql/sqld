@@ -15,7 +15,7 @@ async fn load_dump_from_primary(app: App) {
     // wait for dump to be loaded and replicated
     tokio::time::sleep(Duration::from_secs(3)).await;
 
-    let url = format!("http://{primary_ip}:8080");
+    let url = format!("http://{primary_ip}:8080/queries");
     let resp = client
         .post(url)
         .json(&json!({
@@ -29,7 +29,7 @@ async fn load_dump_from_primary(app: App) {
 
     // ensure replica is up to date
     let replica_id = app.service("replica").unwrap().ip().await.unwrap();
-    let url = format!("http://{replica_id}:8080");
+    let url = format!("http://{replica_id}:8080/queries");
     let resp = client
         .post(url)
         .json(&json!({
@@ -53,7 +53,7 @@ async fn load_dump_from_replica(app: App) {
     // wait for dump to be loaded and replicated
     tokio::time::sleep(Duration::from_secs(4)).await;
 
-    let url = format!("http://{replica_ip}:8080");
+    let url = format!("http://{replica_ip}:8080/queries");
     let resp = client
         .post(url)
         .json(&json!({

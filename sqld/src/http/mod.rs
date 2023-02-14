@@ -155,7 +155,7 @@ fn parse_payload(data: &[u8]) -> Result<HttpQuery, Response<Body>> {
     }
 }
 
-async fn handle_query(
+async fn handle_queries(
     mut req: Request<Body>,
     sender: mpsc::Sender<Message>,
 ) -> anyhow::Result<Response<Body>> {
@@ -211,7 +211,7 @@ async fn handle_request(
         }
     }
     match (req.method(), req.uri().path()) {
-        (&Method::POST, "/") => handle_query(req, sender).await,
+        (&Method::POST, "/queries") => handle_queries(req, sender).await,
         (&Method::GET, "/console") if enable_console => show_console().await,
         (&Method::GET, "/health") => Ok(handle_health()),
         (&Method::POST, "/load-dump") => Ok(load_dump(req, sender).await?),
