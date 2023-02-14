@@ -210,7 +210,13 @@ async fn handle_request(
                 .unwrap());
         }
     }
+
     match (req.method(), req.uri().path()) {
+        (&Method::POST, "/") => Ok(Response::builder()
+            .status(StatusCode::MOVED_PERMANENTLY)
+            .header("Location", "/queries")
+            .body(Body::empty())
+            .unwrap()),
         (&Method::POST, "/queries") => handle_queries(req, sender).await,
         (&Method::GET, "/console") if enable_console => show_console().await,
         (&Method::GET, "/health") => Ok(handle_health()),
