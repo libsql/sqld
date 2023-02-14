@@ -26,7 +26,8 @@ export class HttpDriver implements Driver {
 
         const statements = buildStatements(["BEGIN", ...stmts, "COMMIT"]);
 
-        const response = await fetch(this.url + "/queries", {
+        const url = new URL("/queries", this.url);
+        const response = await fetch(url , {
             method: "POST",
             body: JSON.stringify(statements)
         });
