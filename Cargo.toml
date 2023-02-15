@@ -1,11 +1,11 @@
 [workspace]
 
 members = [
-    "bottomless",
-    "bottomless-cli",
-    "sqlc",
-    "sqld",
-    "sqld-libsql-bindings",
+    "crates/bottomless",
+    "crates/bottomless-cli",
+    "crates/sqlc",
+    "crates/sqld",
+    "crates/sqld-libsql-bindings",
     "testing/end-to-end",
 ]
 

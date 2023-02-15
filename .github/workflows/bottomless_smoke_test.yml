@@ -49,27 +49,27 @@ jobs:
       run: ./configure && make libsql sqlite3.h sqlite3ext.h
 
     - name: Run smoke test
-      working-directory: ./bottomless
+      working-directory: ./crates/bottomless
       run: make test
 
     - name: Run restore test
-      working-directory: ./bottomless/test
+      working-directory: ./crates/bottomless/test
       run: ../../libsql/libsql < restore_test.sql
 
     - name: Remove the database
-      working-directory: ./bottomless/test
+      working-directory: ./crates/bottomless/test
       run: rm -f test/test.db
 
     - name: Run restore test again
-      working-directory: ./bottomless/test
+      working-directory: ./crates/bottomless/test
       run: ../../libsql/libsql < restore_test.sql
 
     - name: Make offline changes to the database
-      working-directory: ./bottomless/test
+      working-directory: ./crates/bottomless/test
       run: ../../libsql/libsql test.db <<< "insert into test values (997);"
 
     - name: Run restore test yet again
-      working-directory: ./bottomless/test
+      working-directory: ./crates/bottomless/test
       run: ../../libsql/libsql < restore_test.sql
 
     - name: List generations with CLI
@@ -79,5 +79,5 @@ jobs:
       run: cargo run -p bottomless-cli -- -e http://localhost:9000 -d test.db restore
 
     - name: Verify the restored database
-      working-directory: ./bottomless/test
+      working-directory: ./crates/bottomless/test
       run: ../../libsql/libsql test.db <<< "SELECT * FROM test;"
