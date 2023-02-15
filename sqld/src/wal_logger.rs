@@ -144,7 +144,6 @@ impl WalLogger {
     pub const HEADER_SIZE: usize = 4096;
 
     pub fn open(path: impl AsRef<Path>) -> anyhow::Result<Self> {
-        let path = path.as_ref().join("wallog");
         let mut log_file = OpenOptions::new()
             .create(true)
             .write(true)
@@ -234,8 +233,8 @@ mod test {
 
     #[test]
     fn write_and_read_from_frame_log() {
-        let dir = tempfile::tempdir().unwrap();
-        let logger = WalLogger::open(dir.path()).unwrap();
+        let log_file = tempfile::NamedTempFile::new().unwrap();
+        let logger = WalLogger::open(log_file.path()).unwrap();
 
         assert_eq!(*logger.current_offset.lock(), WalLogger::HEADER_SIZE);
 
@@ -262,16 +261,16 @@ mod test {
 
     #[test]
     fn index_out_of_bounds() {
-        let dir = tempfile::tempdir().unwrap();
-        let logger = WalLogger::open(dir.path()).unwrap();
+        let log_file = tempfile::NamedTempFile::new().unwrap();
+        let logger = WalLogger::open(log_file.path()).unwrap();
         assert!(logger.get_entry(1).unwrap().is_none());
     }
 
     #[test]
     #[should_panic]
     fn incorrect_frame_size() {
-        let dir = tempfile::tempdir().unwrap();
-        let logger = WalLogger::open(dir.path()).unwrap();
+        let log_file = tempfile::NamedTempFile::new().unwrap();
+        let logger = WalLogger::open(log_file.path()).unwrap();
         let entry = WalLogEntry::Frame {
             page_no: 0,
             data: vec![0; 3].into(),
