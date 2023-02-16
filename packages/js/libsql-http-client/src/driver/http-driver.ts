@@ -1,6 +1,6 @@
 import fetch from "cross-fetch";
-import { ResultSet, BoundStatement, Params } from "../libsql-js";
-import { Driver } from "./Driver";
+import { ResultSet, BoundStatement, Params } from "../shared-types";
+import { Driver } from "./driver";
 
 export class HttpDriver implements Driver {
     private url: URL;
