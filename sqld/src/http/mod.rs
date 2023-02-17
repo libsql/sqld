@@ -177,6 +177,11 @@ async fn handle_query(
         Err(e) => return Ok(error(&e.to_string(), StatusCode::BAD_REQUEST)),
     };
 
+    let queries = Queries {
+        queries,
+        is_transactional: true,
+    };
+
     let msg = Message { queries, resp: s };
     let _ = sender.send(msg).await;
 
@@ -285,6 +290,11 @@ async fn load_dump(
                     params: Params::empty(),
                 });
             }
+
+            let queries = Queries {
+                queries,
+                is_transactional: true,
+            };
 
             let (resp, receiver) = oneshot::channel();
             let msg = Message { queries, resp };

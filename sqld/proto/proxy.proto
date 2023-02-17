@@ -5,6 +5,7 @@ message Queries {
     repeated Query queries = 1;
     // Uuid
     string clientId = 2;
+    bool is_transactional = 3;
 }
 
 message Query {

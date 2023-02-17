@@ -379,7 +379,15 @@ impl Params {
     }
 }
 
-pub type Queries = Vec<Query>;
+/// A batch of `Query`
+pub struct Queries {
+    pub queries: Vec<Query>,
+    /// Sould all the queries be part of the same transaction?
+    /// It does not mean the queries will be wrapped in transaction boundaries, but that any
+    /// failure should stop execution, and that any open transaction at the end of the batch will
+    /// be rollbacked.
+    pub is_transactional: bool,
+}
 
 #[cfg(test)]
 mod test {

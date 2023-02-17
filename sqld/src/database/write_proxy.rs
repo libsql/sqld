@@ -121,13 +121,14 @@ impl Database for WriteProxyDatabase {
     async fn execute_batch(&self, queries: query::Queries) -> Result<(Vec<QueryResult>, State)> {
         let mut state = self.state.lock().await;
         if *state == State::Init
-            && queries.iter().all(|q| q.stmt.is_read_only())
-            && final_state(*state, queries.iter().map(|s| &s.stmt)) == State::Init
+            && queries.queries.iter().all(|q| q.stmt.is_read_only())
+            && final_state(*state, queries.queries.iter().map(|s| &s.stmt)) == State::Init
         {
             self.read_db.execute_batch(queries).await
         } else {
             let queries = Queries {
                 queries: queries
+                    .queries
                     .into_iter()
                     .map(|q| {
                         Ok(Query {
@@ -137,6 +138,7 @@ impl Database for WriteProxyDatabase {
                     })
                     .collect::<Result<Vec<_>>>()?,
                 client_id: self.client_id.to_string(),
+                is_transactional: queries.is_transactional,
             };
             let mut client = self.write_proxy.clone();
             match client.execute(queries).await {

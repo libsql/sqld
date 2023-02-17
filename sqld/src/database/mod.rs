@@ -14,7 +14,11 @@ pub trait Database: Send + Sync {
     /// Executes a query (statement), and returns the result of the query and the state of the
     /// database connection after the query.
     async fn execute_one(&self, query: Query) -> Result<(QueryResult, State)> {
-        let (mut results, state) = self.execute_batch(vec![query]).await?;
+        let queries = Queries {
+            queries: vec![query],
+            is_transactional: false,
+        };
+        let (mut results, state) = self.execute_batch(queries).await?;
         let mut results = results.drain(..);
         Ok((results.next().unwrap(), state))
     }

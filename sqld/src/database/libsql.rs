@@ -245,15 +245,15 @@ impl LibSqlDb {
                 };
 
                 if !timedout {
-                    let mut results = Vec::with_capacity(queries.len());
-                    for query in queries {
+                    let mut results = Vec::with_capacity(queries.queries.len());
+                    for query in queries.queries {
                         let result = handle_query(&conn, query, &mut state);
                         results.push(result);
                     }
                     ok_or_exit!(resp.send((results, state.state)));
                 } else {
                     // fail all the queries in the batch with timeout error
-                    let errors = (0..queries.len())
+                    let errors = (0..queries.queries.len())
                         .map(|idx| Err(Error::LibSqlTxTimeout(idx)))
                         .collect();
                     ok_or_exit!(resp.send((errors, state.state)));
