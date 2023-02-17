@@ -380,6 +380,7 @@ impl Params {
 }
 
 /// A batch of `Query`
+#[derive(Debug)]
 pub struct Queries {
     pub queries: Vec<Query>,
     /// Sould all the queries be part of the same transaction?

@@ -2,18 +2,14 @@ syntax = "proto3";
 package proxy;
 
 message Queries {
-    repeated Query queries = 1;
-    // Uuid
+    repeated Query queries = 1; // Uuid
     string clientId = 2;
     bool is_transactional = 3;
 }
 
 message Query {
     string stmt = 1;
-    oneof Params {
-        Positional positional = 2;
-        Named named = 3;
-    }
+    oneof Params { Positional positional = 2; Named named = 3; }
 }
 
 message Positional {
@@ -81,8 +77,15 @@ message DisconnectMessage {
 
 message Ack {}
 
-message ExecuteResults {
+message QueryResults {
     repeated QueryResult results = 1;
+}
+
+message ExecuteResults {
+    oneof query_results {
+        QueryResults results = 1;
+        Error error = 3;
+    }
     enum State {
         Init = 0;
         Invalid = 1;

@@ -32,7 +32,7 @@ pub struct PgWireConnection<T, S> {
 
 impl<T, S> PgWireConnection<T, S>
 where
-    S: Service<Queries, Response = Vec<QueryResult>, Error = Error> + Sync + Send,
+    S: Service<Queries, Response = crate::Result<Vec<QueryResult>>, Error = Error> + Sync + Send,
     T: AsyncRead + AsyncWrite + Unpin + Send + Sync,
     S::Future: Send,
 {
@@ -124,7 +124,8 @@ where
     T: AsyncRead + AsyncWrite + AsyncPeekable + Unpin + Send + Sync + 'static,
     F: MakeService<(), Queries, MakeError = Error> + Sync,
     F::Future: 'static + Send,
-    F::Service: Service<Queries, Response = Vec<QueryResult>, Error = Error> + Sync + Send,
+    F::Service:
+        Service<Queries, Response = crate::Result<Vec<QueryResult>>, Error = Error> + Sync + Send,
     <F::Service as Service<Queries>>::Future: Send,
 {
     type Response = ();

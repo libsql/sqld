@@ -150,7 +150,7 @@ fn parse_queries(queries: Vec<QueryObject>) -> anyhow::Result<Vec<Query>> {
 /// Internal Message used to communicate between the HTTP service
 struct Message {
     queries: Queries,
-    resp: oneshot::Sender<Result<Vec<QueryResult>, BoxError>>,
+    resp: oneshot::Sender<Result<crate::Result<Vec<QueryResult>>, BoxError>>,
 }
 
 fn parse_payload(data: &[u8]) -> Result<HttpQuery, Response<Body>> {
@@ -187,13 +187,18 @@ async fn handle_query(
 
     let result = resp.await;
     match result {
-        Ok(Ok(rows)) => {
+        Ok(Ok(Ok(rows))) => {
             let json = query_response_to_json(rows)?;
             Ok(Response::builder()
                 .header("Content-Type", "application/json")
                 .body(Body::from(json))?)
         }
-        Err(_) | Ok(Err(_)) => Ok(error("internal error", StatusCode::INTERNAL_SERVER_ERROR)),
+        Ok(Ok(Err(e))) => Ok(error(&e.to_string(), StatusCode::INTERNAL_SERVER_ERROR)),
+        Err(_) => Ok(error("internal error", StatusCode::INTERNAL_SERVER_ERROR)),
+        Ok(Err(e)) => {
+            dbg!(e);
+            Ok(error("internal error", StatusCode::INTERNAL_SERVER_ERROR))
+        }
     }
 }
 
@@ -321,7 +326,7 @@ pub async fn run_http<F>(
 ) -> anyhow::Result<()>
 where
     F: MakeService<(), Queries> + Send + 'static,
-    F::Service: Load + Service<Queries, Response = Vec<QueryResult>, Error = Error>,
+    F::Service: Load + Service<Queries, Response = crate::Result<Vec<QueryResult>>, Error = Error>,
     <F::Service as Load>::Metric: std::fmt::Debug,
     F::MakeError: Into<BoxError>,
     F::Error: Into<BoxError>,

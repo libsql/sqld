@@ -14,7 +14,7 @@ use crate::query_analysis::{final_state, State};
 use crate::replication::client::PeriodicDbUpdater;
 use crate::rpc::proxy::rpc::proxy_client::ProxyClient;
 use crate::rpc::proxy::rpc::query_result::RowResult;
-use crate::rpc::proxy::rpc::{DisconnectMessage, Queries, Query};
+use crate::rpc::proxy::rpc::{self, DisconnectMessage, Queries, Query};
 use crate::rpc::replication_log::rpc::replication_log_client::ReplicationLogClient;
 use crate::Result;
 
@@ -118,7 +118,10 @@ impl WriteProxyDatabase {
 
 #[async_trait::async_trait]
 impl Database for WriteProxyDatabase {
-    async fn execute_batch(&self, queries: query::Queries) -> Result<(Vec<QueryResult>, State)> {
+    async fn execute_batch(
+        &self,
+        queries: query::Queries,
+    ) -> Result<(Result<Vec<QueryResult>>, State)> {
         let mut state = self.state.lock().await;
         if *state == State::Init
             && queries.queries.iter().all(|q| q.stmt.is_read_only())
@@ -145,19 +148,28 @@ impl Database for WriteProxyDatabase {
                 Ok(r) => {
                     let execute_result = r.into_inner();
                     *state = execute_result.state().into();
-                    let results = execute_result
-                        .results
-                        .into_iter()
-                        .map(|r| -> QueryResult {
-                            let result = r.row_result.unwrap();
-                            match result {
-                                RowResult::Row(res) => Ok(QueryResponse::ResultSet(res.into())),
-                                RowResult::Error(e) => Err(Error::RpcQueryError(e)),
-                            }
-                        })
-                        .collect();
+                    match execute_result.query_results.unwrap() {
+                        rpc::execute_results::QueryResults::Error(e) => {
+                            Ok((Err(Error::RpcQueryError(e)), *state))
+                        }
+                        rpc::execute_results::QueryResults::Results(results) => {
+                            let results = results
+                                .results
+                                .into_iter()
+                                .map(|r| -> QueryResult {
+                                    let result = r.row_result.unwrap();
+                                    match result {
+                                        RowResult::Row(res) => {
+                                            Ok(QueryResponse::ResultSet(res.into()))
+                                        }
+                                        RowResult::Error(e) => Err(Error::RpcQueryError(e)),
+                                    }
+                                })
+                                .collect();
 
-                    Ok((results, *state))
+                            Ok((Ok(results), *state))
+                        }
+                    }
                 }
                 Err(e) => {
                     // Set state to invalid, so next call is sent to remote, and we have a chance

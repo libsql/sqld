@@ -67,7 +67,7 @@ impl Drop for DbService {
 }
 
 impl Service<Queries> for DbService {
-    type Response = Vec<QueryResult>;
+    type Response = crate::Result<Vec<QueryResult>>;
     type Error = Error;
     type Future = BoxFuture<'static, Result<Self::Response, Self::Error>>;
 

@@ -208,10 +208,19 @@ impl Proxy for ProxyService {
             is_transactional,
         };
         let (results, state) = db.execute_batch(queries).await.unwrap();
-        let results = results.into_iter().map(|r| r.into()).collect();
+        let query_results = match results {
+            Ok(res) => {
+                let results = res.into_iter().map(|r| r.into()).collect();
+                Some(rpc::execute_results::QueryResults::Results(
+                    rpc::QueryResults { results },
+                ))
+            }
+
+            Err(e) => Some(rpc::execute_results::QueryResults::Error(e.into())),
+        };
 
         Ok(tonic::Response::new(ExecuteResults {
-            results,
+            query_results,
             state: State::from(state).into(),
         }))
     }
