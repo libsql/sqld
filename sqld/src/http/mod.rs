@@ -193,12 +193,8 @@ async fn handle_query(
                 .header("Content-Type", "application/json")
                 .body(Body::from(json))?)
         }
-        Ok(Ok(Err(e))) => Ok(error(&e.to_string(), StatusCode::INTERNAL_SERVER_ERROR)),
-        Err(_) => Ok(error("internal error", StatusCode::INTERNAL_SERVER_ERROR)),
-        Ok(Err(e)) => {
-            dbg!(e);
-            Ok(error("internal error", StatusCode::INTERNAL_SERVER_ERROR))
-        }
+        Ok(Ok(Err(e))) => Ok(error(&e.to_string(), StatusCode::BAD_REQUEST)),
+        Err(_) | Ok(Err(_)) => Ok(error("internal error", StatusCode::INTERNAL_SERVER_ERROR)),
     }
 }
 

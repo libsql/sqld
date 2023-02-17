@@ -275,7 +275,7 @@ impl LibSqlDb {
                 } else {
                     // fail all the queries in the batch with timeout error
                     let errors = (0..queries.queries.len())
-                        .map(|idx| Err(Error::LibSqlTxTimeout(idx)))
+                        .map(|_| Err(Error::LibSqlTxTimeout))
                         .collect();
                     ok_or_exit!(resp.send((Ok(errors), state.state)));
                     timedout = false;
@@ -292,7 +292,7 @@ impl Database for LibSqlDb {
     async fn execute_batch(&self, queries: Queries) -> Result<(Result<Vec<QueryResult>>, State)> {
         let (resp, receiver) = oneshot::channel();
         let msg = Message { queries, resp };
-        if let Err(e) = dbg!(self.sender.send(msg)) {
+        if let Err(e) = self.sender.send(msg) {
             tracing::error!("failed to execute queries on database: {e}");
         }
 

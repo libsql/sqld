@@ -1,0 +1,7 @@
+---
+source: testing/end-to-end/integration/basic_cluster/simple.rs
+expression: "resp.json::<serde_json::Value>().await.unwrap()"
+---
+{
+  "error": "no such table: not_exist"
+}

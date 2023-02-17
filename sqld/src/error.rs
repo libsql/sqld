@@ -1,16 +1,16 @@
+use crate::rpc;
+
 #[allow(clippy::enum_variant_names)]
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error("LibSQL failed to bind provided query parameters: `{0}`")]
     LibSqlInvalidQueryParams(anyhow::Error),
-    #[error("Transaction timed-out when evaluating query no. `{0}`")]
-    LibSqlTxTimeout(usize),
+    #[error("Transaction timed-out")]
+    LibSqlTxTimeout,
     #[error("Server can't handle additional transactions")]
     LibSqlTxBusy,
     #[error(transparent)]
     IOError(#[from] std::io::Error),
-    #[error(transparent)]
-    RusqliteError(#[from] rusqlite::Error),
     #[error("Failed to execute query via RPC. Error code: {}, message: {}", .0.code, .0.message)]
     RpcQueryError(crate::rpc::proxy::rpc::Error),
     #[error("Failed to execute queries via RPC protocol: `{0}`")]
@@ -23,6 +23,8 @@ pub enum Error {
     Internal(String),
     #[error("Transactional batch left in a dangling transaction state: aborting.")]
     DanglingTxn,
+    #[error("{0}")]
+    SqlError(String),
 }
 
 impl From<tokio::sync::oneshot::error::RecvError> for Error {
@@ -33,8 +35,25 @@ impl From<tokio::sync::oneshot::error::RecvError> for Error {
     }
 }
 
+impl From<rusqlite::Error> for Error {
+    fn from(e: rusqlite::Error) -> Self {
+        Self::SqlError(e.to_string())
+    }
+}
+
 impl From<bincode::Error> for Error {
     fn from(other: bincode::Error) -> Self {
         Self::Internal(other.to_string())
+    }
+}
+
+impl From<rpc::proxy::rpc::Error> for Error {
+    fn from(e: rpc::proxy::rpc::Error) -> Self {
+        match e.code() {
+            rpc::proxy::rpc::error::ErrorCode::SqlError => Self::SqlError(e.message),
+            rpc::proxy::rpc::error::ErrorCode::TxBusy => Self::LibSqlTxBusy,
+            rpc::proxy::rpc::error::ErrorCode::TxTimeout => Self::LibSqlTxTimeout,
+            rpc::proxy::rpc::error::ErrorCode::Internal => Self::Internal(e.message),
+        }
     }
 }

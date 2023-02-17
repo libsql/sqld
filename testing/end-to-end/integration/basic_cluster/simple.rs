@@ -128,7 +128,7 @@ async fn transactional_batch_rollback(app: App) {
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status(), 200);
+    assert_eq!(resp.status(), 400);
     insta::assert_json_snapshot!(resp.json::<serde_json::Value>().await.unwrap());
 
     // ensure test table was not created
@@ -141,7 +141,7 @@ async fn transactional_batch_rollback(app: App) {
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status(), 400);
+    assert_eq!(resp.status(), 200);
     insta::assert_json_snapshot!(resp.json::<serde_json::Value>().await.unwrap());
 }
 

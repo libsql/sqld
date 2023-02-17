@@ -150,7 +150,7 @@ impl Database for WriteProxyDatabase {
                     *state = execute_result.state().into();
                     match execute_result.query_results.unwrap() {
                         rpc::execute_results::QueryResults::Error(e) => {
-                            Ok((Err(Error::RpcQueryError(e)), *state))
+                            return Ok((Err(e.into()), *state))
                         }
                         rpc::execute_results::QueryResults::Results(results) => {
                             let results = results

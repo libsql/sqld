@@ -73,17 +73,8 @@ pub enum ResponseError {
     TransactionTimeout,
     #[error("Server cannot handle additional transactions")]
     TransactionBusy,
-    #[error("SQLite error: {source}: {message:?}")]
-    SqliteError {
-        source: rusqlite::ffi::Error,
-        message: Option<String>,
-    },
-    #[error("SQL input error: {source}: {message:?} at offset {offset}")]
-    SqlInputError {
-        source: rusqlite::ffi::Error,
-        message: String,
-        offset: i32,
-    },
+    #[error("SQLite error: {message:?}")]
+    SqliteError { message: Option<String> },
 }
 
 pub(super) async fn handle_hello(server: &Server, jwt: Option<String>) -> Result<Session> {
@@ -278,25 +269,9 @@ fn proto_value_from_value(value: Value) -> proto::Value {
 fn proto_response_error_from_error(error: Error) -> Result<ResponseError, Error> {
     Ok(match error {
         Error::LibSqlInvalidQueryParams(source) => ResponseError::ArgsInvalid { source },
-        Error::LibSqlTxTimeout(_) => ResponseError::TransactionTimeout,
+        Error::LibSqlTxTimeout => ResponseError::TransactionTimeout,
         Error::LibSqlTxBusy => ResponseError::TransactionBusy,
-        Error::RusqliteError(rusqlite_error) => match rusqlite_error {
-            rusqlite::Error::SqliteFailure(sqlite_error, message) => ResponseError::SqliteError {
-                source: sqlite_error,
-                message,
-            },
-            rusqlite::Error::SqlInputError {
-                error: sqlite_error,
-                msg: message,
-                offset,
-                ..
-            } => ResponseError::SqlInputError {
-                source: sqlite_error,
-                message,
-                offset,
-            },
-            rusqlite_error => return Err(Error::RusqliteError(rusqlite_error)),
-        },
+        Error::SqlError(e) => ResponseError::SqliteError { message: Some(e) },
         error => return Err(error),
     })
 }

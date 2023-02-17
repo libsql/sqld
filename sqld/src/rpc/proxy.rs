@@ -44,10 +44,17 @@ pub mod rpc {
     impl From<SqldError> for ErrorCode {
         fn from(other: SqldError) -> Self {
             match other {
-                SqldError::LibSqlInvalidQueryParams(_) => ErrorCode::SqlError,
-                SqldError::LibSqlTxTimeout(_) => ErrorCode::TxTimeout,
+                SqldError::LibSqlInvalidQueryParams(_) | SqldError::SqlError(_) => {
+                    ErrorCode::SqlError
+                }
+                SqldError::LibSqlTxTimeout => ErrorCode::TxTimeout,
                 SqldError::LibSqlTxBusy => ErrorCode::TxBusy,
-                _ => ErrorCode::Internal,
+                SqldError::IOError(_)
+                | SqldError::DbValueError(_)
+                | SqldError::RpcQueryError(_)
+                | SqldError::Internal(_)
+                | SqldError::DanglingTxn
+                | SqldError::RpcQueryExecutionError(_) => ErrorCode::Internal,
             }
         }
     }
@@ -207,7 +214,10 @@ impl Proxy for ProxyService {
             queries,
             is_transactional,
         };
-        let (results, state) = db.execute_batch(queries).await.unwrap();
+        let (results, state) = db
+            .execute_batch(queries)
+            .await
+            .map_err(|e| tonic::Status::new(tonic::Code::Internal, e.to_string()))?;
         let query_results = match results {
             Ok(res) => {
                 let results = res.into_iter().map(|r| r.into()).collect();

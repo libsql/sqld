@@ -19,7 +19,7 @@ impl From<Error> for PgWireError {
             Error::LibSqlTxBusy => {
                 PgWireError::IoError(io::Error::new(io::ErrorKind::WouldBlock, other.to_string()))
             }
-            Error::LibSqlTxTimeout(_) => PgWireError::UserError(Box::new(ErrorInfo::new(
+            Error::LibSqlTxTimeout => PgWireError::UserError(Box::new(ErrorInfo::new(
                 "ERROR".to_owned(),
                 "XX000".to_owned(),
                 other.to_string(),
