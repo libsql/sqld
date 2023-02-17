@@ -7,5 +7,5 @@ libsql-test:
 .PHONY: libsq-test
 
 packages-test:
-	@cd packages/js/libsql-client && npm i && npm run build && npm test
+	@cd packages/js/libsql-client/ && yarn install && yarn build && yarn test
 .PHONY: packages-test

@@ -11,7 +11,7 @@
   "repository": {
     "type": "git",
     "url": "git+https://github.com/libsql/sqld.git",
-    "directory": "packages/libsql-http-client"
+    "directory": "packages/js/libsql-client/packages/libsql-http-client"
   },
   "keywords": [
     "libsql",
