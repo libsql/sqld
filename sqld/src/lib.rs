@@ -1,5 +1,6 @@
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::pin::Pin;
 use std::sync::Arc;
 #[cfg(feature = "mwal_backend")]
 use std::sync::Mutex;
@@ -9,13 +10,14 @@ use anyhow::Context as AnyhowContext;
 use database::libsql::LibSqlDb;
 use database::service::DbFactoryService;
 use database::write_proxy::WriteProxyDbFactory;
+use futures::pin_mut;
 use once_cell::sync::Lazy;
 #[cfg(feature = "mwal_backend")]
 use once_cell::sync::OnceCell;
 use replication::logger::{ReplicationLogger, ReplicationLoggerHook};
 use rpc::run_rpc_server;
+use system::System;
 use tokio::sync::Notify;
-use tokio::task::JoinSet;
 use tower::load::Constant;
 use tower::ServiceExt;
 
@@ -34,6 +36,7 @@ mod query_analysis;
 mod replication;
 pub mod rpc;
 mod server;
+mod system;
 
 #[derive(clap::ValueEnum, Clone, Debug, PartialEq)]
 pub enum Backend {
@@ -86,7 +89,7 @@ pub struct Config {
 async fn run_service(
     service: DbFactoryService,
     config: &Config,
-    join_set: &mut JoinSet<anyhow::Result<()>>,
+    system: &System,
 ) -> anyhow::Result<()> {
     let mut server = Server::new();
 
@@ -98,33 +101,38 @@ async fn run_service(
         server.bind_ws(addr).await?;
     }
 
-    let factory = PgConnectionFactory::new(service.clone());
-    join_set.spawn(server.serve(factory));
+    if config.ws_addr.is_some() || config.tcp_addr.is_some() {
+        let factory = PgConnectionFactory::new(service.clone());
+        system.register(server.serve(factory), "pgwire server");
+    }
 
     if let Some(addr) = config.http_addr {
         let authorizer = http::auth::parse_auth(config.http_auth.clone())
             .context("failed to parse HTTP auth config")?;
-        join_set.spawn(http::run_http(
-            addr,
-            authorizer,
-            service.map_response(|s| Constant::new(s, 1)),
-            config.enable_http_console,
-            config.idle_shutdown_timeout,
-        ));
+        system.register(
+            http::run_http(
+                addr,
+                authorizer,
+                service.map_response(|s| Constant::new(s, 1)),
+                config.enable_http_console,
+                config.idle_shutdown_timeout,
+            ),
+            "http server",
+        );
     }
 
     Ok(())
 }
 
 /// nukes current DB and start anew
-async fn hard_reset(
-    config: &Config,
-    mut join_set: JoinSet<anyhow::Result<()>>,
-) -> anyhow::Result<()> {
+async fn hard_reset(config: &Config, mut system: Pin<&mut System>) -> anyhow::Result<()> {
     tracing::error!("received hard-reset command: reseting replica.");
 
     tracing::info!("Shutting down all services...");
-    join_set.shutdown().await;
+    system.shutdown();
+    pin_mut!(system);
+    let _ = system.await;
+
     tracing::info!("All services have been shut down.");
 
     let db_path = &config.db_path;
@@ -133,11 +141,7 @@ async fn hard_reset(
     Ok(())
 }
 
-async fn start_primary(
-    config: &Config,
-    join_set: &mut JoinSet<anyhow::Result<()>>,
-    addr: &str,
-) -> anyhow::Result<()> {
+async fn start_primary(config: &Config, system: &System, addr: &str) -> anyhow::Result<()> {
     let (factory, handle) = WriteProxyDbFactory::new(
         addr,
         config.writer_rpc_tls,
@@ -152,18 +156,18 @@ async fn start_primary(
     // the `JoinSet` does not support inserting arbitrary `JoinHandles` (and it also does not
     // support spawning blocking tasks, so we must spawn a proxy task to add the `handle` to
     // `join_set`
-    join_set.spawn(async move { handle.await.expect("WriteProxy DB task failed") });
+    system.register(
+        async move { handle.await.expect("WriteProxy DB task failed") },
+        "write proxy db task",
+    );
 
     let service = DbFactoryService::new(Arc::new(factory));
-    run_service(service, config, join_set).await?;
+    run_service(service, config, system).await?;
 
     Ok(())
 }
 
-async fn start_replica(
-    config: &Config,
-    join_set: &mut JoinSet<anyhow::Result<()>>,
-) -> anyhow::Result<()> {
+async fn start_replica(config: &Config, system: &System) -> anyhow::Result<()> {
     let logger = Arc::new(ReplicationLogger::open(&config.db_path)?);
     let logger_clone = logger.clone();
     let path_clone = config.db_path.clone();
@@ -175,18 +179,21 @@ async fn start_replica(
     });
     let service = DbFactoryService::new(db_factory.clone());
     if let Some(ref addr) = config.rpc_server_addr {
-        join_set.spawn(run_rpc_server(
-            *addr,
-            config.rpc_server_tls,
-            config.rpc_server_cert.clone(),
-            config.rpc_server_key.clone(),
-            config.rpc_server_ca_cert.clone(),
-            db_factory,
-            logger_clone,
-        ));
+        system.register(
+            run_rpc_server(
+                *addr,
+                config.rpc_server_tls,
+                config.rpc_server_cert.clone(),
+                config.rpc_server_key.clone(),
+                config.rpc_server_ca_cert.clone(),
+                db_factory,
+                logger_clone,
+            ),
+            "rpc server",
+        );
     }
 
-    run_service(service, config, join_set).await?;
+    run_service(service, config, system).await?;
 
     Ok(())
 }
@@ -231,26 +238,28 @@ pub async fn run_server(config: Config) -> anyhow::Result<()> {
         if !config.db_path.exists() {
             std::fs::create_dir_all(&config.db_path)?;
         }
-        let mut join_set = JoinSet::new();
+        let system = System::new();
 
         match config.writer_rpc_addr {
-            Some(ref addr) => start_primary(&config, &mut join_set, addr).await?,
-            None => start_replica(&config, &mut join_set).await?,
+            Some(ref addr) => start_primary(&config, &system, addr).await?,
+            None => start_replica(&config, &system).await?,
         }
 
         let reset = HARD_RESET.clone();
         let shutdown = SHUTDOWN.clone();
         loop {
+            pin_mut!(system);
             tokio::select! {
                 _ = reset.notified() => {
-                    hard_reset(&config, join_set).await?;
+                    hard_reset(&config, system).await?;
                     break;
                 },
                 _ = shutdown.notified() => {
                     return Ok(())
                 }
-                Some(res) = join_set.join_next() => {
-                    res??;
+                res = &mut system => {
+                    dbg!(&res);
+                    return res;
                 },
                 else => return Ok(()),
             }

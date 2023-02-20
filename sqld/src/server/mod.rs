@@ -1,3 +1,4 @@
+use std::fmt::Debug;
 use std::future::poll_fn;
 use std::net::SocketAddr;
 use std::pin::Pin;
@@ -58,7 +59,7 @@ impl Server {
         loop {
             tokio::select! {
                 conn = listeners.next() => {
-                    match conn {
+                    match dbg!(conn) {
                         Some(Ok((stream, addr))) => {
                             if poll_fn(|c| make_svc.poll_ready(c)).await.is_err() {
                                 eprintln!("there was an error!");
@@ -79,6 +80,7 @@ impl Server {
             }
         }
 
+        dbg!();
         Ok(())
     }
 }
@@ -96,6 +98,15 @@ pin_project_lite::pin_project! {
         Ws {
             #[pin]
             stream: WsStreamAdapter<TcpStream>,
+        }
+    }
+}
+
+impl Debug for NetStream {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Tcp { .. } => f.debug_struct("Tcp").finish(),
+            Self::Ws { .. } => f.debug_struct("Ws").finish(),
         }
     }
 }
