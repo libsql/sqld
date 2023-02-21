@@ -2,8 +2,10 @@ use anyhow::Context;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
+use tower::util::option_layer;
 
 use crate::database::service::DbFactory;
+use crate::http::services::idle_shutdown::IdleShutdownLayer;
 use crate::replication::logger::ReplicationLogger;
 use crate::rpc::proxy::rpc::proxy_server::ProxyServer;
 use crate::rpc::proxy::ProxyService;
@@ -13,6 +15,7 @@ use crate::rpc::replication_log::ReplicationLogService;
 pub mod proxy;
 pub mod replication_log;
 
+#[allow(clippy::too_many_arguments)]
 pub async fn run_rpc_server(
     addr: SocketAddr,
     tls: bool,
@@ -21,6 +24,7 @@ pub async fn run_rpc_server(
     ca_cert_path: Option<PathBuf>,
     factory: Arc<dyn DbFactory>,
     logger: Arc<ReplicationLogger>,
+    idle_shutdown_layer: Option<IdleShutdownLayer>,
 ) -> anyhow::Result<()> {
     let proxy_service = ProxyService::new(factory);
     let logger_service = ReplicationLogService::new(logger);
@@ -44,6 +48,7 @@ pub async fn run_rpc_server(
             .context("Failed to read the TSL config of RPC server")?;
     }
     builder
+        .layer(&option_layer(idle_shutdown_layer))
         .add_service(ProxyServer::new(proxy_service))
         .add_service(ReplicationLogServer::new(logger_service))
         .serve(addr)

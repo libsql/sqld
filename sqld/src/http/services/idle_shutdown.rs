@@ -9,6 +9,7 @@ use tower::{Layer, Service};
 
 use crate::system::Task;
 
+#[derive(Clone)]
 pub struct IdleShutdownLayer {
     last_req: Arc<AtomicInstant>,
 }
@@ -43,7 +44,8 @@ impl Task for IdleShutdownFut {
             tracing::info!("Http idle timeout: requesting shutdown.");
             return Poll::Ready(());
         } else {
-            let elapsed_since_last_req = Instant::now() - self.last_req_ts.last_req();
+            let elapsed_since_last_req =
+                Instant::now().saturating_duration_since(self.last_req_ts.last_req());
             let timeout = tokio::time::interval_at(
                 tokio::time::Instant::now() + self.timeout.saturating_sub(elapsed_since_last_req),
                 self.timeout,
@@ -63,7 +65,7 @@ impl Task for IdleShutdownFut {
         self: Pin<&mut Self>,
         _cx: &mut std::task::Context,
     ) -> Poll<anyhow::Result<()>> {
-        return Poll::Ready(Ok(()));
+        Poll::Ready(Ok(()))
     }
 }
 
@@ -83,7 +85,7 @@ impl AtomicInstant {
     }
 
     fn update(&self) {
-        let elapsed = self.base.duration_since(Instant::recent());
+        let elapsed = Instant::recent().saturating_duration_since(self.base);
         self.last.store(elapsed.as_secs(), Ordering::Relaxed);
     }
 

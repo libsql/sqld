@@ -116,17 +116,11 @@ impl System {
             return count_ready > 0;
         }
 
-        return false;
+        false
     }
 
     fn try_shutdown(&mut self) {
-        if self
-            .subsystems
-            .iter_mut()
-            .all(|s| s.subsystem.shutdown_ready())
-        {
-            self.shutting_down = true;
-        }
+        self.shutting_down = self.subsystems.iter().all(|s| s.subsystem.shutdown_ready());
     }
 }
 
@@ -156,15 +150,15 @@ impl Future for System {
             }
 
             if count == 0 {
-                return Poll::Ready(Ok(()));
+                Poll::Ready(Ok(()))
             } else {
                 Poll::Pending
             }
         } else {
             let this = self.project();
             match ready!(this.subsystems.poll_next(cx)) {
-                None => return Poll::Ready(Ok(())),
-                Some(ret) => return Poll::Ready(ret),
+                None => Poll::Ready(Ok(())),
+                Some(ret) => Poll::Ready(ret),
             }
         }
     }

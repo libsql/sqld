@@ -89,6 +89,7 @@ async fn run_service(
     service: DbFactoryService,
     config: &Config,
     system: &System,
+    shutdown_layer: Option<IdleShutdownLayer>,
 ) -> anyhow::Result<()> {
     let mut server = Server::new();
 
@@ -108,15 +109,6 @@ async fn run_service(
     if let Some(addr) = config.http_addr {
         let authorizer = http::auth::parse_auth(config.http_auth.clone())
             .context("failed to parse HTTP auth config")?;
-
-        let shutdown_layer = match config.idle_shutdown_timeout {
-            Some(timeout) => {
-                let (layer, subsystem) = IdleShutdownLayer::create_pair(timeout);
-                system.register(subsystem, "http timeout layer");
-                Some(layer)
-            }
-            None => None,
-        };
 
         system.register(
             http::run_http(
@@ -150,7 +142,12 @@ async fn hard_reset(config: &Config, mut system: Pin<&mut System>) -> anyhow::Re
     Ok(())
 }
 
-async fn start_primary(config: &Config, system: &System, addr: &str) -> anyhow::Result<()> {
+async fn start_primary(
+    config: &Config,
+    system: &System,
+    addr: &str,
+    shutdown_layer: Option<IdleShutdownLayer>,
+) -> anyhow::Result<()> {
     let (factory, handle) = WriteProxyDbFactory::new(
         addr,
         config.writer_rpc_tls,
@@ -171,12 +168,16 @@ async fn start_primary(config: &Config, system: &System, addr: &str) -> anyhow::
     );
 
     let service = DbFactoryService::new(Arc::new(factory));
-    run_service(service, config, system).await?;
+    run_service(service, config, system, shutdown_layer).await?;
 
     Ok(())
 }
 
-async fn start_replica(config: &Config, system: &System) -> anyhow::Result<()> {
+async fn start_replica(
+    config: &Config,
+    system: &System,
+    shutdown_layer: Option<IdleShutdownLayer>,
+) -> anyhow::Result<()> {
     let logger = Arc::new(ReplicationLogger::open(&config.db_path)?);
     let logger_clone = logger.clone();
     let path_clone = config.db_path.clone();
@@ -197,12 +198,13 @@ async fn start_replica(config: &Config, system: &System) -> anyhow::Result<()> {
                 config.rpc_server_ca_cert.clone(),
                 db_factory,
                 logger_clone,
+                shutdown_layer.clone(),
             ),
             "rpc server",
         );
     }
 
-    run_service(service, config, system).await?;
+    run_service(service, config, system, shutdown_layer).await?;
 
     Ok(())
 }
@@ -249,9 +251,18 @@ pub async fn run_server(config: Config) -> anyhow::Result<()> {
         }
         let system = System::new();
 
+        let shutdown_layer = match config.idle_shutdown_timeout {
+            Some(timeout) => {
+                let (layer, subsystem) = IdleShutdownLayer::create_pair(timeout);
+                system.register(subsystem, "http timeout layer");
+                Some(layer)
+            }
+            None => None,
+        };
+
         match config.writer_rpc_addr {
-            Some(ref addr) => start_primary(&config, &system, addr).await?,
-            None => start_replica(&config, &system).await?,
+            Some(ref addr) => start_primary(&config, &system, addr, shutdown_layer).await?,
+            None => start_replica(&config, &system, shutdown_layer).await?,
         }
 
         let reset = HARD_RESET.clone();
