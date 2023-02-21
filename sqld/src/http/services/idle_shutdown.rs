@@ -1,40 +1,106 @@
+use std::pin::Pin;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::task::Poll;
 use std::time::Duration;
 
-use tokio::sync::{watch, Notify};
-use tokio::time::timeout;
+use quanta::Instant;
 use tower::{Layer, Service};
 
+use crate::system::Task;
+
 pub struct IdleShutdownLayer {
-    watcher: Arc<watch::Sender<()>>,
+    last_req: Arc<AtomicInstant>,
+}
+
+pub struct IdleShutdownFut {
+    timeout: Duration,
+    last_req_ts: Arc<AtomicInstant>,
+    timeout_fut: tokio::time::Interval,
+}
+
+impl IdleShutdownFut {
+    fn new(timeout: Duration, last_req_ts: Arc<AtomicInstant>) -> Self {
+        Self {
+            timeout,
+            last_req_ts,
+            timeout_fut: tokio::time::interval_at(tokio::time::Instant::now() + timeout, timeout),
+        }
+    }
+
+    fn timed_out(&self) -> bool {
+        Instant::now() - self.timeout > self.last_req_ts.last_req()
+    }
+}
+
+impl Task for IdleShutdownFut {
+    fn poll_run(self: Pin<&mut Self>, _cx: &mut std::task::Context) -> Poll<anyhow::Result<()>> {
+        Poll::Pending
+    }
+
+    fn poll_notify_shutdown(mut self: Pin<&mut Self>, cx: &mut std::task::Context) -> Poll<()> {
+        if self.timed_out() {
+            tracing::info!("Http idle timeout: requesting shutdown.");
+            return Poll::Ready(());
+        } else {
+            let elapsed_since_last_req = Instant::now() - self.last_req_ts.last_req();
+            let timeout = tokio::time::interval_at(
+                tokio::time::Instant::now() + self.timeout.saturating_sub(elapsed_since_last_req),
+                self.timeout,
+            );
+            self.timeout_fut = timeout;
+        }
+        // register context
+        let _ = self.timeout_fut.poll_tick(cx);
+        Poll::Pending
+    }
+
+    fn shutdown_ready(&self) -> bool {
+        self.timed_out()
+    }
+
+    fn poll_shutdown(
+        self: Pin<&mut Self>,
+        _cx: &mut std::task::Context,
+    ) -> Poll<anyhow::Result<()>> {
+        return Poll::Ready(Ok(()));
+    }
+}
+
+struct AtomicInstant {
+    base: Instant,
+    /// offset in secs since last updated
+    last: AtomicU64,
+}
+
+impl AtomicInstant {
+    fn now() -> Self {
+        let base = Instant::recent();
+        Self {
+            base,
+            last: AtomicU64::new(0),
+        }
+    }
+
+    fn update(&self) {
+        let elapsed = self.base.duration_since(Instant::recent());
+        self.last.store(elapsed.as_secs(), Ordering::Relaxed);
+    }
+
+    fn last_req(&self) -> Instant {
+        self.base + Duration::from_secs(self.last.load(Ordering::Relaxed))
+    }
 }
 
 impl IdleShutdownLayer {
-    pub fn new(idle_timeout: Duration, shutdown_notifier: Arc<Notify>) -> Self {
-        let (sender, mut receiver) = watch::channel(());
-        tokio::spawn(async move {
-            loop {
-                // FIXME: if we measure that this is causing performance issues, we may want to
-                // implement some debouncing.
-                let timeout_fut = timeout(idle_timeout, receiver.changed());
-                match timeout_fut.await {
-                    Ok(Ok(_)) => continue,
-                    Ok(Err(_)) => break,
-                    Err(_) => {
-                        tracing::info!(
-                            "Idle timeout, no new connection in {idle_timeout:.0?}. Shutting down.",
-                        );
-                        shutdown_notifier.notify_waiters();
-                    }
-                }
-            }
+    pub fn create_pair(idle_timeout: Duration) -> (IdleShutdownLayer, IdleShutdownFut) {
+        let instant = Arc::new(AtomicInstant::now());
+        let layer = IdleShutdownLayer {
+            last_req: instant.clone(),
+        };
+        let subsystem = IdleShutdownFut::new(idle_timeout, instant);
 
-            tracing::debug!("idle shutdown loop exited");
-        });
-
-        Self {
-            watcher: Arc::new(sender),
-        }
+        (layer, subsystem)
     }
 }
 
@@ -44,7 +110,7 @@ impl<S> Layer<S> for IdleShutdownLayer {
     fn layer(&self, inner: S) -> Self::Service {
         IdleShutdownService {
             inner,
-            watcher: self.watcher.clone(),
+            last_req: self.last_req.clone(),
         }
     }
 }
@@ -52,7 +118,7 @@ impl<S> Layer<S> for IdleShutdownLayer {
 #[derive(Clone)]
 pub struct IdleShutdownService<S> {
     inner: S,
-    watcher: Arc<watch::Sender<()>>,
+    last_req: Arc<AtomicInstant>,
 }
 
 impl<Req, S> Service<Req> for IdleShutdownService<S>
@@ -73,7 +139,7 @@ where
     }
 
     fn call(&mut self, req: Req) -> Self::Future {
-        let _ = self.watcher.send(());
+        self.last_req.update();
         self.inner.call(req)
     }
 }

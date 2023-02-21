@@ -3802,6 +3802,7 @@ dependencies = [
  "proptest",
  "prost",
  "prost-build",
+ "quanta",
  "rand",
  "regex",
  "rusqlite",

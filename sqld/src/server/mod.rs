@@ -59,7 +59,7 @@ impl Server {
         loop {
             tokio::select! {
                 conn = listeners.next() => {
-                    match dbg!(conn) {
+                    match conn {
                         Some(Ok((stream, addr))) => {
                             if poll_fn(|c| make_svc.poll_ready(c)).await.is_err() {
                                 eprintln!("there was an error!");
@@ -80,7 +80,6 @@ impl Server {
             }
         }
 
-        dbg!();
         Ok(())
     }
 }

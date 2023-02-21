@@ -11,6 +11,7 @@ use database::libsql::LibSqlDb;
 use database::service::DbFactoryService;
 use database::write_proxy::WriteProxyDbFactory;
 use futures::pin_mut;
+use http::services::idle_shutdown::IdleShutdownLayer;
 use once_cell::sync::Lazy;
 #[cfg(feature = "mwal_backend")]
 use once_cell::sync::OnceCell;
@@ -53,8 +54,6 @@ type Result<T> = std::result::Result<T, Error>;
 ///
 /// /!\ use with caution.
 pub(crate) static HARD_RESET: Lazy<Arc<Notify>> = Lazy::new(|| Arc::new(Notify::new()));
-/// Clean shutdown of the server.
-pub(crate) static SHUTDOWN: Lazy<Arc<Notify>> = Lazy::new(|| Arc::new(Notify::new()));
 
 #[cfg(feature = "mwal_backend")]
 pub(crate) static VWAL_METHODS: OnceCell<
@@ -109,13 +108,23 @@ async fn run_service(
     if let Some(addr) = config.http_addr {
         let authorizer = http::auth::parse_auth(config.http_auth.clone())
             .context("failed to parse HTTP auth config")?;
+
+        let shutdown_layer = match config.idle_shutdown_timeout {
+            Some(timeout) => {
+                let (layer, subsystem) = IdleShutdownLayer::create_pair(timeout);
+                system.register(subsystem, "http timeout layer");
+                Some(layer)
+            }
+            None => None,
+        };
+
         system.register(
             http::run_http(
                 addr,
                 authorizer,
                 service.map_response(|s| Constant::new(s, 1)),
                 config.enable_http_console,
-                config.idle_shutdown_timeout,
+                shutdown_layer,
             ),
             "http server",
         );
@@ -246,7 +255,6 @@ pub async fn run_server(config: Config) -> anyhow::Result<()> {
         }
 
         let reset = HARD_RESET.clone();
-        let shutdown = SHUTDOWN.clone();
         loop {
             pin_mut!(system);
             tokio::select! {
@@ -254,11 +262,7 @@ pub async fn run_server(config: Config) -> anyhow::Result<()> {
                     hard_reset(&config, system).await?;
                     break;
                 },
-                _ = shutdown.notified() => {
-                    return Ok(())
-                }
                 res = &mut system => {
-                    dbg!(&res);
                     return res;
                 },
                 else => return Ok(()),
