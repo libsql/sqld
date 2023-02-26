@@ -94,7 +94,7 @@ Note that until a stable version is released, it is provided as a separate tap, 
 ### Dependencies
 
 **Linux:**
-
+ Tested on CentOS Stream 9, Fedora 34+, MacOS with brew  and ubuntu 20+
 ```console
 ./scripts/install-deps.sh
 ```
