@@ -26,8 +26,21 @@ if [[ "$OSTYPE" == "linux-gnu"* ]]; then
       rubygem-bundler \
       rubygem-sqlite3 \
       ruby-devel
+  elif [ "$ID" = "centos" ] && [ "$VERSION" = "9" ]; then
+     dnf install -y \
+      make \
+      gcc \
+      clang-devel \
+      libpq-devel \
+      nodejs \
+      npm \
+      protobuf-compiler \
+      rubygem-bundler \
+      ruby-devel \
+      openssl-devel \
+      sqlite-devel
   else
-    echo "Linux distribution $ID is not supported by this installer."
+    echo "Linux distribution $ID $VERSION is not supported by this installer."
   fi
 elif [[ "$OSTYPE" == "darwin"* ]]; then
   brew install protobuf
