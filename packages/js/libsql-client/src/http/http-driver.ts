@@ -3,9 +3,15 @@ import { ResultSet, BoundStatement, Params } from "../shared-types.js";
 import { Driver } from "./../driver.js";
 import { Base64 } from "js-base64";
 
+const compatibleFetch = typeof fetch === "function" ? fetch : crossFetch;
+const versionMatcher = /(\d+).(\d+).(\d+)/;
+
+type Version = [number, number, number];
+
 export class HttpDriver implements Driver {
     private url: URL;
     private authHeader: string | undefined;
+    private version: Version | undefined;
 
     constructor(url: URL) {
         if (url.username !== "" || url.password !== "") {
@@ -44,8 +50,8 @@ export class HttpDriver implements Driver {
             };
         }
 
-        const compatibleFetch = typeof fetch === "function" ? fetch : crossFetch;
-        const response = await compatibleFetch(this.url, reqParams);
+        const queryUrl = await this.queryUrl();
+        const response = await compatibleFetch(queryUrl, reqParams);
         if (response.status === 200) {
             const results = await response.json();
             validateTopLevelResults(results, statements.statements.length);
@@ -68,6 +74,42 @@ export class HttpDriver implements Driver {
             }
             throw new Error(`${response.status} ${response.statusText}`);
         }
+    }
+
+    private async queryUrl(): Promise<URL> {
+        if (this.version === undefined) {
+            this.version = await this.getVersion();
+            return this.queryUrl();
+        }
+
+        // perform version check when when the version is known.
+        return this.url;
+    }
+
+    async getVersion(): Promise<Version> {
+        let versionUrl = new URL("/version", this.url);
+        let resp = await compatibleFetch(versionUrl, {
+            method: "GET",
+        });
+
+        if (resp.status == 200) {
+            const versionStr = await resp.text();
+            const matches = versionMatcher.exec(versionStr);
+            if (matches === null) {
+                throw new Error(`invalid version format from server: ${versionStr}`);
+            }
+
+            let versionNums = matches.slice(1).map(x => parseInt(x, 10));
+            return [versionNums[0], versionNums[1], versionNums[2]];
+        }
+
+        // handle pre-version route
+        if (resp.status == 404) {
+            // dummy version < to any other version.
+            return [0, 0, 0]
+        }
+
+        throw new Error(await resp.text());
     }
 }
 
