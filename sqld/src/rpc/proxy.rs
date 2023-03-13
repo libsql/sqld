@@ -7,7 +7,7 @@ use uuid::Uuid;
 
 use crate::database::service::DbFactory;
 use crate::database::Database;
-use crate::query::{Params, Query};
+use crate::query::{self, Params, Query};
 use crate::query_analysis::Statement;
 
 use self::rpc::execute_results::State;
@@ -162,7 +162,11 @@ impl Proxy for ProxyService {
         &self,
         req: tonic::Request<Queries>,
     ) -> Result<tonic::Response<ExecuteResults>, tonic::Status> {
-        let Queries { client_id, queries } = req.into_inner();
+        let Queries {
+            client_id,
+            queries,
+            is_transactional,
+        } = req.into_inner();
         let client_id = Uuid::from_str(&client_id).unwrap();
 
         let lock = self.clients.upgradable_read().await;
@@ -199,11 +203,24 @@ impl Proxy for ProxyService {
                 tonic::Status::new(tonic::Code::Internal, "failed to deserialize query")
             })?;
 
+        let queries = query::Queries {
+            queries,
+            is_transactional,
+        };
         let (results, state) = db.execute_batch(queries).await.unwrap();
-        let results = results.into_iter().map(|r| r.into()).collect();
+        let query_results = match results {
+            Ok(res) => {
+                let results = res.into_iter().map(|r| r.into()).collect();
+                Some(rpc::execute_results::QueryResults::Results(
+                    rpc::QueryResults { results },
+                ))
+            }
+
+            Err(e) => Some(rpc::execute_results::QueryResults::Error(e.into())),
+        };
 
         Ok(tonic::Response::new(ExecuteResults {
-            results,
+            query_results,
             state: State::from(state).into(),
         }))
     }

@@ -44,14 +44,16 @@ impl<'a, S> QueryHandler<S> {
 
     async fn handle_queries(&self, queries: Queries, col_defs: bool) -> PgWireResult<Vec<Response>>
     where
-        S: Service<Queries, Response = Vec<QueryResult>, Error = Error> + Sync + Send,
+        S: Service<Queries, Response = crate::Result<Vec<QueryResult>>, Error = Error>
+            + Sync
+            + Send,
         S::Future: Send,
     {
         let mut s = self.state.lock().await;
         //FIXME: handle poll_ready error
         poll_fn(|cx| s.poll_ready(cx)).await.unwrap();
         match s.call(queries).await {
-            Ok(responses) => Ok(responses
+            Ok(Ok(responses)) => Ok(responses
                 .into_iter()
                 .map(|r| match r {
                     Ok(QueryResponse::ResultSet(mut set)) => {
@@ -63,7 +65,9 @@ impl<'a, S> QueryHandler<S> {
                     ),
                 })
                 .collect()),
-
+            Ok(Err(e)) => Ok(vec![Response::Error(
+                ErrorInfo::new("ERROR".into(), "XX000".into(), e.to_string()).into(),
+            )]),
             Err(e) => Err(PgWireError::ApiError(e.into())),
         }
     }
@@ -72,7 +76,7 @@ impl<'a, S> QueryHandler<S> {
 #[async_trait::async_trait]
 impl<S> SimpleQueryHandler for QueryHandler<S>
 where
-    S: Service<Queries, Response = Vec<QueryResult>, Error = Error> + Sync + Send,
+    S: Service<Queries, Response = crate::Result<Vec<QueryResult>>, Error = Error> + Sync + Send,
     S::Future: Send,
 {
     async fn do_query<'q, 'b: 'q, C>(
@@ -93,7 +97,13 @@ where
             .collect::<anyhow::Result<Vec<_>>>();
 
         match queries {
-            Ok(queries) => self.handle_queries(queries, true).await,
+            Ok(queries) => {
+                let queries = Queries {
+                    queries,
+                    is_transactional: false,
+                };
+                self.handle_queries(queries, true).await
+            }
             Err(e) => Err(PgWireError::UserError(
                 ErrorInfo::new("ERROR".to_string(), "XX000".to_string(), e.to_string()).into(),
             )),
@@ -106,7 +116,7 @@ const REQUEST_DESCRIBE: &str = "SQLD_REQUEST_DESCRIBE";
 #[async_trait::async_trait]
 impl<S> ExtendedQueryHandler for QueryHandler<S>
 where
-    S: Service<Queries, Response = Vec<QueryResult>, Error = Error> + Sync + Send,
+    S: Service<Queries, Response = crate::Result<Vec<QueryResult>>, Error = Error> + Sync + Send,
     S::Future: Send,
 {
     type Statement = String;
@@ -139,9 +149,12 @@ where
 
         let params = parse_params(portal.statement().parameter_types(), portal.parameters());
 
-        let query = Query { stmt, params };
         let include_col_defs = client.metadata_mut().remove(REQUEST_DESCRIBE).is_some();
-        self.handle_queries(vec![query], include_col_defs)
+        let queries = Queries {
+            queries: vec![Query { stmt, params }],
+            is_transactional: false,
+        };
+        self.handle_queries(queries, include_col_defs)
             .await
             .map(|mut res| {
                 assert_eq!(res.len(), 1);
