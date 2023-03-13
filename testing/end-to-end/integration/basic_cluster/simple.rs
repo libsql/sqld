@@ -1,7 +1,6 @@
-use std::time::Duration;
-
 use octopod::App;
 use serde_json::json;
+use std::time::Duration;
 
 #[octopod::test(app = "simple-cluster")]
 async fn proxy_write(app: App) {
@@ -109,4 +108,70 @@ async fn replica_catch_up(app: App) {
     assert_eq!(resp.status(), 200);
     let json: serde_json::Value = resp.json().await.unwrap();
     insta::assert_json_snapshot!(json);
+}
+
+#[octopod::test(app = "simple-cluster")]
+async fn transactional_batch_rollback(app: App) {
+    let primary_ip = app.service("primary").unwrap().ip().await.unwrap();
+    let primary_url = format!("http://{primary_ip}:8080/");
+    let client = reqwest::Client::new();
+
+    let payload = json!({ "statements": [
+        "begin",
+        "create table test (x)",
+        "select * from not_exist",
+        "end",
+    ] });
+    let resp = client
+        .post(&primary_url)
+        .json(&payload)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    insta::assert_json_snapshot!(resp.json::<serde_json::Value>().await.unwrap());
+
+    // ensure test table was not created
+    let payload = json!({ "statements": [
+        "select * from test",
+    ] });
+    let resp = client
+        .post(&primary_url)
+        .json(&payload)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 400);
+    insta::assert_json_snapshot!(resp.json::<serde_json::Value>().await.unwrap());
+}
+
+#[octopod::test(app = "simple-cluster")]
+async fn non_transactional_batch_fail(app: App) {
+    let primary_ip = app.service("primary").unwrap().ip().await.unwrap();
+    let primary_url = format!("http://{primary_ip}:8080/");
+    let client = reqwest::Client::new();
+
+    let payload = json!({ "statements": [
+        "create table test (x)",
+        "select * from not_exist",
+    ] });
+    let resp = client
+        .post(&primary_url)
+        .json(&payload)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    insta::assert_json_snapshot!(resp.json::<serde_json::Value>().await.unwrap());
+
+    // ensure test table was created
+    let payload = json!({ "statements": [ "select * from test", ]});
+    let resp = client
+        .post(&primary_url)
+        .json(&payload)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    insta::assert_json_snapshot!(resp.json::<serde_json::Value>().await.unwrap());
 }
