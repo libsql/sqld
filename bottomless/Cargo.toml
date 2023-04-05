@@ -24,6 +24,7 @@ uuid = { version = "1.3", features = ["v7"] }
 
 [features]
 libsql_linked_statically = []
+init_tracing_statically = []
 
 [lib]
 crate-type = ["rlib", "staticlib"]

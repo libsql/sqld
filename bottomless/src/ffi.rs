@@ -1,6 +1,7 @@
 pub use sqld_libsql_bindings::ffi::{
-    libsql_wal_methods, sqlite3, sqlite3_file, sqlite3_vfs, PageHdrIter, PgHdr, Wal, WalIndexHdr,
-    SQLITE_CANTOPEN, SQLITE_CHECKPOINT_TRUNCATE, SQLITE_IOERR_WRITE, SQLITE_OK,
+    libsql_wal, libsql_wal_methods, sqlite3, sqlite3_file, sqlite3_vfs, PageHdrIter, PgHdr, Wal,
+    WalIndexHdr, SQLITE_CANTOPEN, SQLITE_CHECKPOINT_TRUNCATE, SQLITE_IOERR_READ,
+    SQLITE_IOERR_WRITE, SQLITE_OK, SQLITE_READONLY,
 };
 
 #[repr(C)]
