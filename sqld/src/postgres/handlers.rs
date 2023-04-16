@@ -4,9 +4,9 @@ use std::sync::Arc;
 use bytes::Bytes;
 use futures::Sink;
 use pgwire::api::portal::Portal;
-use pgwire::api::query::{ExtendedQueryHandler, SimpleQueryHandler};
+use pgwire::api::query::{ExtendedQueryHandler, SimpleQueryHandler, StatementOrPortal};
 use pgwire::api::results::{DescribeResponse, Response};
-use pgwire::api::stmt::{NoopQueryParser, StoredStatement};
+use pgwire::api::stmt::NoopQueryParser;
 use pgwire::api::store::{MemPortalStore, PortalStore};
 use pgwire::api::{ClientInfo, Type, DEFAULT_NAME};
 use pgwire::error::{ErrorInfo, PgWireError, PgWireResult};
@@ -33,11 +33,7 @@ impl QueryHandler {
         }
     }
 
-    async fn handle_queries(
-        &self,
-        queries: Vec<Query>,
-        col_defs: bool,
-    ) -> PgWireResult<Vec<Response>> {
+    async fn handle_queries(&self, queries: Vec<Query>) -> PgWireResult<Vec<Response>> {
         let auth = crate::auth::Authenticated::Authorized(crate::auth::Authorized::FullAccess);
         //FIXME: handle poll_ready error
         match self.database.execute_batch(queries, auth).await {
@@ -45,14 +41,11 @@ impl QueryHandler {
                 let ret = resp
                     .into_iter()
                     .map(|r| match r {
-                        Some(Ok(QueryResponse::ResultSet(mut set))) => {
-                            set.include_column_defs = col_defs;
-                            set.into()
-                        }
+                        Some(Ok(QueryResponse::ResultSet(set))) => set.into(),
                         Some(Err(e)) => Response::Error(
                             ErrorInfo::new("ERROR".into(), "XX000".into(), e.to_string()).into(),
                         ),
-                        None => ResultSet::empty(false).into(),
+                        None => ResultSet::empty().into(),
                     })
                     .collect();
                 Ok(ret)
@@ -82,7 +75,7 @@ impl SimpleQueryHandler for QueryHandler {
             .collect::<anyhow::Result<Vec<_>>>();
 
         match queries {
-            Ok(queries) => self.handle_queries(queries, true).await,
+            Ok(queries) => self.handle_queries(queries).await,
             Err(e) => Err(PgWireError::UserError(
                 ErrorInfo::new("ERROR".to_string(), "XX000".to_string(), e.to_string()).into(),
             )),
@@ -125,20 +118,18 @@ impl ExtendedQueryHandler for QueryHandler {
         let params = parse_params(portal.statement().parameter_types(), portal.parameters());
 
         let query = Query { stmt, params };
+        //TODO: send describe
         let include_col_defs = client.metadata_mut().remove(REQUEST_DESCRIBE).is_some();
-        self.handle_queries(vec![query], include_col_defs)
-            .await
-            .map(|mut res| {
-                assert_eq!(res.len(), 1);
-                res.pop().unwrap()
-            })
+        self.handle_queries(vec![query]).await.map(|mut res| {
+            assert_eq!(res.len(), 1);
+            res.pop().unwrap()
+        })
     }
 
     async fn do_describe<C>(
         &self,
         _client: &mut C,
-        _stmt: &StoredStatement<Self::Statement>,
-        _parameter_type_infer: bool,
+        _target: StatementOrPortal<'_, Self::Statement>,
     ) -> PgWireResult<DescribeResponse>
     where
         C: ClientInfo + Unpin + Send + Sync,

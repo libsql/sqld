@@ -320,7 +320,6 @@ impl Connection {
             rows,
             affected_row_count,
             last_insert_rowid,
-            include_column_defs: true,
         }))
     }
 

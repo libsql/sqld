@@ -1,10 +1,13 @@
 use std::collections::HashMap;
 use std::convert::Infallible;
 use std::str::FromStr;
+use std::sync::Arc;
 
 use anyhow::{anyhow, ensure, Context};
 use futures::stream;
-use pgwire::api::results::{query_response, DataRowEncoder, FieldFormat, FieldInfo, Response};
+use pgwire::api::results::{
+    DataRowEncoder, FieldFormat, FieldInfo, QueryResponse as PgQueryResponse, Response,
+};
 use pgwire::api::Type as PgType;
 use pgwire::{error::PgWireResult, messages::data::DataRow};
 use rusqlite::types::ToSqlOutput;
@@ -150,39 +153,37 @@ pub struct ResultSet {
     pub rows: Vec<Row>,
     pub affected_row_count: u64,
     pub last_insert_rowid: Option<i64>,
-    pub include_column_defs: bool,
 }
 
 impl ResultSet {
-    pub fn empty(col_defs: bool) -> Self {
+    pub fn empty() -> Self {
         Self {
             columns: Vec::new(),
             rows: Vec::new(),
             affected_row_count: 0,
             last_insert_rowid: None,
-            include_column_defs: col_defs,
         }
     }
 }
 
-fn encode_row(row: Row) -> PgWireResult<DataRow> {
-    let mut encoder = DataRowEncoder::new(row.values.len());
+fn encode_row(row: Row, schema: Arc<Vec<FieldInfo>>) -> PgWireResult<DataRow> {
+    let mut encoder = DataRowEncoder::new(schema);
     for value in row.values {
         match value {
             Value::Null => {
-                encoder.encode_text_format_field(None::<&u8>)?;
+                encoder.encode_field(&None::<i8>)?;
             }
             Value::Integer(i) => {
-                encoder.encode_text_format_field(Some(&i))?;
+                encoder.encode_field(&i)?;
             }
             Value::Real(f) => {
-                encoder.encode_text_format_field(Some(&f))?;
+                encoder.encode_field(&f)?;
             }
             Value::Text(t) => {
-                encoder.encode_text_format_field(Some(&t))?;
+                encoder.encode_field(&t)?;
             }
             Value::Blob(b) => {
-                encoder.encode_text_format_field(Some(&hex::encode(b)))?;
+                encoder.encode_field(&b)?;
             }
         }
     }
@@ -190,21 +191,14 @@ fn encode_row(row: Row) -> PgWireResult<DataRow> {
 }
 
 impl<'a> From<ResultSet> for Response<'a> {
-    fn from(
-        ResultSet {
-            columns,
-            rows,
-            include_column_defs,
-            ..
-        }: ResultSet,
-    ) -> Self {
-        let field_infos = if include_column_defs {
-            Some(columns.into_iter().map(Into::into).collect())
-        } else {
-            None
-        };
-        let data_row_stream = stream::iter(rows.into_iter().map(encode_row));
-        Response::Query(query_response(field_infos, data_row_stream))
+    fn from(ResultSet { columns, rows, .. }: ResultSet) -> Self {
+        let field_infos = Arc::new(columns.into_iter().map(Into::into).collect::<Vec<_>>());
+        let field_infos_ref = field_infos.clone();
+        let data_row_stream = stream::iter(
+            rows.into_iter()
+                .map(move |row| encode_row(row, field_infos.clone())),
+        );
+        Response::Query(PgQueryResponse::new(field_infos_ref, data_row_stream))
     }
 }
 
@@ -261,7 +255,6 @@ impl From<ResultRows> for ResultSet {
             rows,
             affected_row_count: result_rows.affected_row_count,
             last_insert_rowid: result_rows.last_insert_rowid,
-            include_column_defs: true,
         }
     }
 }
