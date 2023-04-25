@@ -289,7 +289,7 @@ impl Connection {
             .map_err(Error::LibSqlInvalidQueryParams)?;
 
         let mut qresult = stmt.raw_query();
-        while let Some(row) = qresult.next()? {
+        while let Some(row) = dbg!(qresult.next())? {
             let mut values = vec![];
             for (i, _) in columns.iter().enumerate() {
                 values.push(row.get::<usize, rusqlite::types::Value>(i)?.into());

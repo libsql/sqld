@@ -15,7 +15,7 @@ use super::error::ReplicationError;
 
 #[repr(C)]
 #[derive(Debug, Pod, Zeroable, Clone, Copy)]
-pub struct WalIndexMeta {
+pub struct ReplicationMeta {
     /// This is the anticipated next frame_no to request
     pub pre_commit_frame_no: FrameNo,
     /// After we have written the frames back to the wal, we set this value to the same value as
@@ -25,12 +25,12 @@ pub struct WalIndexMeta {
     /// Generation Uuid
     /// This number is generated on each primary restart. This let's us know that the primary, and
     /// we need to make sure that we are not ahead of the primary.
-    generation_id: u128,
+    pub generation_id: u128,
     /// Uuid of the database this instance is a replica of
-    database_id: u128,
+    pub database_id: u128,
 }
 
-impl WalIndexMeta {
+impl ReplicationMeta {
     pub fn read_from_path(db_path: &Path) -> anyhow::Result<(Option<Self>, File)> {
         let path = db_path.join("client_wal_index");
         let file = OpenOptions::new()
@@ -43,7 +43,7 @@ impl WalIndexMeta {
     }
 
     fn read(file: &File) -> anyhow::Result<Option<Self>> {
-        let mut buf = [0; size_of::<WalIndexMeta>()];
+        let mut buf = [0; size_of::<ReplicationMeta>()];
         let meta = match file.read_exact_at(&mut buf, 0) {
             Ok(()) => {
                 file.read_exact_at(&mut buf, 0)?;
@@ -86,7 +86,7 @@ impl WalIndexMeta {
         }
     }
 
-    pub fn new_from_hello(hello: HelloResponse) -> anyhow::Result<WalIndexMeta> {
+    pub fn new_from_hello(hello: HelloResponse) -> anyhow::Result<ReplicationMeta> {
         let database_id = Uuid::from_str(&hello.database_id)
             .context("invalid database id from primary")?
             .as_u128();

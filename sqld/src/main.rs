@@ -133,6 +133,12 @@ struct Cli {
 
     #[clap(subcommand)]
     utils: Option<UtilsSubcommands>,
+
+    #[clap(long, env = "SQLD_CLUSTER_ID")]
+    cluster_id: Option<String>,
+
+    #[clap(long)]
+    backbone_addrs: Vec<SocketAddr>,
 }
 
 #[derive(clap::Subcommand, Debug)]
@@ -231,6 +237,8 @@ fn config_from_args(args: Cli) -> Result<Config> {
         idle_shutdown_timeout: args.idle_shutdown_timeout_s.map(Duration::from_secs),
         load_from_dump: args.load_from_dump,
         max_log_size: args.max_log_size,
+        backbone_addrs: args.backbone_addrs,
+        cluster_id: args.cluster_id.unwrap(),
     })
 }
 

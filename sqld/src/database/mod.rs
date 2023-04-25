@@ -1,3 +1,4 @@
+use std::ffi::c_int;
 use std::sync::Arc;
 
 use crate::auth::Authenticated;
@@ -5,12 +6,14 @@ use crate::query::{Params, Query, QueryResult};
 use crate::query_analysis::{State, Statement};
 use crate::Result;
 
+pub mod backbone;
 pub mod dump;
 pub mod factory;
 pub mod libsql;
 pub mod write_proxy;
 
 const TXN_TIMEOUT_SECS: u64 = 5;
+pub const SQLITE_MUST_ROLLBACK: c_int = 0xdead;
 
 #[derive(Debug, Clone)]
 pub struct Program {

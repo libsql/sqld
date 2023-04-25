@@ -7,12 +7,15 @@ use tokio::sync::watch;
 use tonic::transport::Channel;
 
 use crate::replication::frame::Frame;
+use crate::replication::replica::error::ReplicationError;
 use crate::replication::replica::snapshot::TempSnapshot;
+use crate::replication::replica::ReplicationMeta;
 use crate::replication::FrameNo;
 use crate::rpc::replication_log::rpc::{
     replication_log_client::ReplicationLogClient, HelloRequest, LogOffset,
 };
 use crate::rpc::replication_log::NEED_SNAPSHOT_ERROR_MSG;
+use crate::HARD_RESET;
 
 use super::hook::Frames;
 use super::injector::FrameInjectorHandle;
@@ -75,7 +78,22 @@ impl Replicator {
                         applicator.shutdown().await?;
                     }
                     let (injector, last_applied_frame_no) =
-                        FrameInjectorHandle::new(self.db_path.clone(), hello).await?;
+                        FrameInjectorHandle::new(self.db_path.clone(), |meta| match meta {
+                            Some(meta) => match meta.merge_from_hello(hello) {
+                                Ok(meta) => Ok(meta),
+                                Err(e @ ReplicationError::Lagging) => {
+                                    tracing::error!(
+                                        "Replica ahead of primary: hard-reseting replica"
+                                    );
+                                    HARD_RESET.notify_waiters();
+
+                                    anyhow::bail!(e);
+                                }
+                                Err(e) => anyhow::bail!(e),
+                            },
+                            None => ReplicationMeta::new_from_hello(hello),
+                        })
+                        .await?;
                     self.update_current_frame_no(last_applied_frame_no);
                     self.injector.replace(injector);
                     return Ok(());
@@ -144,7 +162,7 @@ impl Replicator {
             .injector
             .as_mut()
             .unwrap()
-            .apply_frames(Frames::Snapshot(snap))
+            .inject_frames(Frames::Snapshot(snap))
             .await?;
 
         Ok(())
@@ -155,7 +173,7 @@ impl Replicator {
             .injector
             .as_mut()
             .expect("invalid state")
-            .apply_frames(Frames::Vec(frames))
+            .inject_frames(Frames::Vec(frames))
             .await?;
 
         self.update_current_frame_no(new_frame_no);

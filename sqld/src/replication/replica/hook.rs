@@ -9,7 +9,7 @@ use sqld_libsql_bindings::{ffi::types::XWalFrameFn, wal_hook::WalHook};
 use crate::replication::frame::{Frame, FrameBorrowed};
 use crate::replication::{FrameNo, WAL_PAGE_SIZE};
 
-use super::meta::WalIndexMeta;
+use super::meta::ReplicationMeta;
 use super::snapshot::TempSnapshot;
 
 #[derive(Debug)]
@@ -25,6 +25,13 @@ impl Frames {
             Frames::Snapshot(snap) => make_page_header(snap.iter()),
         }
     }
+
+    pub fn is_empty(&self) -> bool {
+        match self {
+            Frames::Vec(f) => f.is_empty(),
+            Frames::Snapshot(_) => false,
+        }
+    }
 }
 
 /// The injector hook hijacks a call to xframes, and replace the content of the call with it's own
@@ -38,7 +45,7 @@ pub struct InjectorHook {
 }
 
 impl InjectorHook {
-    pub fn new(meta_file: File, meta: WalIndexMeta) -> Self {
+    pub fn new(meta_file: File, meta: ReplicationMeta) -> Self {
         Self {
             inner: Rc::new(RefCell::new(InjectorHookInner {
                 current_frames: None,
@@ -75,7 +82,7 @@ pub struct InjectorHookInner {
     /// On success, returns the last applied frame_no
     result: Option<anyhow::Result<FrameNo>>,
     meta_file: File,
-    meta: WalIndexMeta,
+    meta: ReplicationMeta,
 }
 
 impl InjectorHookInner {
@@ -136,20 +143,28 @@ unsafe impl WalHook for InjectorHook {
         orig: XWalFrameFn,
     ) -> c_int {
         self.with_inner_mut(|this| {
+            dbg!();
             let Some(ref frames) = this.current_frames.take() else {
+            dbg!();
                 return SQLITE_ERROR;
             };
 
+            dbg!();
             let (headers, last_frame_no, size_after) = frames.to_headers();
+            dbg!();
 
+            dbg!();
             // SAFETY: frame headers are valid for the duration of the call of apply_pages
             let result = unsafe {
                 this.inject_pages(headers, last_frame_no, size_after, sync_flags, orig, wal)
             };
 
+            dbg!();
             free_page_header(headers);
+            dbg!();
 
             let result = result.map(|_| last_frame_no);
+            dbg!(&result);
             this.result.replace(result);
 
             SQLITE_ERROR

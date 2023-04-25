@@ -15,13 +15,14 @@ use tokio_stream::wrappers::ReceiverStream;
 use tonic::Status;
 
 use crate::replication::primary::frame_stream::FrameStream;
-use crate::replication::{LogReadError, ReplicationLogger};
+use crate::replication::primary::logger::FileReplicationLogger;
+use crate::replication::LogReadError;
 
 use self::rpc::replication_log_server::ReplicationLog;
 use self::rpc::{Frame, HelloRequest, HelloResponse, LogOffset};
 
 pub struct ReplicationLogService {
-    logger: Arc<ReplicationLogger>,
+    logger: Arc<FileReplicationLogger>,
     replicas_with_hello: RwLock<HashSet<SocketAddr>>,
 }
 
@@ -29,7 +30,7 @@ pub const NO_HELLO_ERROR_MSG: &str = "NO_HELLO";
 pub const NEED_SNAPSHOT_ERROR_MSG: &str = "NEED_SNAPSHOT";
 
 impl ReplicationLogService {
-    pub fn new(logger: Arc<ReplicationLogger>) -> Self {
+    pub fn new(logger: Arc<FileReplicationLogger>) -> Self {
         Self {
             logger,
             replicas_with_hello: RwLock::new(HashSet::<SocketAddr>::new()),

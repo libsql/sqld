@@ -6,19 +6,21 @@ use bytes::Bytes;
 use futures::future::BoxFuture;
 use futures::Stream;
 
-use crate::replication::{FrameNo, LogReadError, ReplicationLogger};
+use crate::replication::{FrameNo, LogReadError};
+
+use super::logger::FileReplicationLogger;
 
 /// Streams frames from the replication log starting at `current_frame_no`.
 /// Only stops if the current frame is not in the log anymore.
 pub struct FrameStream {
     current_frame_no: FrameNo,
     max_available_frame_no: FrameNo,
-    logger: Arc<ReplicationLogger>,
+    logger: Arc<FileReplicationLogger>,
     state: FrameStreamState,
 }
 
 impl FrameStream {
-    pub fn new(logger: Arc<ReplicationLogger>, current_frameno: FrameNo) -> Self {
+    pub fn new(logger: Arc<FileReplicationLogger>, current_frameno: FrameNo) -> Self {
         let max_available_frame_no = *logger.new_frame_notifier.subscribe().borrow();
         Self {
             current_frame_no: current_frameno,

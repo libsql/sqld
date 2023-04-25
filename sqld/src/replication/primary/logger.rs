@@ -14,6 +14,7 @@ use rusqlite::ffi::SQLITE_ERROR;
 use tokio::sync::watch;
 use uuid::Uuid;
 
+use crate::database::SQLITE_MUST_ROLLBACK;
 use crate::libsql::ffi::{
     types::{XWalFrameFn, XWalUndoFn},
     PgHdr, Wal,
@@ -28,7 +29,7 @@ use crate::replication::{FrameNo, CRC_64_GO_ISO, WAL_MAGIC, WAL_PAGE_SIZE};
 #[derive(Clone)]
 pub struct ReplicationLoggerHook {
     buffer: Vec<WalPage>,
-    logger: Arc<ReplicationLogger>,
+    logger: Arc<dyn ReplicationLogger>,
 }
 
 /// This implementation of WalHook intercepts calls to `on_frame`, and writes them to a
@@ -81,19 +82,13 @@ unsafe impl WalHook for ReplicationLoggerHook {
 
         if is_commit != 0 && rc == 0 {
             if let Some((count, checksum)) = commit_info {
-                self.commit(count, checksum);
+                if let Err(e) = self.commit(count, checksum) {
+                    tracing::error!("failed to commit: {e}");
+                    return SQLITE_MUST_ROLLBACK;
+                }
             }
 
-            self.logger
-                .log_file
-                .write()
-                .maybe_compact(
-                    self.logger.compactor.clone(),
-                    ntruncate,
-                    &self.logger.db_path,
-                    self.logger.current_checksum.load(Ordering::Relaxed),
-                )
-                .unwrap();
+            self.logger.maybe_compact(ntruncate);
         }
 
         rc
@@ -112,15 +107,15 @@ unsafe impl WalHook for ReplicationLoggerHook {
 }
 
 #[derive(Clone)]
-struct WalPage {
-    page_no: u32,
+pub struct WalPage {
+    pub page_no: u32,
     /// 0 for non-commit frames
-    size_after: u32,
-    data: Bytes,
+    pub size_after: u32,
+    pub data: Bytes,
 }
 
 impl ReplicationLoggerHook {
-    pub fn new(logger: Arc<ReplicationLogger>) -> Self {
+    pub fn new(logger: Arc<dyn ReplicationLogger>) -> Self {
         Self {
             buffer: Default::default(),
             logger,
@@ -149,9 +144,9 @@ impl ReplicationLoggerHook {
         }
     }
 
-    fn commit(&self, new_count: u64, new_checksum: u64) {
-        let new_frame_no = self.logger.commit(new_count, new_checksum);
-        let _ = self.logger.new_frame_notifier.send(new_frame_no);
+    fn commit(&self, new_count: u64, new_checksum: u64) -> anyhow::Result<()> {
+        self.logger.commit(new_count, new_checksum)?;
+        Ok(())
     }
 
     fn rollback(&mut self) {
@@ -447,7 +442,16 @@ impl Generation {
     }
 }
 
-pub struct ReplicationLogger {
+pub trait ReplicationLogger: 'static + Send + Sync {
+    /// Write pages to the log, without updating the file header.
+    /// Returns the new frame count and checksum to commit
+    fn write_pages(&self, pages: &[WalPage]) -> anyhow::Result<(u64, u64)>;
+    /// commit the current transaction and returns the new top frame number
+    fn commit(&self, new_frame_count: u64, new_current_checksum: u64) -> anyhow::Result<FrameNo>;
+    fn maybe_compact(&self, size_after: u32);
+}
+
+pub struct FileReplicationLogger {
     current_checksum: AtomicU64,
     pub generation: Generation,
     pub log_file: RwLock<LogFile>,
@@ -458,7 +462,7 @@ pub struct ReplicationLogger {
     pub new_frame_notifier: watch::Sender<FrameNo>,
 }
 
-impl ReplicationLogger {
+impl FileReplicationLogger {
     pub fn open(db_path: &Path, max_log_size: u64) -> anyhow::Result<Self> {
         let log_path = db_path.join("wallog");
         let file = OpenOptions::new()
@@ -494,8 +498,32 @@ impl ReplicationLogger {
         Ok(Uuid::from_u128((self.log_file.read()).header().db_id))
     }
 
-    /// Write pages to the log, without updating the file header.
-    /// Returns the new frame count and checksum to commit
+    fn compute_checksum(wal_header: &LogFileHeader, log_file: &LogFile) -> anyhow::Result<u64> {
+        tracing::debug!("computing WAL log running checksum...");
+        let mut iter = log_file.frames_iter()?;
+        iter.try_fold(wal_header.start_checksum, |sum, frame| {
+            let frame = frame?;
+            let mut digest = CRC_64_GO_ISO.digest_with_initial(sum);
+            digest.update(frame.page());
+            let cs = digest.finalize();
+            ensure!(
+                cs == frame.header().checksum,
+                "invalid WAL file: invalid checksum"
+            );
+            Ok(cs)
+        })
+    }
+
+    pub fn get_snapshot_file(&self, from: FrameNo) -> anyhow::Result<Option<SnapshotFile>> {
+        find_snapshot_file(&self.db_path, from)
+    }
+
+    pub fn get_frame(&self, frame_no: FrameNo) -> Result<Bytes, LogReadError> {
+        self.log_file.read().frame_bytes(frame_no)
+    }
+}
+
+impl ReplicationLogger for FileReplicationLogger {
     fn write_pages(&self, pages: &[WalPage]) -> anyhow::Result<(u64, u64)> {
         let mut log_file = self.log_file.write();
         let log_header = *log_file.header();
@@ -528,39 +556,28 @@ impl ReplicationLogger {
         ))
     }
 
-    fn compute_checksum(wal_header: &LogFileHeader, log_file: &LogFile) -> anyhow::Result<u64> {
-        tracing::debug!("computing WAL log running checksum...");
-        let mut iter = log_file.frames_iter()?;
-        iter.try_fold(wal_header.start_checksum, |sum, frame| {
-            let frame = frame?;
-            let mut digest = CRC_64_GO_ISO.digest_with_initial(sum);
-            digest.update(frame.page());
-            let cs = digest.finalize();
-            ensure!(
-                cs == frame.header().checksum,
-                "invalid WAL file: invalid checksum"
-            );
-            Ok(cs)
-        })
-    }
-
-    /// commit the current transaction and returns the new top frame number
-    fn commit(&self, new_frame_count: u64, new_current_checksum: u64) -> FrameNo {
+    fn commit(&self, new_frame_count: u64, new_current_checksum: u64) -> anyhow::Result<FrameNo> {
         let mut log_file = self.log_file.write();
         let mut header = *log_file.header();
         header.frame_count = new_frame_count;
-        log_file.write_header(&header).expect("dailed to commit");
+        log_file.write_header(&header)?;
         self.current_checksum
             .store(new_current_checksum, Ordering::Relaxed);
-        log_file.header().last_frame_no()
+        let new_frame_no = log_file.header().last_frame_no();
+        let _ = self.new_frame_notifier.send(new_frame_no);
+        Ok(new_frame_no)
     }
 
-    pub fn get_snapshot_file(&self, from: FrameNo) -> anyhow::Result<Option<SnapshotFile>> {
-        find_snapshot_file(&self.db_path, from)
-    }
-
-    pub fn get_frame(&self, frame_no: FrameNo) -> Result<Bytes, LogReadError> {
-        self.log_file.read().frame_bytes(frame_no)
+    fn maybe_compact(&self, size_after: u32) {
+        let mut log_file = self.log_file.write();
+        log_file
+            .maybe_compact(
+                self.compactor.clone(),
+                size_after,
+                &self.db_path,
+                self.current_checksum.load(Ordering::Relaxed),
+            )
+            .unwrap();
     }
 }
 
@@ -571,7 +588,7 @@ mod test {
     #[test]
     fn write_and_read_from_frame_log() {
         let dir = tempfile::tempdir().unwrap();
-        let logger = ReplicationLogger::open(dir.path(), 0).unwrap();
+        let logger = FileReplicationLogger::open(dir.path(), 0).unwrap();
 
         let frames = (0..10)
             .map(|i| WalPage {
@@ -599,7 +616,7 @@ mod test {
     #[test]
     fn index_out_of_bounds() {
         let dir = tempfile::tempdir().unwrap();
-        let logger = ReplicationLogger::open(dir.path(), 0).unwrap();
+        let logger = FileReplicationLogger::open(dir.path(), 0).unwrap();
         let log_file = logger.log_file.write();
         assert!(matches!(log_file.frame_bytes(1), Err(LogReadError::Ahead)));
     }
@@ -608,7 +625,7 @@ mod test {
     #[should_panic]
     fn incorrect_frame_size() {
         let dir = tempfile::tempdir().unwrap();
-        let logger = ReplicationLogger::open(dir.path(), 0).unwrap();
+        let logger = FileReplicationLogger::open(dir.path(), 0).unwrap();
         let entry = WalPage {
             page_no: 0,
             size_after: 0,

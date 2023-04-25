@@ -6,11 +6,10 @@ use sqld_libsql_bindings::open_with_regular_wal;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 
-use crate::{replication::FrameNo, rpc::replication_log::rpc::HelloResponse, HARD_RESET};
+use crate::replication::FrameNo;
 
-use super::error::ReplicationError;
 use super::hook::{Frames, InjectorHook};
-use super::meta::WalIndexMeta;
+use super::meta::ReplicationMeta;
 
 #[derive(Debug)]
 struct FrameApplyOp {
@@ -24,11 +23,16 @@ pub struct FrameInjectorHandle {
 }
 
 impl FrameInjectorHandle {
-    pub async fn new(db_path: PathBuf, hello: HelloResponse) -> anyhow::Result<(Self, FrameNo)> {
+    pub async fn new(
+        db_path: PathBuf,
+        merger: impl FnOnce(Option<ReplicationMeta>) -> anyhow::Result<ReplicationMeta> + Send + 'static,
+    ) -> anyhow::Result<(Self, FrameNo)> {
         let (sender, mut receiver) = mpsc::channel(16);
         let (ret, init_ok) = oneshot::channel();
         let handle = tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
-            let mut injector = match FrameInjector::new_from_hello(&db_path, hello) {
+            let maybe_injector = FrameInjector::new_with_merger(&db_path, merger);
+
+            let mut injector = match maybe_injector {
                 Ok((hook, last_applied_frame_no)) => {
                     ret.send(Ok(last_applied_frame_no)).unwrap();
                     hook
@@ -45,7 +49,6 @@ impl FrameInjectorHandle {
                     anyhow::bail!("frame application result must not be ignored.");
                 }
             }
-
             Ok(())
         });
 
@@ -68,7 +71,8 @@ impl FrameInjectorHandle {
         Ok(())
     }
 
-    pub async fn apply_frames(&mut self, frames: Frames) -> anyhow::Result<FrameNo> {
+    pub async fn inject_frames(&mut self, frames: Frames) -> anyhow::Result<FrameNo> {
+        assert!(!frames.is_empty());
         let (ret, rcv) = oneshot::channel();
         self.sender.send(FrameApplyOp { frames, ret }).await?;
         rcv.await?
@@ -82,27 +86,17 @@ pub struct FrameInjector {
 
 impl FrameInjector {
     /// returns the replication hook and the currently applied frame_no
-    pub fn new_from_hello(db_path: &Path, hello: HelloResponse) -> anyhow::Result<(Self, FrameNo)> {
-        let (meta, file) = WalIndexMeta::read_from_path(db_path)?;
-        let meta = match meta {
-            Some(meta) => match meta.merge_from_hello(hello) {
-                Ok(meta) => meta,
-                Err(e @ ReplicationError::Lagging) => {
-                    tracing::error!("Replica ahead of primary: hard-reseting replica");
-                    HARD_RESET.notify_waiters();
-
-                    anyhow::bail!(e);
-                }
-                Err(e) => anyhow::bail!(e),
-            },
-            None => WalIndexMeta::new_from_hello(hello)?,
-        };
+    pub fn new_with_merger(
+        db_path: &Path,
+        merger: impl FnOnce(Option<ReplicationMeta>) -> anyhow::Result<ReplicationMeta>,
+    ) -> anyhow::Result<(Self, FrameNo)> {
+        let (meta, file) = ReplicationMeta::read_from_path(db_path)?;
+        let meta = merger(meta)?;
 
         Ok((Self::init(db_path, file, meta)?, meta.current_frame_no()))
     }
 
-    fn init(db_path: &Path, meta_file: File, meta: WalIndexMeta) -> anyhow::Result<Self> {
-        let hook = InjectorHook::new(meta_file, meta);
+    pub fn new(db_path: &Path, hook: InjectorHook) -> anyhow::Result<Self> {
         let conn = open_with_regular_wal(
             db_path,
             OpenFlags::SQLITE_OPEN_READ_WRITE
@@ -116,14 +110,19 @@ impl FrameInjector {
         Ok(Self { conn, hook })
     }
 
+    pub fn init(db_path: &Path, meta_file: File, meta: ReplicationMeta) -> anyhow::Result<Self> {
+        let hook = InjectorHook::new(meta_file, meta);
+        Self::new(db_path, hook)
+    }
+
     /// sets the injector's frames to the provided frames, trigger a dummy write, and collect the
     /// injection result.
     fn inject_frames(&mut self, frames: Frames) -> anyhow::Result<FrameNo> {
         self.hook.set_frames(frames);
 
-        let _ = self
+        let _ = dbg!(self
             .conn
-            .execute("create table if not exists __dummy__ (dummy)", ());
+            .execute("create table if not exists __dummy__ (dummy)", ()));
 
         self.hook.take_result()
     }

@@ -6,6 +6,7 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use anyhow::Context as AnyhowContext;
+use database::backbone::{BackboneDatabase, BackboneDatabaseConfig};
 use database::dump::loader::DumpLoader;
 use database::factory::DbFactory;
 use database::libsql::LibSqlDb;
@@ -13,12 +14,14 @@ use database::write_proxy::WriteProxyDbFactory;
 use once_cell::sync::Lazy;
 #[cfg(feature = "mwal_backend")]
 use once_cell::sync::OnceCell;
-use replication::{ReplicationLogger, ReplicationLoggerHook};
-use rpc::run_rpc_server;
+use replication::primary::logger::FileReplicationLogger;
+use replication::ReplicationLoggerHook;
+use rpc::{LoggerServiceConfig, ProxyServiceConfig, RpcServerBuilder, TlsConfig};
 use tokio::sync::{mpsc, Notify};
 use tokio::task::JoinSet;
-use tonic::transport::Channel;
+use tonic::transport::{Channel, ClientTlsConfig};
 use utils::services::idle_shutdown::IdleShutdownLayer;
+use uuid::Uuid;
 
 use crate::auth::Auth;
 use crate::error::Error;
@@ -90,6 +93,9 @@ pub struct Config {
     pub idle_shutdown_timeout: Option<Duration>,
     pub load_from_dump: Option<PathBuf>,
     pub max_log_size: u64,
+
+    pub backbone_addrs: Vec<SocketAddr>,
+    pub cluster_id: String,
 }
 
 async fn run_service(
@@ -189,8 +195,7 @@ async fn hard_reset(
     Ok(())
 }
 
-fn configure_rpc(config: &Config) -> anyhow::Result<(Channel, tonic::transport::Uri)> {
-    let mut endpoint = Channel::from_shared(config.writer_rpc_addr.clone().unwrap())?;
+fn make_rpc_tls_config(config: &Config) -> anyhow::Result<Option<ClientTlsConfig>> {
     if config.writer_rpc_tls {
         let cert_pem = std::fs::read_to_string(config.writer_rpc_cert.clone().unwrap())?;
         let key_pem = std::fs::read_to_string(config.writer_rpc_key.clone().unwrap())?;
@@ -203,11 +208,25 @@ fn configure_rpc(config: &Config) -> anyhow::Result<(Channel, tonic::transport::
             .identity(identity)
             .ca_certificate(ca_cert)
             .domain_name("sqld");
+
+        Ok(Some(tls_config))
+    } else {
+        Ok(None)
+    }
+}
+
+pub fn configure_rpc(
+    remote_addr: String,
+    tls_config: Option<ClientTlsConfig>,
+) -> anyhow::Result<(Channel, tonic::transport::Uri)> {
+    let mut endpoint = Channel::from_shared(remote_addr.clone())?;
+
+    let uri = tonic::transport::Uri::from_maybe_shared(remote_addr)?;
+    if let Some(tls_config) = tls_config {
         endpoint = endpoint.tls_config(tls_config)?;
     }
 
     let channel = endpoint.connect_lazy();
-    let uri = tonic::transport::Uri::from_maybe_shared(config.writer_rpc_addr.clone().unwrap())?;
 
     Ok((channel, uri))
 }
@@ -218,7 +237,8 @@ async fn start_replica(
     idle_shutdown_layer: Option<IdleShutdownLayer>,
     stats: Stats,
 ) -> anyhow::Result<()> {
-    let (channel, uri) = configure_rpc(config)?;
+    let rpc_tls_config = make_rpc_tls_config(config)?;
+    let (channel, uri) = configure_rpc(config.writer_rpc_addr.clone().unwrap(), rpc_tls_config)?;
     let replicator = Replicator::new(config.db_path.clone(), channel.clone(), uri.clone());
     let applied_frame_no_receiver = replicator.current_frame_no_notifier.subscribe();
 
@@ -302,11 +322,10 @@ async fn start_primary(
     stats: Stats,
 ) -> anyhow::Result<()> {
     let is_fresh_db = check_fresh_db(&config.db_path);
-    let logger = Arc::new(ReplicationLogger::open(
+    let logger = Arc::new(FileReplicationLogger::open(
         &config.db_path,
         config.max_log_size,
     )?);
-    let logger_clone = logger.clone();
     let path_clone = config.db_path.clone();
     #[cfg(feature = "bottomless")]
     let enable_bottomless = config.enable_bottomless_replication;
@@ -342,20 +361,71 @@ async fn start_primary(
         }
     });
 
-    if let Some(ref addr) = config.rpc_server_addr {
-        join_set.spawn(run_rpc_server(
-            *addr,
-            config.rpc_server_tls,
-            config.rpc_server_cert.clone(),
-            config.rpc_server_key.clone(),
-            config.rpc_server_ca_cert.clone(),
-            db_factory.clone(),
-            logger_clone,
-            idle_shutdown_layer.clone(),
-        ));
+    let mut builder =
+        RpcServerBuilder::new(config.rpc_server_addr.context("missing rpc server addr")?);
+    if config.rpc_server_tls {
+        builder.with_tls(TlsConfig {
+            cert_path: config.rpc_server_cert.clone().unwrap(),
+            key_path: config.rpc_server_key.clone().unwrap(),
+            ca_cert_path: config.rpc_server_ca_cert.clone().unwrap(),
+        });
     }
+    builder.with_proxy_service(ProxyServiceConfig {
+        factory: db_factory.clone(),
+        frame_notifier: logger.new_frame_notifier.subscribe(),
+    });
+    builder.with_replication_logger_service(LoggerServiceConfig { logger });
+    idle_shutdown_layer
+        .clone()
+        .map(|l| builder.with_idle_shutdown(l.clone()));
 
+    join_set.spawn(builder.serve());
     run_service(db_factory, config, join_set, idle_shutdown_layer, stats).await?;
+
+    Ok(())
+}
+
+async fn start_backbone(
+    config: &Config,
+    join_set: &mut JoinSet<anyhow::Result<()>>,
+    idle_shutdown_layer: Option<IdleShutdownLayer>,
+    stats: Stats,
+) -> anyhow::Result<()> {
+    let extensions = validate_extensions(config.extensions_path.clone())?;
+
+    let backbone_config = BackboneDatabaseConfig {
+        db_path: config.db_path.clone(),
+        extensions,
+        stats: stats.clone(),
+        cluster_id: config.cluster_id.clone(),
+        node_id: Uuid::new_v4().to_string(),
+        rpc_tls_config: make_rpc_tls_config(config)?,
+        rpc_server_addr: format!("http://{}", config.rpc_server_addr.clone().unwrap()),
+        kafka_bootstrap_servers: config.backbone_addrs.clone(),
+    };
+    let (backbone, factory) = BackboneDatabase::new(backbone_config);
+    let factory = Arc::new(factory);
+
+    let mut builder = RpcServerBuilder::new(config.rpc_server_addr.clone().unwrap());
+    if config.rpc_server_tls {
+        builder.with_tls(TlsConfig {
+            cert_path: config.rpc_server_cert.clone().unwrap(),
+            key_path: config.rpc_server_key.clone().unwrap(),
+            ca_cert_path: config.rpc_server_ca_cert.clone().unwrap(),
+        });
+    }
+    builder.with_proxy_service(ProxyServiceConfig {
+        factory: factory.clone(),
+        frame_notifier: backbone.last_frame_no.subscribe(),
+    });
+    idle_shutdown_layer
+        .clone()
+        .map(|l| builder.with_idle_shutdown(l.clone()));
+
+    join_set.spawn(builder.serve());
+    join_set.spawn(backbone.run());
+
+    run_service(factory, config, join_set, idle_shutdown_layer, stats).await?;
 
     Ok(())
 }
@@ -395,9 +465,15 @@ pub async fn run_server(config: Config) -> anyhow::Result<()> {
 
         let stats = Stats::new(&config.db_path)?;
 
-        match config.writer_rpc_addr {
-            Some(_) => start_replica(&config, &mut join_set, idle_shutdown_layer, stats).await?,
-            None => start_primary(&config, &mut join_set, idle_shutdown_layer, stats).await?,
+        if !config.backbone_addrs.is_empty() {
+            start_backbone(&config, &mut join_set, idle_shutdown_layer, stats).await?;
+        } else {
+            match config.writer_rpc_addr {
+                Some(_) => {
+                    start_replica(&config, &mut join_set, idle_shutdown_layer, stats).await?
+                }
+                None => start_primary(&config, &mut join_set, idle_shutdown_layer, stats).await?,
+            }
         }
 
         let reset = HARD_RESET.clone();
@@ -408,6 +484,7 @@ pub async fn run_server(config: Config) -> anyhow::Result<()> {
                     break;
                 },
                 _ = shutdown_notify.notified() => {
+                    join_set.shutdown().await;
                     return Ok(())
                 }
                 Some(res) = join_set.join_next() => {
