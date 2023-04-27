@@ -29,18 +29,16 @@ Using this feature, the client can provide a fresh JWT.
 
 ## Requests
 
-Version 2 introduces two new requests:
+Version 2 introduces one new request:
 
 ```typescript
 type Request =
     | ...
     | DescribeReq
-    | SequenceReq
 
 type Response =
     | ...
     | DescribeResp
-    | SequenceResp
 ```
 
 ### Describe a statement
@@ -101,22 +99,3 @@ columns without `AS` clause, the name is not specified.
 For result columns that directly originate from tables in the database,
 `decltype` specifies the declared type of the column. For other columns (such as
 results of expressions), `decltype` is `null`.
-
-### Execute a sequence of SQL statements
-
-```typescript
-type SequenceReq = {
-    "type": "sequence",
-    "stream_id": int32,
-    "sql": string,
-}
-
-type SequenceResp = {
-    "type": "sequence",
-}
-```
-
-The `sequence` request executes a sequence of SQL statements separated by
-semicolons. The results of these statements are ignored. If any statement fails,
-the server will not execute the following statements and will return an error
-response.
