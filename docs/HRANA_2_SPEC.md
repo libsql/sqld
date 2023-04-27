@@ -52,19 +52,26 @@ type DescribeReq = {
 
 type DescribeResp = {
     "type": "describe",
-    "params": Array<DescribeParam>,
-    "columns": Array<DescribeColumn>,
-    "is_explain": boolean,
-    "readonly": boolean,
+    "result": DescribeResult,
 }
 ```
 
 The `describe` request is used to parse and analyze a SQL statement. `stream_id`
 specifies the stream on which the statement is parsed and `sql` specifies the
-SQL text.
+SQL text. In the response, `result` contains the result of describing a
+statement.
 
-In the response, `is_explain` is true if the statement was an `EXPLAIN`
-statement, and `readonly` is true if the statement does not modify the database.
+```typescript
+type DescribeResult = {
+    "params": Array<DescribeParam>,
+    "cols": Array<DescribeCol>,
+    "is_explain": boolean,
+    "readonly": boolean,
+}
+```
+
+In the result, `is_explain` is true if the statement was an `EXPLAIN` statement,
+and `readonly` is true if the statement does not modify the database.
 
 ```typescript
 type DescribeParam = {
@@ -85,13 +92,13 @@ It is also possible that some parameters are not referenced in the statement, in
 which case the `name` is also `null`.
 
 ```typescript
-type DescribeColumn = {
+type DescribeCol = {
     "name": string,
     "decltype": string | null,
 }
 ```
 
-Information about columns of the statement is returned in `columns`.
+Information about columns of the statement is returned in `cols`.
 
 For each column, `name` specifies the name assigned by the SQL `AS` clause. For
 columns without `AS` clause, the name is not specified.
