@@ -38,82 +38,16 @@ Version 2 introduces three new requests:
 ```typescript
 type Request =
     | ...
-    | DescribeReq
     | StoreSqlReq
     | RemoveSqlReq
+    | DescribeReq
 
 type Response =
     | ...
-    | DescribeResp
     | StoreSqlReq
     | RemoveSqlReq
+    | DescribeResp
 ```
-
-### Describe a statement
-
-```typescript
-type DescribeReq = {
-    "type": "describe",
-    "stream_id": int32,
-    "sql": string,
-}
-
-type DescribeResp = {
-    "type": "describe",
-    "result": DescribeResult,
-}
-```
-
-The `describe` request is used to parse and analyze a SQL statement. `stream_id`
-specifies the stream on which the statement is parsed and `sql` specifies the
-SQL text. In the response, `result` contains the result of describing a
-statement.
-
-```typescript
-type DescribeResult = {
-    "params": Array<DescribeParam>,
-    "cols": Array<DescribeCol>,
-    "is_explain": boolean,
-    "readonly": boolean,
-}
-```
-
-In the result, `is_explain` is true if the statement was an `EXPLAIN` statement,
-and `readonly` is true if the statement does not modify the database.
-
-```typescript
-type DescribeParam = {
-    "name": string | null,
-}
-```
-
-Information about parameters of the statement is returned in `params`. SQLite
-indexes parameters from 1, so the first object in the `params` array describes
-parameter 1.
-
-For each parameter, the `name` field specifies the name of the parameter. For
-parameters of the form `?NNN`, `:AAA`, `@AAA` and `$AAA`, the name includes the
-initial `?`, `:`, `@` or `$` character. Parameters of the form `?` are nameless,
-their `name` is `null`.
-
-It is also possible that some parameters are not referenced in the statement, in
-which case the `name` is also `null`.
-
-```typescript
-type DescribeCol = {
-    "name": string,
-    "decltype": string | null,
-}
-```
-
-Information about columns of the statement is returned in `cols`.
-
-For each column, `name` specifies the name assigned by the SQL `AS` clause. For
-columns without `AS` clause, the name is not specified.
-
-For result columns that directly originate from tables in the database,
-`decltype` specifies the declared type of the column. For other columns (such as
-results of expressions), `decltype` is `null`.
 
 ### Store an SQL text on the server
 
@@ -156,6 +90,75 @@ the response.
 
 It is not an error if the client attempts to remove a SQL text id that is not
 used.
+
+### Describe a statement
+
+```typescript
+type DescribeReq = {
+    "type": "describe",
+    "stream_id": int32,
+    "sql"?: string | null,
+    "sql_id"?: int32 | null,
+}
+
+type DescribeResp = {
+    "type": "describe",
+    "result": DescribeResult,
+}
+```
+
+The `describe` request is used to parse and analyze a SQL statement. `stream_id`
+specifies the stream on which the statement is parsed. `sql` or `sql_id` specify
+the SQL text: exactly one of these two fields must be specified, `sql` passes
+the SQL directly as a string, while `sql_id` refers to a SQL text previously
+stored with `store_sql`. In the response, `result` contains the result of
+describing a statement.
+
+```typescript
+type DescribeResult = {
+    "params": Array<DescribeParam>,
+    "cols": Array<DescribeCol>,
+    "is_explain": boolean,
+    "is_readonly": boolean,
+}
+```
+
+In the result, `is_explain` is true if the statement was an `EXPLAIN` statement,
+and `is_readonly` is true if the statement does not modify the database.
+
+```typescript
+type DescribeParam = {
+    "name": string | null,
+}
+```
+
+Information about parameters of the statement is returned in `params`. SQLite
+indexes parameters from 1, so the first object in the `params` array describes
+parameter 1.
+
+For each parameter, the `name` field specifies the name of the parameter. For
+parameters of the form `?NNN`, `:AAA`, `@AAA` and `$AAA`, the name includes the
+initial `?`, `:`, `@` or `$` character. Parameters of the form `?` are nameless,
+their `name` is `null`.
+
+It is also possible that some parameters are not referenced in the statement, in
+which case the `name` is also `null`.
+
+```typescript
+type DescribeCol = {
+    "name": string,
+    "decltype": string | null,
+}
+```
+
+Information about columns of the statement is returned in `cols`.
+
+For each column, `name` specifies the name assigned by the SQL `AS` clause. For
+columns without `AS` clause, the name is not specified.
+
+For result columns that directly originate from tables in the database,
+`decltype` specifies the declared type of the column. For other columns (such as
+results of expressions), `decltype` is `null`.
 
 ## Other changes
 

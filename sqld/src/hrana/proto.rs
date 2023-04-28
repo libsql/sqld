@@ -29,6 +29,7 @@ pub enum Request {
     CloseStream(CloseStreamReq),
     Execute(ExecuteReq),
     Batch(BatchReq),
+    Describe(DescribeReq),
 }
 
 #[derive(Serialize, Debug)]
@@ -38,6 +39,7 @@ pub enum Response {
     CloseStream(CloseStreamResp),
     Execute(ExecuteResp),
     Batch(BatchResp),
+    Describe(DescribeResp),
 }
 
 #[derive(Deserialize, Debug)]
@@ -76,6 +78,17 @@ pub struct BatchReq {
 #[derive(Serialize, Debug)]
 pub struct BatchResp {
     pub result: BatchResult,
+}
+
+#[derive(Deserialize, Debug)]
+pub struct DescribeReq {
+    pub stream_id: i32,
+    pub sql: String,
+}
+
+#[derive(Serialize, Debug)]
+pub struct DescribeResp {
+    pub result: DescribeResult,
 }
 
 #[derive(Serialize, Debug)]
@@ -140,6 +153,25 @@ pub enum BatchCond {
     Not { cond: Box<BatchCond> },
     And { conds: Vec<BatchCond> },
     Or { conds: Vec<BatchCond> },
+}
+
+#[derive(Serialize, Debug)]
+pub struct DescribeResult {
+    pub params: Vec<DescribeParam>,
+    pub cols: Vec<DescribeCol>,
+    pub is_explain: bool,
+    pub is_readonly: bool,
+}
+
+#[derive(Serialize, Debug)]
+pub struct DescribeParam {
+    pub name: Option<String>,
+}
+
+#[derive(Serialize, Debug)]
+pub struct DescribeCol {
+    pub name: String,
+    pub decltype: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]

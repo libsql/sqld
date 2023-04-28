@@ -4,16 +4,21 @@ use std::sync::Arc;
 use anyhow::{anyhow, bail, Context as _, Result};
 use futures::future::BoxFuture;
 use tokio::sync::{mpsc, oneshot};
+use tokio_tungstenite::tungstenite;
+use tungstenite::protocol::frame::coding::CloseCode;
 
 use super::{proto, Server};
+use super::conn::ProtocolError;
+use super::handshake::Protocol;
 use crate::auth::{AuthError, Authenticated};
 use crate::database::Database;
 use crate::hrana::batch::{execute_batch, BatchError};
-use crate::hrana::stmt::{execute_stmt, StmtError};
+use crate::hrana::stmt::{execute_stmt, describe_stmt, StmtError};
 
 /// Session-level state of an authenticated Hrana connection.
 pub struct Session {
     authenticated: Authenticated,
+    protocol: Protocol,
     streams: HashMap<i32, StreamHandle>,
 }
 
@@ -63,7 +68,11 @@ pub enum ResponseError {
     Stmt(StmtError),
 }
 
-pub(super) async fn handle_hello(server: &Server, jwt: Option<String>) -> Result<Session> {
+pub(super) fn handle_initial_hello(
+    server: &Server,
+    protocol: Protocol,
+    jwt: Option<String>,
+) -> Result<Session> {
     let authenticated = server
         .auth
         .authenticate_jwt(jwt.as_deref())
@@ -71,8 +80,28 @@ pub(super) async fn handle_hello(server: &Server, jwt: Option<String>) -> Result
 
     Ok(Session {
         authenticated,
+        protocol,
         streams: HashMap::new(),
     })
+}
+
+pub(super) fn handle_repeated_hello(
+    server: &Server,
+    session: &mut Session,
+    jwt: Option<String>,
+) -> Result<()> {
+    if session.protocol < Protocol::Hrana2 {
+        bail!(ProtocolError {
+            code: CloseCode::Policy,
+            message: "Hello message can only be sent once in protocol version below 2".into(),
+        })
+    }
+
+    session.authenticated = server
+        .auth
+        .authenticate_jwt(jwt.as_deref())
+        .map_err(|err| anyhow!(ResponseError::Auth { source: err }))?;
+    Ok(())
 }
 
 pub(super) async fn handle_request(
@@ -154,6 +183,30 @@ pub(super) async fn handle_request(
                 match execute_batch(&**db, auth, &req.batch).await {
                     Ok(result) => Ok(proto::Response::Batch(proto::BatchResp { result })),
                     Err(err) => bail!(ResponseError::Batch(err.downcast::<BatchError>()?)),
+                }
+            });
+        }
+        proto::Request::Describe(req) => {
+            if session.protocol < Protocol::Hrana2 {
+                bail!(ProtocolError {
+                    code: CloseCode::Policy,
+                    message: "The `describe` request is only supported in protocol version 2 and higher".into(),
+                })
+            }
+
+            let stream_id = req.stream_id;
+            let Some(stream_hnd) = session.streams.get_mut(&stream_id) else {
+                bail!(ResponseError::StreamNotFound { stream_id })
+            };
+
+            let auth = session.authenticated;
+            stream_respond!(stream_hnd, async move |stream| {
+                let Some(db) = stream.db.as_ref() else {
+                    bail!(ResponseError::StreamNotOpen { stream_id })
+                };
+                match describe_stmt(&**db, auth, req.sql).await {
+                    Ok(result) => Ok(proto::Response::Describe(proto::DescribeResp { result })),
+                    Err(err) => bail!(ResponseError::Stmt(err.downcast::<StmtError>()?)),
                 }
             });
         }

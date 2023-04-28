@@ -2,7 +2,7 @@ use anyhow::{bail, Result};
 
 use super::proto;
 use crate::auth::Authenticated;
-use crate::database::Database;
+use crate::database::{Database, DescribeResponse};
 use crate::error::Error as SqldError;
 use crate::hrana;
 use crate::query::{Params, Query, QueryResponse, Value};
@@ -47,6 +47,20 @@ pub async fn execute_stmt(
     let (query_result, _) = db.execute_one(query, auth).await?;
     match query_result {
         Ok(query_response) => Ok(proto_stmt_result_from_query_response(query_response)),
+        Err(sqld_error) => match stmt_error_from_sqld_error(sqld_error) {
+            Ok(stmt_error) => bail!(stmt_error),
+            Err(sqld_error) => bail!(sqld_error),
+        },
+    }
+}
+
+pub async fn describe_stmt(
+    db: &dyn Database,
+    auth: Authenticated,
+    sql: String,
+) -> Result<proto::DescribeResult> {
+    match db.describe(sql, auth).await? {
+        Ok(describe_response) => Ok(proto_describe_result_from_describe_response(describe_response)),
         Err(sqld_error) => match stmt_error_from_sqld_error(sqld_error) {
             Ok(stmt_error) => bail!(stmt_error),
             Err(sqld_error) => bail!(sqld_error),
@@ -126,6 +140,21 @@ fn proto_value_from_value(value: Value) -> proto::Value {
         Value::Blob(value) => proto::Value::Blob {
             value: value.into(),
         },
+    }
+}
+
+fn proto_describe_result_from_describe_response(response: DescribeResponse) -> proto::DescribeResult {
+    proto::DescribeResult {
+        params: response.params
+            .into_iter()
+            .map(|p| proto::DescribeParam { name: p.name })
+            .collect(),
+        cols: response.cols
+            .into_iter()
+            .map(|c| proto::DescribeCol { name: c.name, decltype: c.decltype })
+            .collect(),
+        is_explain: response.is_explain,
+        is_readonly: response.is_readonly,
     }
 }
 
