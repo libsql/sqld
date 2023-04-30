@@ -2,15 +2,18 @@ use std::fmt::Debug;
 use std::sync::Arc;
 
 use bytes::Bytes;
-use futures::Sink;
+use futures::{Sink, SinkExt};
 use pgwire::api::portal::Portal;
-use pgwire::api::query::{ExtendedQueryHandler, SimpleQueryHandler, StatementOrPortal};
+use pgwire::api::query::{
+    send_query_response, ExtendedQueryHandler, SimpleQueryHandler, StatementOrPortal,
+};
 use pgwire::api::results::{DescribeResponse, Response};
 use pgwire::api::stmt::NoopQueryParser;
 use pgwire::api::store::{MemPortalStore, PortalStore};
 use pgwire::api::{ClientInfo, Type, DEFAULT_NAME};
 use pgwire::error::{ErrorInfo, PgWireError, PgWireResult};
-use pgwire::messages::extendedquery::Describe;
+use pgwire::messages::extendedquery::{Describe, Execute};
+use pgwire::messages::response::{EmptyQueryResponse, ReadyForQuery, READY_STATUS_IDLE};
 use pgwire::messages::PgWireBackendMessage;
 
 use crate::database::Database;
@@ -91,39 +94,79 @@ impl ExtendedQueryHandler for QueryHandler {
     type PortalStore = MemPortalStore<Self::Statement>;
     type QueryParser = NoopQueryParser;
 
+    async fn on_execute<C>(&self, client: &mut C, message: Execute) -> PgWireResult<()>
+    where
+        C: ClientInfo + Sink<PgWireBackendMessage> + Unpin + Send + Sync,
+        C::Error: Debug,
+        PgWireError: From<<C as Sink<PgWireBackendMessage>>::Error>,
+    {
+        let portal_name = message.name().as_deref().unwrap_or(DEFAULT_NAME);
+        if let Some(portal) = self.portal_store().get_portal(portal_name) {
+            debug_assert_eq!(
+                portal.statement().parameter_types().len(),
+                portal.parameter_len()
+            );
+
+            let stmt = Statement::parse(portal.statement().statement())
+                .next()
+                .transpose()
+                .map_err(|e| {
+                    PgWireError::UserError(
+                        ErrorInfo::new("ERROR".into(), "XX000".into(), e.to_string()).into(),
+                    )
+                })?
+                .unwrap_or_default();
+
+            let params = parse_params(portal.statement().parameter_types(), portal.parameters());
+
+            let query = Query { stmt, params };
+            let response = self.handle_queries(vec![query]).await.map(|mut res| {
+                assert_eq!(res.len(), 1);
+                res.pop().unwrap()
+            })?;
+            match response {
+                Response::EmptyQuery => {
+                    client
+                        .feed(PgWireBackendMessage::EmptyQueryResponse(EmptyQueryResponse))
+                        .await?;
+                }
+                Response::Query(results) => {
+                    let include_col_defs = client.metadata_mut().remove(REQUEST_DESCRIBE).is_some();
+                    send_query_response(client, results, include_col_defs).await?;
+                }
+                Response::Execution(tag) => {
+                    client
+                        .send(PgWireBackendMessage::CommandComplete(tag.into()))
+                        .await?;
+                }
+                Response::Error(err) => {
+                    client
+                        .send(PgWireBackendMessage::ErrorResponse((*err).into()))
+                        .await?;
+                }
+            }
+            client
+                .send(PgWireBackendMessage::ReadyForQuery(ReadyForQuery::new(
+                    READY_STATUS_IDLE,
+                )))
+                .await?;
+
+            Ok(())
+        } else {
+            Err(PgWireError::PortalNotFound(portal_name.to_owned()))
+        }
+    }
+
     async fn do_query<'q, 'b: 'q, C>(
         &'b self,
-        client: &mut C,
-        portal: &'q Portal<String>,
+        _client: &mut C,
+        _portal: &'q Portal<String>,
         _max_rows: usize,
     ) -> PgWireResult<Response<'q>>
     where
         C: ClientInfo + Unpin + Send + Sync,
     {
-        debug_assert_eq!(
-            portal.statement().parameter_types().len(),
-            portal.parameter_len()
-        );
-
-        let stmt = Statement::parse(portal.statement().statement())
-            .next()
-            .transpose()
-            .map_err(|e| {
-                PgWireError::UserError(
-                    ErrorInfo::new("ERROR".into(), "XX000".into(), e.to_string()).into(),
-                )
-            })?
-            .unwrap_or_default();
-
-        let params = parse_params(portal.statement().parameter_types(), portal.parameters());
-
-        let query = Query { stmt, params };
-        //TODO: send describe
-        let include_col_defs = client.metadata_mut().remove(REQUEST_DESCRIBE).is_some();
-        self.handle_queries(vec![query]).await.map(|mut res| {
-            assert_eq!(res.len(), 1);
-            res.pop().unwrap()
-        })
+        unreachable!()
     }
 
     async fn do_describe<C>(
