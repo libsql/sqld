@@ -7,6 +7,9 @@ where low latency and small overhead is important.
 In this specification, version 2 of the protocol is described as a set of
 extensions to version 1.
 
+Version 2 is designed to be a strict superset of version 1: every server that
+implements version 2 also implements version 1.
+
 ## Version negotiation
 
 The Hrana protocol version 2 uses a WebSocket subprotocol `hrana2`. The
@@ -23,22 +26,27 @@ as the first message, but in version 2, the client can also send it again
 anytime during the lifetime of the connection to reauthenticate, by providing a
 new JWT.
 
-This feature is needed because in long-living connections, the JWT used to
+This feature was introduced because, in long-living connections, the JWT used to
 authenticate the client may expire and the server may terminate the connection.
-Using this feature, the client can provide a fresh JWT.
+Using this feature, the client can provide a fresh JWT, thus keeping the
+connection properly authenticated.
 
 ## Requests
 
-Version 2 introduces one new request:
+Version 2 introduces three new requests:
 
 ```typescript
 type Request =
     | ...
     | DescribeReq
+    | StoreSqlReq
+    | RemoveSqlReq
 
 type Response =
     | ...
     | DescribeResp
+    | StoreSqlReq
+    | RemoveSqlReq
 ```
 
 ### Describe a statement
@@ -106,3 +114,66 @@ columns without `AS` clause, the name is not specified.
 For result columns that directly originate from tables in the database,
 `decltype` specifies the declared type of the column. For other columns (such as
 results of expressions), `decltype` is `null`.
+
+### Store an SQL text on the server
+
+```typescript
+type StoreSqlReq = {
+    "type": "store_sql",
+    "sql_id": int32,
+    "sql": string,
+}
+
+type StoreSqlResp = {
+    "type": "store_sql",
+}
+```
+
+The `store_sql` request stores an SQL text on the server. The client can then
+refer to this SQL text in `Stmt` objects by its id, instead of repeatedly
+sending the same string over the network.
+
+SQL text ids are arbitrary 32-bit signed integers assigned by the client. It is
+an error if the client tries to store an SQL text with an id which is already in
+use.
+
+### Remove a stored SQL text
+
+```typescript
+type RemoveSqlReq = {
+    "type": "remove_sql",
+    "sql_id": int32,
+}
+
+type RemoveSqlResp = {
+    "type": "remove_sql",
+}
+```
+
+The `remove_sql` request can be used to delete an SQL text stored on the server
+with `store_sql`. The client can safely reuse the SQL text id after it receives
+the response.
+
+It is not an error if the client attempts to remove a SQL text id that is not
+used.
+
+## Other changes
+
+### Statement
+
+```typescript
+type Stmt = {
+    "sql"?: string | undefined,
+    "sql_id"?: int32 | undefined,
+    "args"?: Array<Value>,
+    "named_args"?: Array<NamedArg>,
+    "want_rows"?: boolean,
+}
+```
+
+In version 2 of the protocol, the SQL text of a statement can be specified
+either by passing a string directly in the `sql` field, or by passing SQL text
+id that has previously been stored with the `store_sql` request. Exactly one of
+`sql` and `sql_id` must be passed.
+
+Also, the `want_rows` field is now optional and defaults to `true`.
