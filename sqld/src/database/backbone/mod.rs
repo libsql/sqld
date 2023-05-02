@@ -109,12 +109,13 @@ pub enum Role<'a> {
 }
 
 impl<'a> Role<'a> {
-    pub fn transition(
+    pub fn transition<'b>(
         role: impl Into<Role<'a>>,
-        meta: MetaMessage,
+        meta: &'b MetaMessage,
         offset: i64,
-    ) -> anyhow::Result<Self> {
+    ) -> anyhow::Result<Role<'a>> {
         let backbone = role.into().backbone();
+        assert!(backbone.term < meta.term);
         backbone.term = meta.term;
         if meta.primary_infos.id == backbone.config.node_id {
             // we are the new primary
@@ -123,7 +124,7 @@ impl<'a> Role<'a> {
         } else {
             Ok(Role::Replica(ReplicaState::new(
                 backbone,
-                meta.primary_infos,
+                meta.primary_infos.clone(),
             )))
         }
     }
@@ -156,7 +157,7 @@ impl<'a> From<ReplicaState<'a>> for Role<'a> {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct NodeInfo {
     /// Id of the node
     id: String,
@@ -164,7 +165,7 @@ pub struct NodeInfo {
     addr: String,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct MetaMessage {
     primary_infos: NodeInfo,
     term: u64,
@@ -203,7 +204,7 @@ impl Connections {
                     });
                 }
                 None => {
-                    todo!("connection closed");
+                    let _ = ret.send(Err(Error::ConnectionReset));
                 }
             },
             Message::Close => {
