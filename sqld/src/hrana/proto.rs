@@ -30,6 +30,8 @@ pub enum Request {
     Execute(ExecuteReq),
     Batch(BatchReq),
     Describe(DescribeReq),
+    StoreSql(StoreSqlReq),
+    CloseSql(CloseSqlReq),
 }
 
 #[derive(Serialize, Debug)]
@@ -40,6 +42,8 @@ pub enum Response {
     Execute(ExecuteResp),
     Batch(BatchResp),
     Describe(DescribeResp),
+    StoreSql(StoreSqlResp),
+    CloseSql(CloseSqlResp),
 }
 
 #[derive(Deserialize, Debug)]
@@ -83,13 +87,33 @@ pub struct BatchResp {
 #[derive(Deserialize, Debug)]
 pub struct DescribeReq {
     pub stream_id: i32,
-    pub sql: String,
+    #[serde(default)]
+    pub sql: Option<String>,
+    #[serde(default)]
+    pub sql_id: Option<i32>,
 }
 
 #[derive(Serialize, Debug)]
 pub struct DescribeResp {
     pub result: DescribeResult,
 }
+
+#[derive(Deserialize, Debug)]
+pub struct StoreSqlReq {
+    pub sql_id: i32,
+    pub sql: String,
+}
+
+#[derive(Serialize, Debug)]
+pub struct StoreSqlResp {}
+
+#[derive(Deserialize, Debug)]
+pub struct CloseSqlReq {
+    pub sql_id: i32,
+}
+
+#[derive(Serialize, Debug)]
+pub struct CloseSqlResp {}
 
 #[derive(Serialize, Debug)]
 pub struct Error {
@@ -99,12 +123,16 @@ pub struct Error {
 
 #[derive(Deserialize, Debug)]
 pub struct Stmt {
-    pub sql: String,
+    #[serde(default)]
+    pub sql: Option<String>,
+    #[serde(default)]
+    pub sql_id: Option<i32>,
     #[serde(default)]
     pub args: Vec<Value>,
     #[serde(default)]
     pub named_args: Vec<NamedArg>,
-    pub want_rows: bool,
+    #[serde(default)]
+    pub want_rows: Option<bool>,
 }
 
 #[derive(Deserialize, Debug)]

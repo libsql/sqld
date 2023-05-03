@@ -38,15 +38,15 @@ Version 2 introduces three new requests:
 ```typescript
 type Request =
     | ...
-    | StoreSqlReq
-    | RemoveSqlReq
     | DescribeReq
+    | StoreSqlReq
+    | CloseSqlReq
 
 type Response =
     | ...
-    | StoreSqlReq
-    | RemoveSqlReq
     | DescribeResp
+    | StoreSqlReq
+    | CloseSqlReq
 ```
 
 ### Store an SQL text on the server
@@ -71,24 +71,24 @@ SQL text ids are arbitrary 32-bit signed integers assigned by the client. It is
 an error if the client tries to store an SQL text with an id which is already in
 use.
 
-### Remove a stored SQL text
+### Close a stored SQL text
 
 ```typescript
-type RemoveSqlReq = {
-    "type": "remove_sql",
+type CloseSqlReq = {
+    "type": "close_sql",
     "sql_id": int32,
 }
 
-type RemoveSqlResp = {
-    "type": "remove_sql",
+type CloseSqlResp = {
+    "type": "close_sql",
 }
 ```
 
-The `remove_sql` request can be used to delete an SQL text stored on the server
+The `close_sql` request can be used to delete an SQL text stored on the server
 with `store_sql`. The client can safely reuse the SQL text id after it receives
 the response.
 
-It is not an error if the client attempts to remove a SQL text id that is not
+It is not an error if the client attempts to close a SQL text id that is not
 used.
 
 ### Describe a statement

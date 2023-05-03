@@ -17,8 +17,8 @@ use crate::stats::Stats;
 use crate::Result;
 
 use super::{
-    Cond, Database, DescribeResult, DescribeResponse, DescribeParam, DescribeCol,
-    Program, Step, TXN_TIMEOUT_SECS,
+    Cond, Database, DescribeCol, DescribeParam, DescribeResponse, DescribeResult, Program, Step,
+    TXN_TIMEOUT_SECS,
 };
 
 /// Internal message used to communicate between the database thread and the `LibSqlDb` handle.
@@ -200,7 +200,7 @@ impl LibSqlDb {
                     Message::Describe { sql, resp } => {
                         let result = connection.describe(&sql);
                         ok_or_exit!(resp.send(result));
-                    },
+                    }
                 }
             }
         });
@@ -357,20 +357,31 @@ impl Connection {
     fn describe(&self, sql: &str) -> DescribeResult {
         let stmt = self.conn.prepare(sql)?;
 
-        let params = (1..=stmt.parameter_count()).map(|param_i| {
-            let name = stmt.parameter_name(param_i).map(|n| n.into());
-            DescribeParam { name }
-        }).collect();
-            
-        let cols = stmt.columns().into_iter().map(|col| {
-            let name = col.name().into();
-            let decltype = col.decl_type().map(|t| t.into());
-            DescribeCol { name, decltype }
-        }).collect();
+        let params = (1..=stmt.parameter_count())
+            .map(|param_i| {
+                let name = stmt.parameter_name(param_i).map(|n| n.into());
+                DescribeParam { name }
+            })
+            .collect();
+
+        let cols = stmt
+            .columns()
+            .into_iter()
+            .map(|col| {
+                let name = col.name().into();
+                let decltype = col.decl_type().map(|t| t.into());
+                DescribeCol { name, decltype }
+            })
+            .collect();
 
         let is_explain = stmt.is_explain() != 0;
         let is_readonly = stmt.readonly();
-        Ok(DescribeResponse { params, cols, is_explain, is_readonly })
+        Ok(DescribeResponse {
+            params,
+            cols,
+            is_explain,
+            is_readonly,
+        })
     }
 }
 
@@ -422,9 +433,9 @@ fn check_program_auth(auth: Authenticated, pgm: &Program) -> Result<()> {
 
 fn check_describe_auth(auth: Authenticated) -> Result<()> {
     match auth {
-        Authenticated::Anonymous => Err(Error::NotAuthorized(
-            "anonymous access not allowed".into(),
-        )),
+        Authenticated::Anonymous => {
+            Err(Error::NotAuthorized("anonymous access not allowed".into()))
+        }
         Authenticated::Authorized(_) => Ok(()),
     }
 }

@@ -5,15 +5,15 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
-use anyhow::{Context as _, Result, bail};
+use anyhow::{bail, Context as _, Result};
 use futures::stream::FuturesUnordered;
 use futures::{ready, FutureExt as _, StreamExt as _};
 use tokio::sync::oneshot;
 use tokio_tungstenite::tungstenite;
 use tungstenite::protocol::frame::coding::CloseCode;
 
+use super::handshake::{Protocol, WebSocket};
 use super::{handshake, proto, session, Server, Upgrade};
-use super::handshake::{WebSocket, Protocol};
 
 /// State of a Hrana connection.
 struct Conn {
@@ -42,9 +42,18 @@ struct ResponseFuture {
 
 /// A protocol error that should close the WebSocket.
 #[derive(Debug)]
-pub(super) struct ProtocolError {
+pub struct ProtocolError {
     pub code: CloseCode,
     pub message: String,
+}
+
+impl ProtocolError {
+    pub fn from_message(message: impl Into<String>) -> Self {
+        Self {
+            code: CloseCode::Policy,
+            message: message.into(),
+        }
+    }
 }
 
 pub(super) async fn handle_tcp(
@@ -128,7 +137,12 @@ async fn handle_ws(
         }
     }
 
-    close(&mut conn, CloseCode::Normal, "Thank you for using sqld".into()).await;
+    close(
+        &mut conn,
+        CloseCode::Normal,
+        "Thank you for using sqld".into(),
+    )
+    .await;
     Ok(())
 }
 
@@ -197,10 +211,7 @@ async fn handle_request_msg(
     request: proto::Request,
 ) -> Result<bool> {
     let Some(session) = conn.session.as_mut() else {
-        bail!(ProtocolError {
-            code: CloseCode::Policy,
-            message: "Requests can only be sent after a hello".into(),
-        })
+        bail!(ProtocolError::from_message("Requests can only be sent after a hello"))
     };
 
     let response_rx = session::handle_request(&conn.server, session, &mut conn.join_set, request)

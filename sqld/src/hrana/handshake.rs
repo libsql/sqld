@@ -29,7 +29,7 @@ pub async fn handshake_tcp(socket: tokio::net::TcpStream) -> Result<(WebSocket, 
             Ok(protocol_) => {
                 protocol = Some(protocol_);
                 Ok(http::Response::from_parts(resp_parts, ()))
-            },
+            }
             Err(resp_body) => Err(http::Response::from_parts(resp_parts, Some(resp_body))),
         }
     };
@@ -44,7 +44,8 @@ pub async fn handshake_upgrade(upgrade: Upgrade) -> Result<(WebSocket, Protocol)
     let mut req = upgrade.request;
 
     let ws_config = Some(get_ws_config());
-    let (mut resp, stream_fut_protocol_res) = match hyper_tungstenite::upgrade(&mut req, ws_config) {
+    let (mut resp, stream_fut_protocol_res) = match hyper_tungstenite::upgrade(&mut req, ws_config)
+    {
         Ok((mut resp, stream_fut)) => match negotiate_protocol(req.headers(), resp.headers_mut()) {
             Ok(protocol) => (resp, Ok((stream_fut, protocol))),
             Err(msg) => {
@@ -101,14 +102,13 @@ fn negotiate_protocol(
             hrana2_supported |= protocol_str == "hrana2";
         }
 
-        let (protocol, protocol_str) =
-            if hrana2_supported {
-                (Protocol::Hrana2, "hrana2")
-            } else if hrana1_supported {
-                (Protocol::Hrana1, "hrana1")
-            } else {
-                return Err("Only 'hrana1' and 'hrana2' subprotocols are supported".into())
-            };
+        let (protocol, protocol_str) = if hrana2_supported {
+            (Protocol::Hrana2, "hrana2")
+        } else if hrana1_supported {
+            (Protocol::Hrana1, "hrana1")
+        } else {
+            return Err("Only 'hrana1' and 'hrana2' subprotocols are supported".into());
+        };
 
         resp_headers.append(
             "sec-websocket-protocol",

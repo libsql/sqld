@@ -4,22 +4,23 @@ use std::sync::Arc;
 use anyhow::{anyhow, bail, Context as _, Result};
 use futures::future::BoxFuture;
 use tokio::sync::{mpsc, oneshot};
-use tokio_tungstenite::tungstenite;
-use tungstenite::protocol::frame::coding::CloseCode;
 
-use super::{proto, Server};
 use super::conn::ProtocolError;
 use super::handshake::Protocol;
+use super::{proto, Server};
 use crate::auth::{AuthError, Authenticated};
 use crate::database::Database;
-use crate::hrana::batch::{execute_batch, BatchError};
-use crate::hrana::stmt::{execute_stmt, describe_stmt, StmtError};
+use crate::hrana::batch::{execute_batch, proto_batch_to_program, BatchError};
+use crate::hrana::stmt::{
+    describe_stmt, execute_stmt, proto_sql_to_sql, proto_stmt_to_query, StmtError,
+};
 
 /// Session-level state of an authenticated Hrana connection.
 pub struct Session {
     authenticated: Authenticated,
     protocol: Protocol,
     streams: HashMap<i32, StreamHandle>,
+    sqls: HashMap<i32, String>,
 }
 
 struct StreamHandle {
@@ -47,9 +48,6 @@ struct Stream {
 }
 
 /// An error which can be converted to a Hrana [Error][proto::Error].
-///
-/// In the future, we may want to extend Hrana errors with a machine readable reason code, which
-/// will correspond to a variant of this enum.
 #[derive(thiserror::Error, Debug)]
 pub enum ResponseError {
     #[error("Authentication failed: {source}")]
@@ -61,6 +59,11 @@ pub enum ResponseError {
     StreamExists { stream_id: i32 },
     #[error("Stream {stream_id} has failed to open")]
     StreamNotOpen { stream_id: i32 },
+
+    #[error("SQL text {sql_id} not found")]
+    SqlNotFound { sql_id: i32 },
+    #[error("SQL text {sql_id} already exists")]
+    SqlExists { sql_id: i32 },
 
     #[error(transparent)]
     Batch(BatchError),
@@ -82,6 +85,7 @@ pub(super) fn handle_initial_hello(
         authenticated,
         protocol,
         streams: HashMap::new(),
+        sqls: HashMap::new(),
     })
 }
 
@@ -91,10 +95,9 @@ pub(super) fn handle_repeated_hello(
     jwt: Option<String>,
 ) -> Result<()> {
     if session.protocol < Protocol::Hrana2 {
-        bail!(ProtocolError {
-            code: CloseCode::Policy,
-            message: "Hello message can only be sent once in protocol version below 2".into(),
-        })
+        bail!(ProtocolError::from_message(
+            "Hello message can only be sent once in protocol version below 2"
+        ))
     }
 
     session.authenticated = server
@@ -118,6 +121,12 @@ pub(super) async fn handle_request(
                 Box::pin(async move { $($body)* })
             })
             .await
+        };
+    }
+
+    macro_rules! respond {
+        ($value:expr) => {
+            resp_tx.send(Ok($value)).unwrap()
         };
     }
 
@@ -158,15 +167,17 @@ pub(super) async fn handle_request(
                 bail!(ResponseError::StreamNotFound { stream_id })
             };
 
+            let query = proto_stmt_to_query(&req.stmt, &session.sqls, session.protocol)
+                .map_err(wrap_stmt_error)?;
             let auth = session.authenticated;
             stream_respond!(stream_hnd, async move |stream| {
                 let Some(db) = stream.db.as_ref() else {
                     bail!(ResponseError::StreamNotOpen { stream_id })
                 };
-                match execute_stmt(&**db, auth, &req.stmt).await {
-                    Ok(result) => Ok(proto::Response::Execute(proto::ExecuteResp { result })),
-                    Err(err) => bail!(ResponseError::Stmt(err.downcast::<StmtError>()?)),
-                }
+                let result = execute_stmt(&**db, auth, query)
+                    .await
+                    .map_err(wrap_stmt_error)?;
+                Ok(proto::Response::Execute(proto::ExecuteResp { result }))
             });
         }
         proto::Request::Batch(req) => {
@@ -175,23 +186,24 @@ pub(super) async fn handle_request(
                 bail!(ResponseError::StreamNotFound { stream_id })
             };
 
+            let pgm = proto_batch_to_program(&req.batch, &session.sqls, session.protocol)
+                .map_err(wrap_batch_error)?;
             let auth = session.authenticated;
             stream_respond!(stream_hnd, async move |stream| {
                 let Some(db) = stream.db.as_ref() else {
                     bail!(ResponseError::StreamNotOpen { stream_id })
                 };
-                match execute_batch(&**db, auth, &req.batch).await {
-                    Ok(result) => Ok(proto::Response::Batch(proto::BatchResp { result })),
-                    Err(err) => bail!(ResponseError::Batch(err.downcast::<BatchError>()?)),
-                }
+                let result = execute_batch(&**db, auth, pgm)
+                    .await
+                    .map_err(wrap_batch_error)?;
+                Ok(proto::Response::Batch(proto::BatchResp { result }))
             });
         }
         proto::Request::Describe(req) => {
             if session.protocol < Protocol::Hrana2 {
-                bail!(ProtocolError {
-                    code: CloseCode::Policy,
-                    message: "The `describe` request is only supported in protocol version 2 and higher".into(),
-                })
+                bail!(ProtocolError::from_message(
+                    "The `describe` request is only supported in protocol version 2 and higher"
+                ))
             }
 
             let stream_id = req.stream_id;
@@ -199,16 +211,48 @@ pub(super) async fn handle_request(
                 bail!(ResponseError::StreamNotFound { stream_id })
             };
 
+            let sql = proto_sql_to_sql(
+                req.sql.as_deref(),
+                req.sql_id,
+                &session.sqls,
+                session.protocol,
+            )?
+            .into();
             let auth = session.authenticated;
             stream_respond!(stream_hnd, async move |stream| {
                 let Some(db) = stream.db.as_ref() else {
                     bail!(ResponseError::StreamNotOpen { stream_id })
                 };
-                match describe_stmt(&**db, auth, req.sql).await {
-                    Ok(result) => Ok(proto::Response::Describe(proto::DescribeResp { result })),
-                    Err(err) => bail!(ResponseError::Stmt(err.downcast::<StmtError>()?)),
-                }
+                let result = describe_stmt(&**db, auth, sql)
+                    .await
+                    .map_err(wrap_stmt_error)?;
+                Ok(proto::Response::Describe(proto::DescribeResp { result }))
             });
+        }
+        proto::Request::StoreSql(req) => {
+            if session.protocol < Protocol::Hrana2 {
+                bail!(ProtocolError::from_message(
+                    "The `store_sql` request is only supported in protocol version 2 and higher"
+                ))
+            }
+
+            let sql_id = req.sql_id;
+            if session.sqls.contains_key(&sql_id) {
+                bail!(ResponseError::SqlExists { sql_id })
+            }
+
+            session.sqls.insert(sql_id, req.sql);
+            respond!(proto::Response::StoreSql(proto::StoreSqlResp {}));
+        }
+        proto::Request::CloseSql(req) => {
+            if session.protocol < Protocol::Hrana2 {
+                bail!(ProtocolError::from_message(
+                    "The `close_sql` request is only supported in protocol version 2 and higher"
+                ))
+            }
+
+            session.sqls.remove(&req.sql_id);
+            respond!(proto::Response::CloseSql(proto::CloseSqlResp {}));
         }
     }
     Ok(resp_rx)
@@ -241,6 +285,20 @@ async fn stream_respond<F>(
     let _: Result<_, _> = stream_hnd.job_tx.send(job).await;
 }
 
+fn wrap_stmt_error(err: anyhow::Error) -> anyhow::Error {
+    match err.downcast::<StmtError>() {
+        Ok(stmt_err) => anyhow!(ResponseError::Stmt(stmt_err)),
+        Err(err) => err,
+    }
+}
+
+fn wrap_batch_error(err: anyhow::Error) -> anyhow::Error {
+    match err.downcast::<BatchError>() {
+        Ok(batch_err) => anyhow!(ResponseError::Batch(batch_err)),
+        Err(err) => err,
+    }
+}
+
 impl ResponseError {
     pub fn code(&self) -> &'static str {
         match self {
@@ -248,6 +306,8 @@ impl ResponseError {
             Self::StreamNotFound { .. } => "STREAM_NOT_FOUND",
             Self::StreamExists { .. } => "STREAM_EXISTS",
             Self::StreamNotOpen { .. } => "STREAM_NOT_OPEN",
+            Self::SqlNotFound { .. } => "SQL_NOT_FOUND",
+            Self::SqlExists { .. } => "SQL_EXISTS",
             Self::Batch(err) => err.code(),
             Self::Stmt(err) => err.code(),
         }
