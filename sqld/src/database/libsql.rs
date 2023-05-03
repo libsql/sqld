@@ -78,11 +78,12 @@ macro_rules! ok_or_exit {
 
 pub fn open_db(
     path: &Path,
-    wal_hook: impl WalHook + Send + Clone + 'static,
+    wal_hook: impl WalHook + Clone + 'static,
     with_bottomless: bool,
 ) -> anyhow::Result<rusqlite::Connection> {
     let mut retries = 0;
-    loop {
+    while retries < 10 {
+        retries += 1;
         #[cfg(feature = "mwal_backend")]
         let conn_result = match crate::VWAL_METHODS.get().unwrap() {
             Some(ref vwal_methods) => crate::libsql::mwal::open_with_virtual_wal(
@@ -128,17 +129,18 @@ pub fn open_db(
                     // For this reason we may not be able to open the database right away, so we
                     // retry a couple of times before giving up.
                     Ok(rusqlite::Error::SqliteFailure(e, _))
-                        if e.code == rusqlite::ffi::ErrorCode::DatabaseBusy && retries < 10 =>
+                        if e.code == rusqlite::ffi::ErrorCode::DatabaseBusy =>
                     {
                         std::thread::sleep(Duration::from_millis(10));
-                        retries += 1;
                     }
-                    Ok(e) => panic!("Unhandled error opening libsql: {e}"),
-                    Err(e) => panic!("Unhandled error opening libsql: {e}"),
+                    Ok(e) => anyhow::bail!("error opening libsql: {e}"),
+                    Err(e) => anyhow::bail!("error opening libsql: {e}"),
                 }
             }
         }
     }
+
+    anyhow::bail!("error opening libsql")
 }
 
 impl LibSqlDb {
@@ -397,5 +399,67 @@ impl Database for LibSqlDb {
         let _ = self.sender.send(msg);
 
         Ok(receiver.await?)
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use std::ffi::{c_int, c_void};
+    use std::sync::{atomic::AtomicBool, Arc};
+
+    use tempfile::tempdir;
+
+    use super::*;
+
+    #[test]
+    fn test_pre_commit_callback() {
+        #[derive(Clone)]
+        struct TestHook(Arc<AtomicBool>);
+        unsafe impl WalHook for TestHook {
+            fn on_frames(
+                &mut self,
+                wal: *mut rusqlite::ffi::libsql_wal,
+                page_size: std::ffi::c_int,
+                page_headers: *mut rusqlite::ffi::libsql_pghdr,
+                size_after: u32,
+                is_commit: std::ffi::c_int,
+                sync_flags: std::ffi::c_int,
+                orig: sqld_libsql_bindings::ffi::types::XWalFrameFn,
+            ) -> std::ffi::c_int {
+                unsafe {
+                    orig(
+                        wal,
+                        page_size,
+                        page_headers,
+                        size_after,
+                        is_commit,
+                        sync_flags,
+                        Some(pre_commit_cb),
+                        self as *mut _ as *mut c_void,
+                    )
+                }
+            }
+        }
+
+        unsafe extern "C" fn pre_commit_cb(ctx: *mut c_void) -> c_int {
+            let this = &mut *(ctx as *mut TestHook);
+            if this.0.load(std::sync::atomic::Ordering::Relaxed) {
+                0
+            } else {
+                1
+            }
+        }
+
+        let hook = TestHook(Arc::new(AtomicBool::new(false)));
+        let dir = tempdir().unwrap();
+        let db = open_db(dir.path(), hook.clone(), false).unwrap();
+
+        assert!(db.execute("CREATE TABLE test (x);", ()).is_err());
+        assert!(db.execute("SELECT * from test;", ()).is_err()); // table doesn't exist
+
+        hook.0.store(true, std::sync::atomic::Ordering::Relaxed);
+
+        assert!(db.execute("CREATE TABLE test (x);", ()).is_ok());
+        assert!(db.execute("SELECT * FROM test;", ()).is_ok()); // table created
     }
 }

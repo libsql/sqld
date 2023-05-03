@@ -64,32 +64,40 @@ impl<'a> PrimaryState<'a> {
             let record = FutureRecord::to(&self.backbone.config.cluster_id)
                 .key(&key)
                 .payload(frame.as_bytes());
-            let (_, offset) = producer.send(record, Duration::from_secs(0)).await.unwrap();
-            // Since there is only a single primary, no one else should be writing to the queue
-            // while we are. If we notice that the offset of the message we just wrote increased
-            // by more than one, it means that someone else wrote to the queue, and we should
-            // rollback the transaction.
-            //
-            // there may be in flight messages, that doesn't mean we are not the leader
-            // anymore. In order to solve that:
-            // - if the condition described above is satisfied, proceed with commit
-            // - else, spawn the consumer on a different task, and wait for this task to catch up
-            // with the replication offset. Once this is done compare the terms. If the term has
-            // changed, then, stepdown and rollback. Otherwise, we are still leader, proceed to
-            // commit and update offset.
-            if dbg!(offset) as u64 != dbg!(self.current_kafka_offset + 1) {
-                let r = recv.wait_for(|(_, offset)| offset >= offset).await?;
-                if let (Some(ref meta), _) = *r {
-                    if meta.term > self.backbone.term {
-                        // new term, we'll have to step_down
-                        bail!("not a leader");
-                    } else {
-                        continue;
+            match producer.send(record, Timeout::Never).await {
+                Ok((_partition, offset)) => {
+                    // Since there is only a single primary, no one else should be writing to the queue
+                    // while we are. If we notice that the offset of the message we just wrote increased
+                    // by more than one, it means that someone else wrote to the queue, and we should
+                    // rollback the transaction.
+                    //
+                    // there may be in flight messages, that doesn't mean we are not the leader
+                    // anymore. In order to solve that:
+                    // - if the condition described above is satisfied, proceed with commit
+                    // - else, spawn the consumer on a different task, and wait for this task to catch up
+                    // with the replication offset. Once this is done compare the terms. If the term has
+                    // changed, then, stepdown and rollback. Otherwise, we are still leader, proceed to
+                    // commit and update offset.
+                    if dbg!(offset) as u64 != dbg!(self.current_kafka_offset + 1) {
+                        let r = recv.wait_for(|(_, offset)| offset >= offset).await?;
+                        if let (Some(ref meta), _) = *r {
+                            if meta.term > self.backbone.term {
+                                // new term, we'll have to step_down
+                                tracing::error!("cannot perform write: not a leader");
+                                bail!("not a leader");
+                            } else {
+                                self.current_kafka_offset = offset as _;
+                                continue;
+                            }
+                        }
+                        bail!("offset of the message doesn't match expected offset");
                     }
+                    self.current_kafka_offset += 1;
                 }
-                bail!("offset of the message doesn't match expected offset");
+                Err((_e, _msg)) => {
+                    bail!("failed to replicate")
+                }
             }
-            self.current_kafka_offset += 1;
         }
 
         Ok(())
@@ -204,7 +212,9 @@ impl<'a> PrimaryState<'a> {
                         Err(e) => {
                             let _ = ret.send(Err(anyhow::anyhow!("failed to commit transaction: {e}")));
                             // todo: this blocks the executor
-                            producer.abort_transaction(Duration::from_secs(2)).unwrap();
+                            if let Err(e) = producer.abort_transaction(Duration::from_secs(2)) {
+                                tracing::error!("failed to rollback: {e}");
+                            }
                             // increment offset for rollback
                             self.current_kafka_offset += 1;
                         },

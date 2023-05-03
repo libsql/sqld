@@ -60,6 +60,8 @@ pub type XWalFrameFn = unsafe extern "C" fn(
     size_after: u32,
     is_commit: c_int,
     sync_flags: c_int,
+    precommit_cb: Option<unsafe extern "C" fn(ctx: *mut c_void) -> c_int>,
+    precommit_ctx: *mut c_void,
 ) -> c_int;
 pub type XWalUndoFn = unsafe extern "C" fn(
     wal: *mut Wal,

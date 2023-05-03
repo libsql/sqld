@@ -118,6 +118,8 @@ impl<'a> Role<'a> {
         assert!(backbone.term < meta.term);
         backbone.term = meta.term;
         if meta.primary_infos.id == backbone.config.node_id {
+            // TODO: better parsing
+            assert_eq!(meta.primary_infos.addr, backbone.config.rpc_server_addr);
             // we are the new primary
             let primary = PrimaryState::new(backbone, offset as _)?;
             Ok(Role::Primary(primary))

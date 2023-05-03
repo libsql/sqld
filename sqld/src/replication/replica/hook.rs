@@ -97,7 +97,16 @@ impl InjectorHookInner {
     ) -> anyhow::Result<()> {
         self.pre_commit(last_frame_no)
             .expect("failed to write pre-commit frame_no");
-        let ret = orig(wal, WAL_PAGE_SIZE, page_headers, size_after, 1, sync_flags);
+        let ret = orig(
+            wal,
+            WAL_PAGE_SIZE,
+            page_headers,
+            size_after,
+            1,
+            sync_flags,
+            None,
+            std::ptr::null_mut(),
+        );
 
         if ret == 0 {
             debug_assert!(all_applied(page_headers));

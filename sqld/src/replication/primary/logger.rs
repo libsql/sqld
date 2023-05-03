@@ -14,7 +14,6 @@ use rusqlite::ffi::SQLITE_ERROR;
 use tokio::sync::watch;
 use uuid::Uuid;
 
-use crate::database::SQLITE_MUST_ROLLBACK;
 use crate::libsql::ffi::{
     types::{XWalFrameFn, XWalUndoFn},
     PgHdr, Wal,
@@ -69,6 +68,24 @@ unsafe impl WalHook for ReplicationLoggerHook {
             None
         };
 
+        unsafe extern "C" fn pre_commit_cb(ctx: *mut c_void) -> c_int {
+            let (is_commit, commit_info, ntruncate, this) =
+                &mut *(ctx as *mut (i32, Option<(u64, u64)>, u32, &mut ReplicationLoggerHook));
+            if *is_commit != 0 {
+                if let Some((count, checksum)) = commit_info {
+                    if let Err(e) = (*this).commit(*count, *checksum) {
+                        tracing::error!("error during pre-commit phase: {e}");
+                        return SQLITE_ERROR;
+                    }
+                }
+
+                this.logger.maybe_compact(*ntruncate);
+            }
+
+            0
+        }
+
+        let mut ctx = (is_commit, commit_info, ntruncate, self);
         let rc = unsafe {
             orig(
                 wal,
@@ -77,19 +94,10 @@ unsafe impl WalHook for ReplicationLoggerHook {
                 ntruncate,
                 is_commit,
                 sync_flags,
+                Some(pre_commit_cb),
+                &mut ctx as *mut _ as *mut c_void,
             )
         };
-
-        if is_commit != 0 && rc == 0 {
-            if let Some((count, checksum)) = commit_info {
-                if let Err(e) = self.commit(count, checksum) {
-                    tracing::error!("failed to commit: {e}");
-                    return SQLITE_MUST_ROLLBACK;
-                }
-            }
-
-            self.logger.maybe_compact(ntruncate);
-        }
 
         rc
     }

@@ -68,6 +68,8 @@ impl<'a> ReplicaState<'a> {
             })
             .await?;
 
+        dbg!();
+
         let mut config = ClientConfig::new();
         config
             .set("group.id", &self.backbone.config.node_id)

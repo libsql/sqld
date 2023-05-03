@@ -35,6 +35,8 @@ pub unsafe trait WalHook {
                 size_after,
                 is_commit,
                 sync_flags,
+                None,
+                std::ptr::null_mut(),
             )
         }
     }
@@ -230,6 +232,8 @@ pub extern "C" fn xFrames(
     size_after: u32,
     is_commit: c_int,
     sync_flags: c_int,
+    _precommit_cb: Option<unsafe extern "C" fn(ctx: *mut c_void) -> c_int>,
+    _precommit_ctx: *mut c_void,
 ) -> c_int {
     let orig_methods = unsafe { get_orig_methods(wal) };
     let methods = unsafe { get_methods(wal) };

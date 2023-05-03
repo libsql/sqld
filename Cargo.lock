@@ -2250,7 +2250,6 @@ dependencies = [
 [[package]]
 name = "libsqlite3-sys"
 version = "0.26.0"
-source = "git+https://github.com/psarna/rusqlite?rev=a6332e530f30dc2d47110#a6332e530f30dc2d471103eed96a650407a73c7a"
 dependencies = [
  "bindgen",
  "cc",
@@ -3483,7 +3482,6 @@ dependencies = [
 [[package]]
 name = "rusqlite"
 version = "0.29.0"
-source = "git+https://github.com/psarna/rusqlite?rev=a6332e530f30dc2d47110#a6332e530f30dc2d471103eed96a650407a73c7a"
 dependencies = [
  "bitflags 2.2.1",
  "fallible-iterator",

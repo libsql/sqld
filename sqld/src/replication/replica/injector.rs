@@ -1,11 +1,10 @@
 use std::fs::File;
 use std::path::{Path, PathBuf};
 
-use rusqlite::OpenFlags;
-use sqld_libsql_bindings::open_with_regular_wal;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 
+use crate::database::libsql::open_db;
 use crate::replication::FrameNo;
 
 use super::hook::{Frames, InjectorHook};
@@ -97,15 +96,7 @@ impl FrameInjector {
     }
 
     pub fn new(db_path: &Path, hook: InjectorHook) -> anyhow::Result<Self> {
-        let conn = open_with_regular_wal(
-            db_path,
-            OpenFlags::SQLITE_OPEN_READ_WRITE
-                | OpenFlags::SQLITE_OPEN_CREATE
-                | OpenFlags::SQLITE_OPEN_URI
-                | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-            hook.clone(),
-            false, // bottomless replication is not enabled for replicas
-        )?;
+        let conn = open_db(db_path, hook.clone(), false)?;
 
         Ok(Self { conn, hook })
     }

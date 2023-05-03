@@ -9,7 +9,7 @@ pub mod replicator;
 use crate::ffi::{
     bottomless_methods, libsql_wal_methods, sqlite3, sqlite3_file, sqlite3_vfs, PgHdr, Wal,
 };
-use std::ffi::{c_char, c_void};
+use std::ffi::{c_char, c_int, c_void};
 
 // Just heuristics, but should work for ~100% of cases
 fn is_regular(vfs: *const sqlite3_vfs) -> bool {
@@ -238,6 +238,8 @@ pub extern "C" fn xFrames(
     size_after: u32,
     is_commit: i32,
     sync_flags: i32,
+    _precommit_cb: Option<unsafe extern "C" fn(ctx: *mut c_void) -> c_int>,
+    _precommit_ctx: *mut c_void,
 ) -> i32 {
     let mut last_consistent_frame = 0;
     if !is_local() {
@@ -282,6 +284,8 @@ pub extern "C" fn xFrames(
             size_after,
             is_commit,
             sync_flags,
+            None,
+            std::ptr::null_mut(),
         )
     };
     if is_local() || rc != ffi::SQLITE_OK {
