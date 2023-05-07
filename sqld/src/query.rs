@@ -120,6 +120,12 @@ pub struct Row {
     pub values: Vec<Value>,
 }
 
+impl Row {
+    pub fn size_hint(&self) -> usize {
+        self.values.iter().map(|v| v.size_hint()).sum()
+    }
+}
+
 /// Mirrors rusqlite::Value, but implement extra traits
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Value {
@@ -128,6 +134,21 @@ pub enum Value {
     Real(f64),
     Text(String),
     Blob(Vec<u8>),
+}
+
+impl Value {
+    /// Approx. of the size in bytes required to store the value as json
+    fn size_hint(&self) -> usize {
+        match self {
+            Value::Null => 4,
+            // ~ number of digits needed to encode i
+            Value::Integer(i) => i.ilog10() as _,
+            // find better estimation: size of ascii u64::MAX
+            Value::Real(_) => "18446744073709551615".len(),
+            Value::Text(s) => s.len(),
+            Value::Blob(b) => b.len(),
+        }
+    }
 }
 
 impl From<rusqlite::types::Value> for Value {

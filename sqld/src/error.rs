@@ -29,6 +29,8 @@ pub enum Error {
     ReplicatorExited,
     #[error("Timed out while openning database connection")]
     DbCreateTimeout,
+    #[error("Response payload exceeds the maximum allowed size, consider limiting the retreived results.")]
+    ResponseTooLarge,
 }
 
 impl From<tokio::sync::oneshot::error::RecvError> for Error {

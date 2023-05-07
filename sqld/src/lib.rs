@@ -97,6 +97,7 @@ pub struct Config {
     pub heartbeat_url: Option<String>,
     pub heartbeat_auth: Option<String>,
     pub heartbeat_period: Duration,
+    pub max_response_size: usize,
 }
 
 async fn run_service(
@@ -266,6 +267,7 @@ async fn start_replica(
         uri,
         stats.clone(),
         applied_frame_no_receiver,
+        config.max_response_size
     )
     .throttled(MAX_CONCCURENT_DBS, Some(DB_CREATE_TIMEOUT));
 
@@ -361,6 +363,7 @@ async fn start_primary(
     let valid_extensions = validate_extensions(config.extensions_path.clone())?;
 
     let stats_clone = stats.clone();
+    let max_response_size = config.max_response_size;
     let db_factory = Arc::new(
         (move || {
             let db_path = path_clone.clone();
@@ -374,6 +377,7 @@ async fn start_primary(
                     hook,
                     enable_bottomless,
                     stats_clone,
+                    max_response_size,
                 )
             }
         })

@@ -157,12 +157,13 @@ impl LibSqlDb {
         wal_hook: impl WalHook + Send + Clone + 'static,
         with_bottomless: bool,
         stats: Stats,
+        max_response_size: usize,
     ) -> crate::Result<Self> {
         let (sender, receiver) = crossbeam::channel::unbounded::<Message>();
 
         tokio::task::spawn_blocking(move || {
             let mut connection =
-                Connection::new(path.as_ref(), extensions, wal_hook, with_bottomless, stats)
+                Connection::new(path.as_ref(), extensions, wal_hook, with_bottomless, stats, max_response_size)
                     .unwrap();
             loop {
                 let message = match connection.state.deadline() {
@@ -214,6 +215,8 @@ struct Connection {
     conn: sqld_libsql_bindings::Connection,
     timed_out: bool,
     stats: Stats,
+    /// ~Max. size a reponse is allowed to grow
+    max_response_size: usize,
 }
 
 impl Connection {
@@ -223,12 +226,14 @@ impl Connection {
         wal_hook: impl WalHook + Send + Clone + 'static,
         with_bottomless: bool,
         stats: Stats,
+        max_response_size: usize
     ) -> anyhow::Result<Self> {
         let this = Self {
             conn: open_db(path, wal_hook, with_bottomless)?,
             state: ConnectionState::initial(),
             timed_out: false,
             stats,
+            max_response_size,
         };
 
         for ext in extensions {
@@ -246,9 +251,10 @@ impl Connection {
 
     fn run(&mut self, pgm: Program) -> Vec<Option<QueryResult>> {
         let mut results = Vec::with_capacity(pgm.steps.len());
+        let mut size_budget = self.max_response_size;
 
         for step in pgm.steps() {
-            let res = self.execute_step(step, &results);
+            let res = self.execute_step(step, &results, &mut size_budget);
             results.push(res);
         }
 
@@ -259,6 +265,7 @@ impl Connection {
         &mut self,
         step: &Step,
         results: &[Option<QueryResult>],
+        size_budget: &mut usize,
     ) -> Option<QueryResult> {
         let enabled = match step.cond.as_ref() {
             Some(cond) => match eval_cond(cond, results) {
@@ -268,11 +275,11 @@ impl Connection {
             None => true,
         };
 
-        enabled.then(|| self.execute_query(&step.query))
+        enabled.then(|| self.execute_query(&step.query, size_budget))
     }
 
-    fn execute_query(&mut self, query: &Query) -> QueryResult {
-        let result = self.execute_query_inner(query);
+    fn execute_query(&mut self, query: &Query, size_budget: &mut usize) -> QueryResult {
+        let result = self.execute_query_inner(query, size_budget);
 
         // We drive the connection state on success. This is how we keep track of whether
         // a transaction timeouts
@@ -283,7 +290,10 @@ impl Connection {
         result
     }
 
-    fn execute_query_inner(&self, query: &Query) -> QueryResult {
+    /// execute the passed `query` on this connection. `size_budget` defines how much the result
+    /// set is allowed to grow based on the size_hint of the rows. Exceeding the size budget in an
+    /// error.
+    fn execute_query_inner(&self, query: &Query, size_budget: &mut usize) -> QueryResult {
         let mut rows = vec![];
         let mut stmt = self.conn.prepare(&query.stmt.stmt)?;
         let columns = stmt
@@ -307,11 +317,20 @@ impl Connection {
 
         let mut qresult = stmt.raw_query();
         while let Some(row) = qresult.next()? {
+
             let mut values = vec![];
             for (i, _) in columns.iter().enumerate() {
                 values.push(row.get::<usize, rusqlite::types::Value>(i)?.into());
             }
-            rows.push(Row { values });
+
+            let row = Row { values };
+
+            *size_budget = (*size_budget).saturating_sub(row.size_hint());
+            if *size_budget == 0 {
+                return Err(Error::ResponseTooLarge)
+            }
+
+            rows.push(row);
         }
 
         // sqlite3_changes() is only modified for INSERT, UPDATE or DELETE; it is not reset for SELECT,

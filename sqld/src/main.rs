@@ -149,6 +149,10 @@ struct Cli {
     /// By default, the the period is 30 seconds.
     #[clap(long, env = "SQLD_HEARTBEAT_PERIOD_S", default_value = "30")]
     heartbeat_period_s: u64,
+    /// Maximum allowed response size in bytes. Defaults to 10MB.
+    /// This is a best effort limit based on estimations of the size of the serialized response.
+    #[clap(long, env = "SQLD_MAX_RESPONSE_SIZE", default_value = "10000000")]
+    max_response_size: usize,
 }
 
 #[derive(clap::Subcommand, Debug)]
@@ -250,6 +254,7 @@ fn config_from_args(args: Cli) -> Result<Config> {
         heartbeat_url: args.heartbeat_url,
         heartbeat_auth: args.heartbeat_auth,
         heartbeat_period: Duration::from_secs(args.heartbeat_period_s),
+        max_response_size: args.max_response_size,
     })
 }
 

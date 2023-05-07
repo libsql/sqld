@@ -27,6 +27,7 @@ pub struct WriteProxyDbFactory {
     extensions: Vec<PathBuf>,
     stats: Stats,
     applied_frame_no_receiver: watch::Receiver<FrameNo>,
+    max_response_size: usize,
 }
 
 impl WriteProxyDbFactory {
@@ -37,6 +38,7 @@ impl WriteProxyDbFactory {
         uri: tonic::transport::Uri,
         stats: Stats,
         applied_frame_no_receiver: watch::Receiver<FrameNo>,
+        max_response_size: usize,
     ) -> Self {
         let client = ProxyClient::with_origin(channel, uri);
         Self {
@@ -45,6 +47,7 @@ impl WriteProxyDbFactory {
             extensions,
             stats,
             applied_frame_no_receiver,
+            max_response_size,
         }
     }
 }
@@ -58,6 +61,7 @@ impl DbFactory for WriteProxyDbFactory {
             self.extensions.clone(),
             self.stats.clone(),
             self.applied_frame_no_receiver.clone(),
+            self.max_response_size,
         )?;
         Ok(Arc::new(db))
     }
@@ -83,8 +87,9 @@ impl WriteProxyDatabase {
         extensions: Vec<PathBuf>,
         stats: Stats,
         applied_frame_no_receiver: watch::Receiver<FrameNo>,
+        max_response_size: usize,
     ) -> Result<Self> {
-        let read_db = LibSqlDb::new(path, extensions, (), false, stats)?;
+        let read_db = LibSqlDb::new(path, extensions, (), false, stats, max_response_size)?;
         Ok(Self {
             read_db,
             write_proxy,
