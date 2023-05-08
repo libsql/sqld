@@ -162,9 +162,15 @@ impl LibSqlDb {
         let (sender, receiver) = crossbeam::channel::unbounded::<Message>();
 
         tokio::task::spawn_blocking(move || {
-            let mut connection =
-                Connection::new(path.as_ref(), extensions, wal_hook, with_bottomless, stats, max_response_size)
-                    .unwrap();
+            let mut connection = Connection::new(
+                path.as_ref(),
+                extensions,
+                wal_hook,
+                with_bottomless,
+                stats,
+                max_response_size,
+            )
+            .unwrap();
             loop {
                 let message = match connection.state.deadline() {
                     Some(deadline) => match receiver.recv_deadline(deadline) {
@@ -226,7 +232,7 @@ impl Connection {
         wal_hook: impl WalHook + Send + Clone + 'static,
         with_bottomless: bool,
         stats: Stats,
-        max_response_size: usize
+        max_response_size: usize,
     ) -> anyhow::Result<Self> {
         let this = Self {
             conn: open_db(path, wal_hook, with_bottomless)?,
@@ -317,7 +323,6 @@ impl Connection {
 
         let mut qresult = stmt.raw_query();
         while let Some(row) = qresult.next()? {
-
             let mut values = vec![];
             for (i, _) in columns.iter().enumerate() {
                 values.push(row.get::<usize, rusqlite::types::Value>(i)?.into());
@@ -327,7 +332,7 @@ impl Connection {
 
             *size_budget = (*size_budget).saturating_sub(row.size_hint());
             if *size_budget == 0 {
-                return Err(Error::ResponseTooLarge)
+                return Err(Error::ResponseTooLarge);
             }
 
             rows.push(row);

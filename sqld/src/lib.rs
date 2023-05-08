@@ -267,7 +267,7 @@ async fn start_replica(
         uri,
         stats.clone(),
         applied_frame_no_receiver,
-        config.max_response_size
+        config.max_response_size,
     )
     .throttled(MAX_CONCCURENT_DBS, Some(DB_CREATE_TIMEOUT));
 
