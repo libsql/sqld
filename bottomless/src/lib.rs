@@ -49,12 +49,75 @@ pub extern "C" fn xOpen(
         std::ffi::CStr::from_ptr(wal_name).to_str().unwrap()
     });
 
+    let readonly_replica = std::env::var("LIBSQL_BOTTOMLESS_READONLY_REPLICA")
+        .map(|v| v == "1" || v == "true")
+        .unwrap_or(false);
+
+    tracing::info!("Readonly replica: {readonly_replica}");
+
     let orig_methods = unsafe { &*(*(methods as *mut bottomless_methods)).underlying_methods };
-    let rc = unsafe {
-        (orig_methods.xOpen.unwrap())(vfs, db_file, wal_name, no_shm_mode, max_size, methods, wal)
-    };
-    if rc != ffi::SQLITE_OK {
-        return rc;
+
+    if readonly_replica {
+        tracing::debug!("Allocating new readonly WAL");
+        let new_wal = Box::leak(Box::new(ffi::libsql_wal {
+            pVfs: vfs,
+            pDbFd: db_file,
+            pWalFd: std::ptr::null_mut(),
+            iCallback: 0,
+            mxWalSize: max_size,
+            szFirstBlock: 4096,
+            nWiData: 0,
+            apWiData: std::ptr::null_mut(),
+            szPage: 4096,
+            readLock: 0,
+            syncFlags: 0,
+            exclusiveMode: 1,
+            writeLock: 0,
+            ckptLock: 0,
+            readOnly: 1,
+            truncateOnCommit: 0,
+            syncHeader: 0,
+            padToSectorBoundary: 0,
+            bShmUnreliable: 1,
+            hdr: ffi::WalIndexHdr {
+                iVersion: 1,
+                unused: 0,
+                iChange: 0,
+                isInit: 0,
+                bigEndCksum: 0,
+                szPage: 4096,
+                mxFrame: u32::MAX,
+                nPage: 1,
+                aFrameCksum: [0, 0],
+                aSalt: [0, 0],
+                aCksum: [0, 0],
+            },
+            minFrame: 1,
+            iReCksum: 0,
+            zWalName: "bottomless\0".as_ptr() as *const c_char,
+            nCkpt: 0,
+            lockError: 0,
+            pSnapshot: std::ptr::null_mut(),
+            db: std::ptr::null_mut(),
+            pMethods: methods,
+            pMethodsData: std::ptr::null_mut(), // fixme: validate
+        }));
+        unsafe { *wal = new_wal as *mut ffi::libsql_wal }
+    } else {
+        let rc = unsafe {
+            (orig_methods.xOpen.unwrap())(
+                vfs,
+                db_file,
+                wal_name,
+                no_shm_mode,
+                max_size,
+                methods,
+                wal,
+            )
+        };
+        if rc != ffi::SQLITE_OK {
+            return rc;
+        }
     }
 
     if !is_regular(vfs) {
@@ -78,7 +141,15 @@ pub extern "C" fn xOpen(
         }
     };
 
-    let replicator = block_on!(runtime, replicator::Replicator::new());
+    let replicator = block_on!(
+        runtime,
+        replicator::Replicator::create(replicator::Options {
+            create_bucket_if_not_exists: false,
+            verify_crc: true,
+            use_compression: false,
+            readonly_replica,
+        })
+    );
     let mut replicator = match replicator {
         Ok(repl) => repl,
         Err(e) => {
@@ -110,7 +181,7 @@ pub extern "C" fn xOpen(
     };
     let context_ptr = Box::into_raw(Box::new(context)) as *mut c_void;
     unsafe { (*(*wal)).pMethodsData = context_ptr };
-
+    tracing::debug!("bottomless WAL initialized");
     ffi::SQLITE_OK
 }
 
@@ -132,8 +203,17 @@ pub extern "C" fn xClose(
     z_buf: *mut u8,
 ) -> i32 {
     tracing::debug!("Closing wal");
+    let ctx = get_replicator_context(wal);
     let orig_methods = get_orig_methods(wal);
     let methods_data = unsafe { (*wal).pMethodsData as *mut replicator::Context };
+
+    if ctx.replicator.readonly_replica {
+        tracing::debug!("Read-only replica, skipping WAL close");
+        let _box = unsafe { Box::from_raw(methods_data) };
+        let _wal = unsafe { Box::from_raw(wal) };
+        return ffi::SQLITE_OK;
+    }
+
     let rc = unsafe { (orig_methods.xClose.unwrap())(wal, db, sync_flags, n_buf, z_buf) };
     if rc != ffi::SQLITE_OK {
         return rc;
@@ -151,27 +231,81 @@ pub extern "C" fn xLimit(wal: *mut Wal, limit: i64) {
 
 pub extern "C" fn xBeginReadTransaction(wal: *mut Wal, changed: *mut i32) -> i32 {
     let orig_methods = get_orig_methods(wal);
-    unsafe { (orig_methods.xBeginReadTransaction.unwrap())(wal, changed) }
+    let ctx = get_replicator_context(wal);
+    if ctx.replicator.readonly_replica {
+        tracing::debug!(
+            "Started read transaction in readonly replica mode. changed == {}",
+            unsafe { *changed }
+        );
+        unsafe { *changed = 1 }
+        tracing::debug!("Fetching latest generation information");
+        let generation = block_on!(ctx.runtime, ctx.replicator.find_newest_generation());
+        match generation {
+            Some(gen) => {
+                tracing::debug!("Latest generation: {gen}");
+                ctx.replicator.set_generation(gen);
+            }
+            None => {
+                tracing::debug!("No generation found");
+                return ffi::SQLITE_IOERR_READ;
+            }
+        }
+        ffi::SQLITE_OK
+    } else {
+        unsafe { (orig_methods.xBeginReadTransaction.unwrap())(wal, changed) }
+    }
 }
 
 pub extern "C" fn xEndReadTransaction(wal: *mut Wal) {
+    let ctx = get_replicator_context(wal);
+    if ctx.replicator.readonly_replica {
+        tracing::debug!("Ended read transaction in readonly replica mode");
+        return;
+    }
     let orig_methods = get_orig_methods(wal);
     unsafe { (orig_methods.xEndReadTransaction.unwrap())(wal) }
 }
 
 pub extern "C" fn xFindFrame(wal: *mut Wal, pgno: u32, frame: *mut u32) -> i32 {
-    let orig_methods = get_orig_methods(wal);
-    unsafe { (orig_methods.xFindFrame.unwrap())(wal, pgno, frame) }
+    let ctx = get_replicator_context(wal);
+    if ctx.replicator.readonly_replica {
+        tracing::debug!("Finding frame for page {pgno}");
+        unsafe { *frame = pgno };
+        ffi::SQLITE_OK
+    } else {
+        let orig_methods = get_orig_methods(wal);
+        unsafe { (orig_methods.xFindFrame.unwrap())(wal, pgno, frame) }
+    }
 }
 
 pub extern "C" fn xReadFrame(wal: *mut Wal, frame: u32, n_out: i32, p_out: *mut u8) -> i32 {
-    let orig_methods = get_orig_methods(wal);
-    unsafe { (orig_methods.xReadFrame.unwrap())(wal, frame, n_out, p_out) }
+    let ctx = get_replicator_context(wal);
+    if ctx.replicator.readonly_replica {
+        tracing::debug!("Reading newest page {frame} from the replicator. n_out == {n_out}");
+        match block_on!(ctx.runtime, ctx.replicator.read_newest_page(frame)) {
+            Ok(page) => {
+                unsafe {
+                    std::ptr::copy_nonoverlapping(page.as_ptr(), p_out, page.len());
+                };
+                tracing::trace!("Copied {} bytes", page.len());
+                ffi::SQLITE_OK
+            }
+            Err(e) => {
+                tracing::error!("Failed to read page {frame}: {e}");
+                ffi::SQLITE_IOERR_READ
+            }
+        }
+    } else {
+        let orig_methods = get_orig_methods(wal);
+        unsafe { (orig_methods.xReadFrame.unwrap())(wal, frame, n_out, p_out) }
+    }
 }
 
 pub extern "C" fn xDbsize(wal: *mut Wal) -> u32 {
     let orig_methods = get_orig_methods(wal);
-    unsafe { (orig_methods.xDbsize.unwrap())(wal) }
+    let size = unsafe { (orig_methods.xDbsize.unwrap())(wal) };
+    tracing::debug!("DB size: {size}");
+    size
 }
 
 pub extern "C" fn xBeginWriteTransaction(wal: *mut Wal) -> i32 {
@@ -240,8 +374,15 @@ pub extern "C" fn xFrames(
     sync_flags: i32,
 ) -> i32 {
     let mut last_consistent_frame = 0;
+    let ctx = get_replicator_context(wal);
+
+    tracing::warn!("READONLY {}", ctx.replicator.readonly_replica);
+    if !is_local() && ctx.replicator.readonly_replica {
+        tracing::error!("Attempt to write to a read-only replica");
+        return ffi::SQLITE_READONLY;
+    }
+
     if !is_local() {
-        let ctx = get_replicator_context(wal);
         let last_valid_frame = unsafe { (*wal).hdr.mxFrame };
         ctx.replicator.register_last_valid_frame(last_valid_frame);
         // In theory it's enough to set the page size only once, but in practice
@@ -288,7 +429,6 @@ pub extern "C" fn xFrames(
         return rc;
     }
 
-    let ctx = get_replicator_context(wal);
     if is_commit != 0 {
         let frame_checksum = unsafe { (*wal).hdr.aFrameCksum };
 
@@ -374,6 +514,11 @@ pub extern "C" fn xCheckpoint(
         return ffi::SQLITE_OK;
     }
 
+    if ctx.replicator.readonly_replica {
+        tracing::debug!("Read-only replica, not snapshotting");
+        return ffi::SQLITE_OK;
+    }
+
     ctx.replicator.new_generation();
     tracing::debug!("Snapshotting after checkpoint");
     let result = block_on!(ctx.runtime, ctx.replicator.snapshot_main_db_file());
@@ -429,6 +574,11 @@ pub extern "C" fn xGetPathname(buf: *mut c_char, orig: *const c_char, orig_len: 
 }
 
 async fn try_restore(replicator: &mut replicator::Replicator) -> i32 {
+    if replicator.readonly_replica {
+        tracing::debug!("Read-only replica, not restoring");
+        return ffi::SQLITE_OK;
+    }
+
     match replicator.restore().await {
         Ok(replicator::RestoreAction::None) => (),
         Ok(replicator::RestoreAction::SnapshotMainDbFile) => {
@@ -493,6 +643,7 @@ pub extern "C" fn xPreMainDbOpen(_methods: *mut libsql_wal_methods, path: *const
             create_bucket_if_not_exists: true,
             verify_crc: true,
             use_compression: false,
+            readonly_replica: false,
         })
     );
     let mut replicator = match replicator {
@@ -504,6 +655,76 @@ pub extern "C" fn xPreMainDbOpen(_methods: *mut libsql_wal_methods, path: *const
     };
 
     replicator.register_db(path);
+
+    let readonly_replica = std::env::var("LIBSQL_BOTTOMLESS_READONLY_REPLICA")
+        .map(|v| v == "1" || v == "true")
+        .unwrap_or(false);
+
+    if readonly_replica {
+        use byteorder::ReadBytesExt;
+        use std::io::{Seek, Write};
+
+        let generation = block_on!(runtime, replicator.find_newest_generation());
+        match generation {
+            Some(gen) => {
+                tracing::debug!("Latest generation: {gen}");
+                replicator.set_generation(gen);
+            }
+            None => {
+                tracing::debug!("No generation found");
+                return ffi::SQLITE_IOERR_READ;
+            }
+        }
+
+        tracing::info!("Running in read-only replica mode");
+        tracing::warn!("Rewriting the database with only its first page restored from S3. That needs to happen with a specialized VFS instead");
+        let page = match block_on!(runtime, replicator.read_newest_page(1)) {
+            Ok(page) => page,
+            Err(e) => {
+                tracing::error!("Failed to read page 1: {e}");
+                return ffi::SQLITE_CANTOPEN;
+            }
+        };
+
+        let mut file = match std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .open(&replicator.db_path)
+        {
+            Ok(file) => file,
+            Err(e) => {
+                tracing::error!("Failed to open the main database file for writing: {}", e);
+                return ffi::SQLITE_CANTOPEN;
+            }
+        };
+
+        file.write_all(&page).ok();
+
+        // FIXME: terrible hack - download page 1 and truncate the database to proper size
+        // in order to trick SQLite into thinking that the database is in a consistent state.
+        // A proper solution is to ship with a custom VFS that can read page 1 from S3 directly.
+        let page_size = file
+            .seek(std::io::SeekFrom::Start(16))
+            .and_then(|_| file.read_u16::<byteorder::BigEndian>())
+            .unwrap_or(4096);
+        let page_size = if page_size == 1 {
+            65536
+        } else {
+            page_size as u32
+        };
+        let db_file_size = file
+            .seek(std::io::SeekFrom::Start(28))
+            .and_then(|_| file.read_u32::<byteorder::BigEndian>())
+            .unwrap_or(0);
+        tracing::warn!("Page size: {page_size}, db file size: {db_file_size}");
+
+        file.set_len(db_file_size as u64 * page_size as u64).ok();
+        tracing::warn!("Just overwritten file {}", &replicator.db_path);
+
+        return ffi::SQLITE_OK;
+    }
+
     block_on!(runtime, try_restore(&mut replicator))
 }
 
@@ -578,6 +799,8 @@ pub mod static_init {
         static INIT: std::sync::Once = std::sync::Once::new();
         INIT.call_once(|| {
             crate::bottomless_init();
+            #[cfg(feature = "init_tracing_statically")]
+            crate::bottomless_tracing_init();
             let orig_methods = unsafe { libsql_wal_methods_find(std::ptr::null()) };
             if orig_methods.is_null() {}
             let methods = crate::bottomless_methods(orig_methods);

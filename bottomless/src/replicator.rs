@@ -32,6 +32,7 @@ pub struct Replicator {
     pub db_name: String,
 
     use_compression: bool,
+    pub readonly_replica: bool,
 }
 
 #[derive(Debug)]
@@ -52,16 +53,19 @@ pub struct Options {
     pub create_bucket_if_not_exists: bool,
     pub verify_crc: bool,
     pub use_compression: bool,
+    pub readonly_replica: bool,
 }
 
 impl Replicator {
     pub const UNSET_PAGE_SIZE: usize = usize::MAX;
+    pub const ENCODED_FRAME_BASE: u32 = u32::MAX;
 
     pub async fn new() -> Result<Self> {
         Self::create(Options {
             create_bucket_if_not_exists: false,
             verify_crc: true,
             use_compression: false,
+            readonly_replica: false,
         })
         .await
     }
@@ -109,6 +113,7 @@ impl Replicator {
             db_path: String::new(),
             db_name: String::new(),
             use_compression: options.use_compression,
+            readonly_replica: options.readonly_replica,
         })
     }
 
@@ -246,9 +251,10 @@ impl Replicator {
                 tracing::warn!("Unexpected truncated page of size {}", data.len())
             }
 
+            let encoded_frame = Self::ENCODED_FRAME_BASE - frame;
             let key = format!(
                 "{}-{}/{:012}-{:012}-{:016x}",
-                self.db_name, self.generation, frame, pgno, crc
+                self.db_name, self.generation, pgno, encoded_frame, crc
             );
 
             let body: ByteStream = if self.use_compression {
@@ -304,6 +310,107 @@ impl Replicator {
             .await?;
         tracing::trace!("Commit successful");
         Ok(())
+    }
+
+    async fn read_newest_page_from_wal(&mut self, pgno: u32) -> Result<Vec<u8>> {
+        use tokio::io::AsyncReadExt;
+
+        let prefix = format!("{}-{}/{:012}-", self.db_name, self.generation, pgno);
+        tracing::trace!("Reading newest page from wal: {prefix}");
+        let response = self
+            .client
+            .list_objects()
+            .bucket(&self.bucket)
+            .prefix(prefix)
+            .max_keys(1)
+            .send()
+            .await?;
+
+        let objs = response
+            .contents
+            .ok_or_else(|| anyhow::anyhow!("No pages found"))?;
+        let key = objs
+            .first()
+            .ok_or_else(|| anyhow::anyhow!("No pages found"))?
+            .key
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("No pages found"))?;
+        tracing::trace!("Found key {key}");
+        let obj = self
+            .client
+            .get_object()
+            .bucket(&self.bucket)
+            .key(key)
+            .send()
+            .await?;
+        let reader = obj.body.into_async_read();
+        let mut buf = Vec::with_capacity(self.page_size);
+        let mut reader = tokio::io::BufReader::new(reader);
+        if self.use_compression {
+            let mut reader = async_compression::tokio::bufread::GzipDecoder::new(reader);
+            reader.read_to_end(&mut buf).await?;
+        } else {
+            reader.read_to_end(&mut buf).await?;
+        }
+
+        tracing::trace!("Read page {pgno} from wal: {}B", buf.len());
+        Ok(buf)
+    }
+
+    async fn read_newest_page_from_main_db_file(&mut self, pgno: u32) -> Result<Vec<u8>> {
+        use tokio::io::AsyncReadExt;
+
+        if self.use_compression {
+            return Err(anyhow::anyhow!(
+                "Cannot read pages from main db file when compression is enabled"
+            ));
+        }
+
+        let range_start = (pgno - 1) * self.page_size as u32;
+        let range_end = pgno * self.page_size as u32 - 1;
+
+        tracing::debug!(
+            "Reading page {} from main db file. Range: {}-{}",
+            pgno,
+            range_start,
+            range_end
+        );
+        let obj = self
+            .client
+            .get_object()
+            .bucket(&self.bucket)
+            .range(format!("bytes={range_start}-{range_end}"))
+            .key(format!("{}-{}/db.db", self.db_name, self.generation))
+            .send()
+            .await?;
+
+        let reader = obj.body.into_async_read();
+
+        let mut buf: Vec<u8> = Vec::with_capacity(self.page_size);
+        let mut reader = tokio::io::BufReader::new(reader);
+        reader.read_to_end(&mut buf).await?;
+
+        tracing::trace!("Read {} bytes", buf.len());
+        Ok(buf)
+    }
+
+    pub async fn read_newest_page(&mut self, pgno: u32) -> Result<Vec<u8>> {
+        if self.page_size == Self::UNSET_PAGE_SIZE {
+            let page_size = std::env::var("LIBSQL_BOTTOMLESS_PAGE_SIZE")
+                .ok()
+                .and_then(|s| s.parse::<usize>().ok())
+                .unwrap_or(4096);
+            tracing::warn!("Setting page size to {page_size}. If this is not correct, please set it with LIBSQL_BOTTOMLESS_PAGE_SIZE env variable.");
+            self.set_page_size(page_size).ok();
+        }
+
+        match self.read_newest_page_from_wal(pgno).await {
+            Ok(page) => Ok(page),
+            Err(e) => {
+                tracing::debug!("Failed to read page from WAL: {e}. Let's try main db file");
+                self.read_newest_page_from_main_db_file(pgno).await
+            }
+        }
     }
 
     // Drops uncommitted frames newer than given last valid frame
@@ -579,13 +686,14 @@ impl Replicator {
     }
 
     // Parses the frame and page number from given key.
-    // Format: <db-name>-<generation>/<frame-number>-<page-number>-<crc64>
+    // Format: <db-name>-<generation>/<page-number>-<frame-number>-<crc64>
     fn parse_frame_page_crc(key: &str) -> Option<(u32, i32, u64)> {
         let checksum_delim = key.rfind('-')?;
-        let page_delim = key[0..checksum_delim].rfind('-')?;
-        let frame_delim = key[0..page_delim].rfind('/')?;
-        let frameno = key[frame_delim + 1..page_delim].parse::<u32>().ok()?;
-        let pgno = key[page_delim + 1..checksum_delim].parse::<i32>().ok()?;
+        let frame_delim = key[0..checksum_delim].rfind('-')?;
+        let page_delim = key[0..frame_delim].rfind('/')?;
+        let frameno =
+            Self::ENCODED_FRAME_BASE - key[frame_delim + 1..checksum_delim].parse::<u32>().ok()?;
+        let pgno = key[page_delim + 1..frame_delim].parse::<i32>().ok()?;
         let crc = u64::from_str_radix(&key[checksum_delim + 1..], 16).ok()?;
         tracing::debug!(frameno, pgno, crc);
         Some((frameno, pgno, crc))
@@ -822,6 +930,10 @@ impl Replicator {
 
     // Restores the database state from newest remote generation
     pub async fn restore(&mut self) -> Result<RestoreAction> {
+        if self.readonly_replica {
+            tracing::info!("Read-only replica, nothing to restore");
+            return Ok(RestoreAction::None);
+        }
         let newest_generation = match self.find_newest_generation().await {
             Some(gen) => gen,
             None => {

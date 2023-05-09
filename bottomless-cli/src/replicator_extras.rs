@@ -60,7 +60,33 @@ impl Replicator {
                 );
             }
             Err(aws_sdk_s3::types::SdkError::ServiceError(err)) if err.err().is_no_such_key() => {
-                println!("\tno main database snapshot file found")
+                match self
+                .client
+                .get_object_attributes()
+                .bucket(&self.bucket)
+                .key(format!("{}-{}/db.gz", self.db_name, generation))
+                .object_attributes(aws_sdk_s3::model::ObjectAttributes::ObjectSize)
+                .send()
+                .await {
+                    Ok(attrs) => {
+                        println!("\tmain database snapshot:");
+                        println!("\t\tobject size:   {}", attrs.object_size());
+                        println!(
+                            "\t\tlast modified: {}",
+                            attrs
+                                .last_modified()
+                                .map(|s| s
+                                    .fmt(aws_smithy_types::date_time::Format::DateTime)
+                                    .unwrap_or_else(|e| e.to_string()))
+                                .as_deref()
+                                .unwrap_or("never")
+                        );
+                    }
+                    Err(aws_sdk_s3::types::SdkError::ServiceError(err)) if err.err().is_no_such_key() => {
+                        println!("\tmain database snapshot: not found");
+                    }
+                    Err(e) => println!("\tfailed to fetch main database snapshot info: {e}"),
+                }
             }
             Err(e) => println!("\tfailed to fetch main database snapshot info: {e}"),
         };
