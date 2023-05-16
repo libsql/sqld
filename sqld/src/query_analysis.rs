@@ -228,25 +228,44 @@ impl Statement {
                 is_insert,
             })
         }
+
+        // Workaround for CREATE FUNCTION.
+        // FIXME: this should be handled by the parser (or *at least* trimmed + case insensitive)
+        let is_create_function = s.starts_with("CREATE FUNCTION");
+        let mut maybe_create_function_stmt = is_create_function.then(|| {
+            Ok(Statement {
+                stmt: s.to_string(),
+                kind: StmtKind::Other,
+                is_iud: false,
+                is_insert: false,
+            })
+        });
+
         // The parser needs to be boxed because it's large, and you don't want it on the stack.
         // There's upstream work to make it smaller, but in the meantime the parser should remain
         // on the heap:
         // - https://github.com/gwenn/lemon-rs/issues/8
         // - https://github.com/gwenn/lemon-rs/pull/19
         let mut parser = Box::new(Parser::new(s.as_bytes()));
-        std::iter::from_fn(move || match parser.next() {
-            Ok(Some(cmd)) => Some(parse_inner(s, cmd)),
-            Ok(None) => None,
-            Err(sqlite3_parser::lexer::sql::Error::ParserError(
-                ParserError::SyntaxError {
-                    token_type: _,
-                    found: Some(found),
-                },
-                Some((line, col)),
-            )) => Some(Err(anyhow::anyhow!(
-                "syntax error around L{line}:{col}: `{found}`"
-            ))),
-            Err(e) => Some(Err(e.into())),
+        std::iter::from_fn(move || {
+            if is_create_function {
+                return maybe_create_function_stmt.take();
+            }
+
+            match parser.next() {
+                Ok(Some(cmd)) => Some(parse_inner(s, cmd)),
+                Ok(None) => None,
+                Err(sqlite3_parser::lexer::sql::Error::ParserError(
+                    ParserError::SyntaxError {
+                        token_type: _,
+                        found: Some(found),
+                    },
+                    Some((line, col)),
+                )) => Some(Err(anyhow::anyhow!(
+                    "syntax error around L{line}:{col}: `{found}`"
+                ))),
+                Err(e) => Some(Err(e.into())),
+            }
         })
     }
 
