@@ -23,7 +23,7 @@ enum ResponseError {
 pub async fn handle_index(
     _req: hyper::Request<hyper::Body>,
 ) -> Result<hyper::Response<hyper::Body>> {
-    let body = "This is sqld HTTP API v1 and v2 (\"Hrana over HTTP\")";
+    let body = "This is sqld HTTP API v1";
     Ok(hyper::Response::builder()
         .header("content-type", "text/plain")
         .body(hyper::Body::from(body))
@@ -32,7 +32,6 @@ pub async fn handle_index(
 
 pub async fn handle_execute(
     db_factory: Arc<dyn DbFactory>,
-    protocol: hrana::Protocol,
     auth: Authenticated,
     req: hyper::Request<hyper::Body>,
 ) -> Result<hyper::Response<hyper::Body>> {
@@ -47,7 +46,8 @@ pub async fn handle_execute(
     }
 
     handle_request(db_factory, req, |db, req_body: ReqBody| async move {
-        let query = hrana::proto_stmt_to_query(&req_body.stmt, &HashMap::new(), protocol)?;
+        let query =
+            hrana::proto_stmt_to_query(&req_body.stmt, &HashMap::new(), hrana::Version::Hrana1)?;
         hrana::execute_stmt(&*db, auth, query)
             .await
             .map(|result| RespBody { result })
@@ -59,7 +59,6 @@ pub async fn handle_execute(
 
 pub async fn handle_batch(
     db_factory: Arc<dyn DbFactory>,
-    protocol: hrana::Protocol,
     auth: Authenticated,
     req: hyper::Request<hyper::Body>,
 ) -> Result<hyper::Response<hyper::Body>> {
@@ -74,61 +73,16 @@ pub async fn handle_batch(
     }
 
     handle_request(db_factory, req, |db, req_body: ReqBody| async move {
-        let pgm = hrana::proto_batch_to_program(&req_body.batch, &HashMap::new(), protocol)?;
+        let pgm = hrana::proto_batch_to_program(
+            &req_body.batch,
+            &HashMap::new(),
+            hrana::Version::Hrana1,
+        )?;
         hrana::execute_batch(&*db, auth, pgm)
             .await
             .map(|result| RespBody { result })
             .map_err(wrap_batch_error)
             .context("Could not execute batch")
-    })
-    .await
-}
-
-pub async fn handle_sequence(
-    db_factory: Arc<dyn DbFactory>,
-    auth: Authenticated,
-    req: hyper::Request<hyper::Body>,
-) -> Result<hyper::Response<hyper::Body>> {
-    #[derive(Debug, Deserialize)]
-    struct ReqBody {
-        sql: String,
-    }
-
-    #[derive(Debug, Serialize)]
-    struct RespBody {}
-
-    handle_request(db_factory, req, |db, req_body: ReqBody| async move {
-        let pgm = hrana::proto_sequence_to_program(&req_body.sql).map_err(wrap_stmt_error)?;
-        hrana::execute_sequence(&*db, auth, pgm)
-            .await
-            .map(|_| RespBody {})
-            .map_err(wrap_stmt_error)
-            .context("Could not execute sequence")
-    })
-    .await
-}
-
-pub async fn handle_describe(
-    db_factory: Arc<dyn DbFactory>,
-    auth: Authenticated,
-    req: hyper::Request<hyper::Body>,
-) -> Result<hyper::Response<hyper::Body>> {
-    #[derive(Debug, Deserialize)]
-    struct ReqBody {
-        sql: String,
-    }
-
-    #[derive(Debug, Serialize)]
-    struct RespBody {
-        result: hrana::proto::DescribeResult,
-    }
-
-    handle_request(db_factory, req, |db, req_body: ReqBody| async move {
-        hrana::describe_stmt(&*db, auth, req_body.sql)
-            .await
-            .map(|result| RespBody { result })
-            .map_err(wrap_stmt_error)
-            .context("Could not describe statement")
     })
     .await
 }

@@ -23,7 +23,7 @@ fallible-iterator = "0.2.0"
 futures = "0.3.25"
 hex = "0.4.3"
 hyper = { version = "0.14.23", features = ["http2"] }
-hyper-tungstenite = "0.9"
+hyper-tungstenite = "0.10"
 itertools = "0.10.5"
 jsonwebtoken = "8.2.0"
 memmap = "0.7.0"
@@ -52,7 +52,7 @@ tempfile = "3.3.0"
 thiserror = "1.0.38"
 tokio = { version = "1.22.2", features = ["rt-multi-thread", "net", "io-std", "io-util", "time", "macros", "sync", "fs"] }
 tokio-stream = "0.1.11"
-tokio-tungstenite = "0.18"
+tokio-tungstenite = "0.19"
 tokio-util = "0.7.4"
 tonic = { version = "0.8.3", features = ["tls"] }
 tower = { version = "0.4.13", features = ["make"] }

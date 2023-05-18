@@ -110,7 +110,7 @@ async fn run_service(
         let auth = auth.clone();
         let idle_kicker = idle_shutdown_layer.clone().map(|isl| isl.into_kicker());
         join_set.spawn(async move {
-            hrana::serve(
+            hrana::ws::serve(
                 db_factory,
                 auth,
                 idle_kicker,
@@ -136,7 +136,7 @@ async fn run_service(
 
     if let Some(addr) = config.hrana_addr {
         join_set.spawn(async move {
-            hrana::listen(addr, hrana_accept_tx)
+            hrana::ws::listen(addr, hrana_accept_tx)
                 .await
                 .context("Hrana listener failed")
         });

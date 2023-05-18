@@ -7,12 +7,12 @@ use crate::database::{Cond, Database, Program, Step};
 use crate::query::{Params, Query};
 use crate::query_analysis::Statement;
 
-use super::handshake::Protocol;
 use super::proto;
 use super::stmt::{
     proto_error_from_stmt_error, proto_stmt_result_from_query_response, proto_stmt_to_query,
     stmt_error_from_sqld_error, StmtError,
 };
+use super::Version;
 
 #[derive(thiserror::Error, Debug)]
 pub enum BatchError {
@@ -63,11 +63,11 @@ fn proto_cond_to_cond(cond: &proto::BatchCond) -> Result<Cond> {
 pub fn proto_batch_to_program(
     batch: &proto::Batch,
     sqls: &HashMap<i32, String>,
-    protocol: Protocol,
+    version: Version,
 ) -> Result<Program> {
     let mut steps = Vec::with_capacity(batch.steps.len());
     for step in &batch.steps {
-        let query = proto_stmt_to_query(&step.stmt, sqls, protocol)?;
+        let query = proto_stmt_to_query(&step.stmt, sqls, version)?;
         let cond = step
             .condition
             .as_ref()

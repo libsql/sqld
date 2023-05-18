@@ -5,8 +5,7 @@ use anyhow::{anyhow, bail, Context as _, Result};
 use futures::future::BoxFuture;
 use tokio::sync::{mpsc, oneshot};
 
-use super::conn::ProtocolError;
-use super::handshake::Protocol;
+use super::super::{ProtocolError, Version};
 use super::{proto, Server};
 use crate::auth::{AuthError, Authenticated};
 use crate::database::Database;
@@ -20,7 +19,7 @@ use crate::hrana::stmt::{
 /// Session-level state of an authenticated Hrana connection.
 pub struct Session {
     authenticated: Authenticated,
-    protocol: Protocol,
+    version: Version,
     streams: HashMap<i32, StreamHandle>,
     sqls: HashMap<i32, String>,
 }
@@ -54,19 +53,8 @@ struct Stream {
 pub enum ResponseError {
     #[error("Authentication failed: {source}")]
     Auth { source: AuthError },
-
-    #[error("Stream {stream_id} not found")]
-    StreamNotFound { stream_id: i32 },
-    #[error("Stream {stream_id} already exists")]
-    StreamExists { stream_id: i32 },
     #[error("Stream {stream_id} has failed to open")]
     StreamNotOpen { stream_id: i32 },
-
-    #[error("SQL text {sql_id} not found")]
-    SqlNotFound { sql_id: i32 },
-    #[error("SQL text {sql_id} already exists")]
-    SqlExists { sql_id: i32 },
-
     #[error(transparent)]
     Batch(BatchError),
     #[error(transparent)]
@@ -75,7 +63,7 @@ pub enum ResponseError {
 
 pub(super) fn handle_initial_hello(
     server: &Server,
-    protocol: Protocol,
+    version: Version,
     jwt: Option<String>,
 ) -> Result<Session> {
     let authenticated = server
@@ -85,7 +73,7 @@ pub(super) fn handle_initial_hello(
 
     Ok(Session {
         authenticated,
-        protocol,
+        version,
         streams: HashMap::new(),
         sqls: HashMap::new(),
     })
@@ -96,10 +84,11 @@ pub(super) fn handle_repeated_hello(
     session: &mut Session,
     jwt: Option<String>,
 ) -> Result<()> {
-    if session.protocol < Protocol::Hrana2 {
-        bail!(ProtocolError::from_message(
-            "Hello message can only be sent once in protocol version below 2"
-        ))
+    if session.version < Version::Hrana2 {
+        bail!(ProtocolError::NotSupported {
+            what: "Repeated hello message",
+            min_version: Version::Hrana2,
+        })
     }
 
     session.authenticated = server
@@ -135,16 +124,49 @@ pub(super) async fn handle_request(
         };
     }
 
+    macro_rules! ensure_version {
+        ($min_version:expr, $what:expr) => {
+            if session.version < $min_version {
+                bail!(ProtocolError::NotSupported {
+                    what: $what,
+                    min_version: $min_version,
+                })
+            }
+        };
+    }
+
+    macro_rules! get_stream_mut {
+        ($stream_id:expr) => {
+            match session.streams.get_mut(&$stream_id) {
+                Some(stream_hdn) => stream_hdn,
+                None => bail!(ProtocolError::StreamNotFound {
+                    stream_id: $stream_id
+                }),
+            }
+        };
+    }
+
+    macro_rules! get_stream_db {
+        ($stream:expr, $stream_id:expr) => {
+            match $stream.db.as_ref() {
+                Some(db) => db,
+                None => bail!(ResponseError::StreamNotOpen {
+                    stream_id: $stream_id
+                }),
+            }
+        };
+    }
+
     match req {
         proto::Request::OpenStream(req) => {
             let stream_id = req.stream_id;
             if session.streams.contains_key(&stream_id) {
-                bail!(ResponseError::StreamExists { stream_id })
+                bail!(ProtocolError::StreamExists { stream_id })
             }
 
             let mut stream_hnd = stream_spawn(join_set, Stream { db: None });
-
             let db_factory = server.db_factory.clone();
+
             stream_respond!(&mut stream_hnd, async move |stream| {
                 let db = db_factory
                     .create()
@@ -159,7 +181,7 @@ pub(super) async fn handle_request(
         proto::Request::CloseStream(req) => {
             let stream_id = req.stream_id;
             let Some(mut stream_hnd) = session.streams.remove(&stream_id) else {
-                bail!(ResponseError::StreamNotFound { stream_id })
+                bail!(ProtocolError::StreamNotFound { stream_id })
             };
 
             stream_respond!(&mut stream_hnd, async move |_stream| {
@@ -168,17 +190,14 @@ pub(super) async fn handle_request(
         }
         proto::Request::Execute(req) => {
             let stream_id = req.stream_id;
-            let Some(stream_hnd) = session.streams.get_mut(&stream_id) else {
-                bail!(ResponseError::StreamNotFound { stream_id })
-            };
+            let stream_hnd = get_stream_mut!(stream_id);
 
-            let query = proto_stmt_to_query(&req.stmt, &session.sqls, session.protocol)
+            let query = proto_stmt_to_query(&req.stmt, &session.sqls, session.version)
                 .map_err(wrap_stmt_error)?;
             let auth = session.authenticated;
+
             stream_respond!(stream_hnd, async move |stream| {
-                let Some(db) = stream.db.as_ref() else {
-                    bail!(ResponseError::StreamNotOpen { stream_id })
-                };
+                let db = get_stream_db!(stream, stream_id);
                 let result = execute_stmt(&**db, auth, query)
                     .await
                     .map_err(wrap_stmt_error)?;
@@ -187,17 +206,14 @@ pub(super) async fn handle_request(
         }
         proto::Request::Batch(req) => {
             let stream_id = req.stream_id;
-            let Some(stream_hnd) = session.streams.get_mut(&stream_id) else {
-                bail!(ResponseError::StreamNotFound { stream_id })
-            };
+            let stream_hnd = get_stream_mut!(stream_id);
 
-            let pgm = proto_batch_to_program(&req.batch, &session.sqls, session.protocol)
+            let pgm = proto_batch_to_program(&req.batch, &session.sqls, session.version)
                 .map_err(wrap_batch_error)?;
             let auth = session.authenticated;
+
             stream_respond!(stream_hnd, async move |stream| {
-                let Some(db) = stream.db.as_ref() else {
-                    bail!(ResponseError::StreamNotOpen { stream_id })
-                };
+                let db = get_stream_db!(stream, stream_id);
                 let result = execute_batch(&**db, auth, pgm)
                     .await
                     .map_err(wrap_batch_error)?;
@@ -205,29 +221,21 @@ pub(super) async fn handle_request(
             });
         }
         proto::Request::Sequence(req) => {
-            if session.protocol < Protocol::Hrana2 {
-                bail!(ProtocolError::from_message(
-                    "The `sequence` request is only supported in protocol version 2 and higher"
-                ))
-            }
-
+            ensure_version!(Version::Hrana2, "The `sequence` request");
             let stream_id = req.stream_id;
-            let Some(stream_hnd) = session.streams.get_mut(&stream_id) else {
-                bail!(ResponseError::StreamNotFound { stream_id })
-            };
+            let stream_hnd = get_stream_mut!(stream_id);
 
             let sql = proto_sql_to_sql(
                 req.sql.as_deref(),
                 req.sql_id,
                 &session.sqls,
-                session.protocol,
+                session.version,
             )?;
             let pgm = proto_sequence_to_program(sql).map_err(wrap_stmt_error)?;
             let auth = session.authenticated;
+
             stream_respond!(stream_hnd, async move |stream| {
-                let Some(db) = stream.db.as_ref() else {
-                    bail!(ResponseError::StreamNotOpen { stream_id })
-                };
+                let db = get_stream_db!(stream, stream_id);
                 execute_sequence(&**db, auth, pgm)
                     .await
                     .map_err(wrap_stmt_error)?;
@@ -235,29 +243,21 @@ pub(super) async fn handle_request(
             });
         }
         proto::Request::Describe(req) => {
-            if session.protocol < Protocol::Hrana2 {
-                bail!(ProtocolError::from_message(
-                    "The `describe` request is only supported in protocol version 2 and higher"
-                ))
-            }
-
+            ensure_version!(Version::Hrana2, "The `describe` request");
             let stream_id = req.stream_id;
-            let Some(stream_hnd) = session.streams.get_mut(&stream_id) else {
-                bail!(ResponseError::StreamNotFound { stream_id })
-            };
+            let stream_hnd = get_stream_mut!(stream_id);
 
             let sql = proto_sql_to_sql(
                 req.sql.as_deref(),
                 req.sql_id,
                 &session.sqls,
-                session.protocol,
+                session.version,
             )?
             .into();
             let auth = session.authenticated;
+
             stream_respond!(stream_hnd, async move |stream| {
-                let Some(db) = stream.db.as_ref() else {
-                    bail!(ResponseError::StreamNotOpen { stream_id })
-                };
+                let db = get_stream_db!(stream, stream_id);
                 let result = describe_stmt(&**db, auth, sql)
                     .await
                     .map_err(wrap_stmt_error)?;
@@ -265,27 +265,17 @@ pub(super) async fn handle_request(
             });
         }
         proto::Request::StoreSql(req) => {
-            if session.protocol < Protocol::Hrana2 {
-                bail!(ProtocolError::from_message(
-                    "The `store_sql` request is only supported in protocol version 2 and higher"
-                ))
-            }
-
+            ensure_version!(Version::Hrana2, "The `store_sql` request");
             let sql_id = req.sql_id;
             if session.sqls.contains_key(&sql_id) {
-                bail!(ResponseError::SqlExists { sql_id })
+                bail!(ProtocolError::SqlExists { sql_id })
             }
 
             session.sqls.insert(sql_id, req.sql);
             respond!(proto::Response::StoreSql(proto::StoreSqlResp {}));
         }
         proto::Request::CloseSql(req) => {
-            if session.protocol < Protocol::Hrana2 {
-                bail!(ProtocolError::from_message(
-                    "The `close_sql` request is only supported in protocol version 2 and higher"
-                ))
-            }
-
+            ensure_version!(Version::Hrana2, "The `close_sql` request");
             session.sqls.remove(&req.sql_id);
             respond!(proto::Response::CloseSql(proto::CloseSqlResp {}));
         }
@@ -338,11 +328,7 @@ impl ResponseError {
     pub fn code(&self) -> &'static str {
         match self {
             Self::Auth { source } => source.code(),
-            Self::StreamNotFound { .. } => "STREAM_NOT_FOUND",
-            Self::StreamExists { .. } => "STREAM_EXISTS",
             Self::StreamNotOpen { .. } => "STREAM_NOT_OPEN",
-            Self::SqlNotFound { .. } => "SQL_NOT_FOUND",
-            Self::SqlExists { .. } => "SQL_EXISTS",
             Self::Batch(err) => err.code(),
             Self::Stmt(err) => err.code(),
         }
