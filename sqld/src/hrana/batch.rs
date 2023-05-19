@@ -14,9 +14,13 @@ use super::stmt::{
 use super::Version;
 use super::{proto, ProtocolError};
 
-fn proto_cond_to_cond(cond: &proto::BatchCond) -> Result<Cond> {
-    let try_convert_step = |step: i32| -> std::result::Result<usize, ProtocolError> {
-        usize::try_from(step).map_err(|_| ProtocolError::BatchCondBadStep)
+fn proto_cond_to_cond(cond: &proto::BatchCond, max_step_i: usize) -> Result<Cond> {
+    let try_convert_step = |step: i32| -> Result<usize, ProtocolError> {
+        let step = usize::try_from(step).map_err(|_| ProtocolError::BatchCondBadStep)?;
+        if step >= max_step_i {
+            return Err(ProtocolError::BatchCondBadStep);
+        }
+        Ok(step)
     };
 
     let cond = match cond {
@@ -27,18 +31,18 @@ fn proto_cond_to_cond(cond: &proto::BatchCond) -> Result<Cond> {
             step: try_convert_step(*step)?,
         },
         proto::BatchCond::Not { cond } => Cond::Not {
-            cond: proto_cond_to_cond(cond)?.into(),
+            cond: proto_cond_to_cond(cond, max_step_i)?.into(),
         },
         proto::BatchCond::And { conds } => Cond::And {
             conds: conds
                 .iter()
-                .map(proto_cond_to_cond)
+                .map(|cond| proto_cond_to_cond(cond, max_step_i))
                 .collect::<Result<_>>()?,
         },
         proto::BatchCond::Or { conds } => Cond::Or {
             conds: conds
                 .iter()
-                .map(proto_cond_to_cond)
+                .map(|cond| proto_cond_to_cond(cond, max_step_i))
                 .collect::<Result<_>>()?,
         },
     };
@@ -52,12 +56,12 @@ pub fn proto_batch_to_program(
     version: Version,
 ) -> Result<Program> {
     let mut steps = Vec::with_capacity(batch.steps.len());
-    for step in &batch.steps {
+    for (step_i, step) in batch.steps.iter().enumerate() {
         let query = proto_stmt_to_query(&step.stmt, sqls, version)?;
         let cond = step
             .condition
             .as_ref()
-            .map(proto_cond_to_cond)
+            .map(|cond| proto_cond_to_cond(cond, step_i))
             .transpose()?;
         let step = Step { query, cond };
 
