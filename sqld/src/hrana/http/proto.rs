@@ -1,7 +1,7 @@
 //! Structures for Hrana-over-HTTP.
 
-use serde::{Deserialize, Serialize};
 pub use super::super::proto::*;
+use serde::{Deserialize, Serialize};
 
 #[derive(Deserialize, Debug)]
 pub struct PipelineRequestBody {
@@ -48,12 +48,10 @@ pub enum StreamResponse {
 }
 
 #[derive(Deserialize, Debug)]
-pub struct CloseStreamReq {
-}
+pub struct CloseStreamReq {}
 
 #[derive(Serialize, Debug)]
-pub struct CloseStreamResp {
-}
+pub struct CloseStreamResp {}
 
 #[derive(Deserialize, Debug)]
 pub struct ExecuteStreamReq {
@@ -84,8 +82,7 @@ pub struct SequenceStreamReq {
 }
 
 #[derive(Serialize, Debug)]
-pub struct SequenceStreamResp {
-}
+pub struct SequenceStreamResp {}
 
 #[derive(Deserialize, Debug)]
 pub struct DescribeStreamReq {
@@ -107,8 +104,7 @@ pub struct StoreSqlStreamReq {
 }
 
 #[derive(Serialize, Debug)]
-pub struct StoreSqlStreamResp {
-}
+pub struct StoreSqlStreamResp {}
 
 #[derive(Deserialize, Debug)]
 pub struct CloseSqlStreamReq {
@@ -116,5 +112,4 @@ pub struct CloseSqlStreamReq {
 }
 
 #[derive(Serialize, Debug)]
-pub struct CloseSqlStreamResp {
-}
+pub struct CloseSqlStreamResp {}

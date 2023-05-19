@@ -259,10 +259,14 @@ async fn handle_request(
         }
 
         (&Method::GET, "/v2") => {
-            hrana_http_srv.handle(auth, hrana::http::Route::GetIndex, req).await
+            hrana_http_srv
+                .handle(auth, hrana::http::Route::GetIndex, req)
+                .await
         }
         (&Method::POST, "/v2/pipeline") => {
-            hrana_http_srv.handle(auth, hrana::http::Route::PostPipeline, req).await
+            hrana_http_srv
+                .handle(auth, hrana::http::Route::PostPipeline, req)
+                .await
         }
 
         _ => Ok(Response::builder().status(404).body(Body::empty()).unwrap()),

@@ -11,13 +11,8 @@ use crate::hrana;
 
 #[derive(thiserror::Error, Debug)]
 enum ResponseError {
-    #[error("Could not parse request body: {source}")]
-    BadRequestBody { source: serde_json::Error },
-
     #[error(transparent)]
-    Stmt(hrana::StmtError),
-    #[error(transparent)]
-    Batch(hrana::BatchError),
+    Stmt(hrana::stmt::StmtError),
 }
 
 pub async fn handle_index(
@@ -46,12 +41,16 @@ pub async fn handle_execute(
     }
 
     handle_request(db_factory, req, |db, req_body: ReqBody| async move {
-        let query =
-            hrana::proto_stmt_to_query(&req_body.stmt, &HashMap::new(), hrana::Version::Hrana1)?;
-        hrana::execute_stmt(&*db, auth, query)
+        let query = hrana::stmt::proto_stmt_to_query(
+            &req_body.stmt,
+            &HashMap::new(),
+            hrana::Version::Hrana1,
+        )
+        .map_err(catch_stmt_error)?;
+        hrana::stmt::execute_stmt(&*db, auth, query)
             .await
             .map(|result| RespBody { result })
-            .map_err(wrap_stmt_error)
+            .map_err(catch_stmt_error)
             .context("Could not execute statement")
     })
     .await
@@ -73,15 +72,15 @@ pub async fn handle_batch(
     }
 
     handle_request(db_factory, req, |db, req_body: ReqBody| async move {
-        let pgm = hrana::proto_batch_to_program(
+        let pgm = hrana::batch::proto_batch_to_program(
             &req_body.batch,
             &HashMap::new(),
             hrana::Version::Hrana1,
-        )?;
-        hrana::execute_batch(&*db, auth, pgm)
+        )
+        .map_err(catch_stmt_error)?;
+        hrana::batch::execute_batch(&*db, auth, pgm)
             .await
             .map(|result| RespBody { result })
-            .map_err(wrap_batch_error)
             .context("Could not execute batch")
     })
     .await
@@ -101,7 +100,7 @@ where
     let res: Result<_> = async move {
         let req_body = hyper::body::to_bytes(req.into_body()).await?;
         let req_body = serde_json::from_slice(&req_body)
-            .map_err(|e| ResponseError::BadRequestBody { source: e })?;
+            .map_err(|e| hrana::ProtocolError::Deserialize { source: e })?;
 
         let db = db_factory
             .create()
@@ -113,17 +112,16 @@ where
     }
     .await;
 
-    Ok(match res {
-        Ok(resp) => resp,
-        Err(err) => error_response(err.downcast::<ResponseError>()?),
-    })
+    res.or_else(|err| err.downcast::<ResponseError>().map(response_error_response))
+        .or_else(|err| {
+            err.downcast::<hrana::ProtocolError>()
+                .map(protocol_error_response)
+        })
 }
 
-fn error_response(err: ResponseError) -> hyper::Response<hyper::Body> {
-    use hrana::BatchError;
-    use hrana::StmtError;
+fn response_error_response(err: ResponseError) -> hyper::Response<hyper::Body> {
+    use hrana::stmt::StmtError;
     let status = match &err {
-        ResponseError::BadRequestBody { .. } => hyper::StatusCode::BAD_REQUEST,
         ResponseError::Stmt(err) => match err {
             StmtError::SqlParse { .. }
             | StmtError::SqlNoStmt
@@ -136,9 +134,6 @@ fn error_response(err: ResponseError) -> hyper::Response<hyper::Body> {
             }
             StmtError::SqliteError { .. } => hyper::StatusCode::INTERNAL_SERVER_ERROR,
         },
-        ResponseError::Batch(err) => match err {
-            BatchError::CondBadStep => hyper::StatusCode::BAD_REQUEST,
-        },
     };
 
     json_response(
@@ -150,6 +145,14 @@ fn error_response(err: ResponseError) -> hyper::Response<hyper::Body> {
     )
 }
 
+fn protocol_error_response(err: hrana::ProtocolError) -> hyper::Response<hyper::Body> {
+    hyper::Response::builder()
+        .status(hyper::StatusCode::BAD_REQUEST)
+        .header(hyper::http::header::CONTENT_TYPE, "text/plain")
+        .body(hyper::Body::from(err.to_string()))
+        .unwrap()
+}
+
 fn json_response<T: Serialize>(
     status: hyper::StatusCode,
     body: &T,
@@ -157,21 +160,14 @@ fn json_response<T: Serialize>(
     let body = serde_json::to_vec(body).unwrap();
     hyper::Response::builder()
         .status(status)
-        .header("content-type", "application/json")
+        .header(hyper::http::header::CONTENT_TYPE, "application/json")
         .body(hyper::Body::from(body))
         .unwrap()
 }
 
-fn wrap_stmt_error(err: anyhow::Error) -> anyhow::Error {
-    match err.downcast::<hrana::StmtError>() {
+fn catch_stmt_error(err: anyhow::Error) -> anyhow::Error {
+    match err.downcast::<hrana::stmt::StmtError>() {
         Ok(stmt_err) => anyhow!(ResponseError::Stmt(stmt_err)),
-        Err(err) => err,
-    }
-}
-
-fn wrap_batch_error(err: anyhow::Error) -> anyhow::Error {
-    match err.downcast::<hrana::BatchError>() {
-        Ok(batch_err) => anyhow!(ResponseError::Batch(batch_err)),
         Err(err) => err,
     }
 }
@@ -179,9 +175,7 @@ fn wrap_batch_error(err: anyhow::Error) -> anyhow::Error {
 impl ResponseError {
     pub fn code(&self) -> &'static str {
         match self {
-            Self::BadRequestBody { .. } => "HTTP_BAD_REQUEST_BODY",
             Self::Stmt(err) => err.code(),
-            Self::Batch(err) => err.code(),
         }
     }
 }

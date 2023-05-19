@@ -7,30 +7,16 @@ use crate::database::{Cond, Database, Program, Step};
 use crate::query::{Params, Query};
 use crate::query_analysis::Statement;
 
-use super::proto;
 use super::stmt::{
     proto_error_from_stmt_error, proto_stmt_result_from_query_response, proto_stmt_to_query,
     stmt_error_from_sqld_error, StmtError,
 };
 use super::Version;
-
-#[derive(thiserror::Error, Debug)]
-pub enum BatchError {
-    #[error("Invalid reference to step in a condition")]
-    CondBadStep,
-}
-
-impl BatchError {
-    pub fn code(&self) -> &'static str {
-        match self {
-            Self::CondBadStep => "BATCH_COND_BAD_STEP",
-        }
-    }
-}
+use super::{proto, ProtocolError};
 
 fn proto_cond_to_cond(cond: &proto::BatchCond) -> Result<Cond> {
-    let try_convert_step = |step: i32| -> std::result::Result<usize, BatchError> {
-        usize::try_from(step).map_err(|_| BatchError::CondBadStep)
+    let try_convert_step = |step: i32| -> std::result::Result<usize, ProtocolError> {
+        usize::try_from(step).map_err(|_| ProtocolError::BatchCondBadStep)
     };
 
     let cond = match cond {

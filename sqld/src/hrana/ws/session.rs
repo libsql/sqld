@@ -5,16 +5,10 @@ use anyhow::{anyhow, bail, Context as _, Result};
 use futures::future::BoxFuture;
 use tokio::sync::{mpsc, oneshot};
 
-use super::super::{ProtocolError, Version};
+use super::super::{batch, stmt, ProtocolError, Version};
 use super::{proto, Server};
 use crate::auth::{AuthError, Authenticated};
 use crate::database::Database;
-use crate::hrana::batch::{
-    execute_batch, execute_sequence, proto_batch_to_program, proto_sequence_to_program, BatchError,
-};
-use crate::hrana::stmt::{
-    describe_stmt, execute_stmt, proto_sql_to_sql, proto_stmt_to_query, StmtError,
-};
 
 /// Session-level state of an authenticated Hrana connection.
 pub struct Session {
@@ -56,9 +50,7 @@ pub enum ResponseError {
     #[error("Stream {stream_id} has failed to open")]
     StreamNotOpen { stream_id: i32 },
     #[error(transparent)]
-    Batch(BatchError),
-    #[error(transparent)]
-    Stmt(StmtError),
+    Stmt(stmt::StmtError),
 }
 
 pub(super) fn handle_initial_hello(
@@ -192,15 +184,15 @@ pub(super) async fn handle_request(
             let stream_id = req.stream_id;
             let stream_hnd = get_stream_mut!(stream_id);
 
-            let query = proto_stmt_to_query(&req.stmt, &session.sqls, session.version)
-                .map_err(wrap_stmt_error)?;
+            let query = stmt::proto_stmt_to_query(&req.stmt, &session.sqls, session.version)
+                .map_err(catch_stmt_error)?;
             let auth = session.authenticated;
 
             stream_respond!(stream_hnd, async move |stream| {
                 let db = get_stream_db!(stream, stream_id);
-                let result = execute_stmt(&**db, auth, query)
+                let result = stmt::execute_stmt(&**db, auth, query)
                     .await
-                    .map_err(wrap_stmt_error)?;
+                    .map_err(catch_stmt_error)?;
                 Ok(proto::Response::Execute(proto::ExecuteResp { result }))
             });
         }
@@ -208,15 +200,13 @@ pub(super) async fn handle_request(
             let stream_id = req.stream_id;
             let stream_hnd = get_stream_mut!(stream_id);
 
-            let pgm = proto_batch_to_program(&req.batch, &session.sqls, session.version)
-                .map_err(wrap_batch_error)?;
+            let pgm = batch::proto_batch_to_program(&req.batch, &session.sqls, session.version)
+                .map_err(catch_stmt_error)?;
             let auth = session.authenticated;
 
             stream_respond!(stream_hnd, async move |stream| {
                 let db = get_stream_db!(stream, stream_id);
-                let result = execute_batch(&**db, auth, pgm)
-                    .await
-                    .map_err(wrap_batch_error)?;
+                let result = batch::execute_batch(&**db, auth, pgm).await?;
                 Ok(proto::Response::Batch(proto::BatchResp { result }))
             });
         }
@@ -225,20 +215,20 @@ pub(super) async fn handle_request(
             let stream_id = req.stream_id;
             let stream_hnd = get_stream_mut!(stream_id);
 
-            let sql = proto_sql_to_sql(
+            let sql = stmt::proto_sql_to_sql(
                 req.sql.as_deref(),
                 req.sql_id,
                 &session.sqls,
                 session.version,
             )?;
-            let pgm = proto_sequence_to_program(sql).map_err(wrap_stmt_error)?;
+            let pgm = batch::proto_sequence_to_program(sql).map_err(catch_stmt_error)?;
             let auth = session.authenticated;
 
             stream_respond!(stream_hnd, async move |stream| {
                 let db = get_stream_db!(stream, stream_id);
-                execute_sequence(&**db, auth, pgm)
+                batch::execute_sequence(&**db, auth, pgm)
                     .await
-                    .map_err(wrap_stmt_error)?;
+                    .map_err(catch_stmt_error)?;
                 Ok(proto::Response::Sequence(proto::SequenceResp {}))
             });
         }
@@ -247,7 +237,7 @@ pub(super) async fn handle_request(
             let stream_id = req.stream_id;
             let stream_hnd = get_stream_mut!(stream_id);
 
-            let sql = proto_sql_to_sql(
+            let sql = stmt::proto_sql_to_sql(
                 req.sql.as_deref(),
                 req.sql_id,
                 &session.sqls,
@@ -258,9 +248,9 @@ pub(super) async fn handle_request(
 
             stream_respond!(stream_hnd, async move |stream| {
                 let db = get_stream_db!(stream, stream_id);
-                let result = describe_stmt(&**db, auth, sql)
+                let result = stmt::describe_stmt(&**db, auth, sql)
                     .await
-                    .map_err(wrap_stmt_error)?;
+                    .map_err(catch_stmt_error)?;
                 Ok(proto::Response::Describe(proto::DescribeResp { result }))
             });
         }
@@ -310,16 +300,9 @@ async fn stream_respond<F>(
     let _: Result<_, _> = stream_hnd.job_tx.send(job).await;
 }
 
-fn wrap_stmt_error(err: anyhow::Error) -> anyhow::Error {
-    match err.downcast::<StmtError>() {
+fn catch_stmt_error(err: anyhow::Error) -> anyhow::Error {
+    match err.downcast::<stmt::StmtError>() {
         Ok(stmt_err) => anyhow!(ResponseError::Stmt(stmt_err)),
-        Err(err) => err,
-    }
-}
-
-fn wrap_batch_error(err: anyhow::Error) -> anyhow::Error {
-    match err.downcast::<BatchError>() {
-        Ok(batch_err) => anyhow!(ResponseError::Batch(batch_err)),
         Err(err) => err,
     }
 }
@@ -329,7 +312,6 @@ impl ResponseError {
         match self {
             Self::Auth { source } => source.code(),
             Self::StreamNotOpen { .. } => "STREAM_NOT_OPEN",
-            Self::Batch(err) => err.code(),
             Self::Stmt(err) => err.code(),
         }
     }

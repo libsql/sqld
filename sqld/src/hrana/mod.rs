@@ -1,16 +1,9 @@
 use std::fmt;
 
-pub use self::batch::{
-    execute_batch, execute_sequence, proto_batch_to_program, proto_sequence_to_program, BatchError,
-};
-pub use self::stmt::{
-    describe_stmt, execute_stmt, proto_sql_to_sql, proto_stmt_to_query, StmtError,
-};
-
-mod batch;
+pub mod batch;
 pub mod http;
 pub mod proto;
-mod stmt;
+pub mod stmt;
 pub mod ws;
 
 #[derive(Debug, Copy, Clone, PartialOrd, Ord, PartialEq, Eq)]
@@ -28,7 +21,8 @@ impl fmt::Display for Version {
     }
 }
 
-/// An unrecoverable protocol error that should close the WebSocket or HTTP stream.
+/// An unrecoverable protocol error that should close the WebSocket or HTTP stream. A correct
+/// client should never trigger any of these errors.
 #[derive(thiserror::Error, Debug)]
 pub enum ProtocolError {
     #[error("Cannot deserialize client message: {source}")]
@@ -52,14 +46,15 @@ pub enum ProtocolError {
     #[error("SQL text {sql_id} already exists")]
     SqlExists { sql_id: i32 },
 
+    #[error("Invalid reference to step in a batch condition")]
+    BatchCondBadStep,
+
     #[error("Received an invalid baton")]
     BatonInvalid,
     #[error("Received a baton that has already been used")]
     BatonReused,
     #[error("Stream for this baton was closed")]
     BatonStreamClosed,
-    #[error("Stream for this baton has expired")]
-    BatonStreamExpired,
 
     #[error("{what} is only supported in protocol version {min_version} and higher")]
     NotSupported {
