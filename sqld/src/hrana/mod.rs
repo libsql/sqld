@@ -54,12 +54,12 @@ pub enum ProtocolError {
 
     #[error("Received an invalid baton")]
     BatonInvalid,
-    #[error("Received a baton for a stream that is currently in use")]
-    BatonInUse,
     #[error("Received a baton that has already been used")]
     BatonReused,
     #[error("Stream for this baton was closed")]
     BatonStreamClosed,
+    #[error("Stream for this baton has expired")]
+    BatonStreamExpired,
 
     #[error("{what} is only supported in protocol version {min_version} and higher")]
     NotSupported {

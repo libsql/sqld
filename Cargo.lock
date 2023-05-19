@@ -3031,6 +3031,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "priority-queue"
+version = "1.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5ca9c6be70d989d21a136eb86c2d83e4b328447fac4a88dace2143c179c86267"
+dependencies = [
+ "autocfg",
+ "indexmap",
+]
+
+[[package]]
 name = "proc-macro-error"
 version = "1.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3816,6 +3826,7 @@ dependencies = [
  "pgwire",
  "pin-project-lite",
  "postgres-protocol",
+ "priority-queue",
  "proptest",
  "prost",
  "prost-build",

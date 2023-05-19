@@ -129,11 +129,15 @@ async fn run_service(
             auth,
             db_factory,
             hrana_upgrade_tx,
-            hrana_http_srv,
+            hrana_http_srv.clone(),
             config.enable_http_console,
             idle_shutdown_layer,
             stats.clone(),
         ));
+        join_set.spawn(async move {
+            hrana_http_srv.run_expire().await;
+            Ok(())
+        });
     }
 
     if let Some(addr) = config.hrana_addr {

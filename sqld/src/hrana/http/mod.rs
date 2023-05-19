@@ -16,6 +16,7 @@ pub struct Server {
     db_factory: Arc<dyn DbFactory>,
     streams: Mutex<HashMap<u64, stream::Handle>>,
     baton_key: [u8; 32],
+    expire_state: Mutex<stream::ExpireState>,
 }
 
 // TODO: release streams after 10 seconds of inactivity
@@ -32,7 +33,12 @@ impl Server {
             db_factory,
             streams: Mutex::new(HashMap::new()),
             baton_key: rand::random(),
+            expire_state: Mutex::new(stream::ExpireState::new()),
         }
+    }
+
+    pub async fn run_expire(&self) {
+        stream::run_expire(self).await
     }
 
     pub async fn handle(
