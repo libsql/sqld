@@ -223,6 +223,7 @@ async fn handle_request(
     auth: Arc<Auth>,
     req: Request<Body>,
     upgrade_tx: mpsc::Sender<hrana::ws::Upgrade>,
+    hrana_http_srv: Arc<hrana::http::Server>,
     db_factory: Arc<dyn DbFactory>,
     enable_console: bool,
     stats: Stats,
@@ -257,6 +258,13 @@ async fn handle_request(
             hrana_over_http_1::handle_batch(db_factory, auth, req).await
         }
 
+        (&Method::GET, "/v2") => {
+            hrana_http_srv.handle(auth, hrana::http::Route::GetIndex, req).await
+        }
+        (&Method::POST, "/v2/pipeline") => {
+            hrana_http_srv.handle(auth, hrana::http::Route::PostPipeline, req).await
+        }
+
         _ => Ok(Response::builder().status(404).body(Body::empty()).unwrap()),
     }
 }
@@ -273,6 +281,7 @@ pub async fn run_http(
     auth: Arc<Auth>,
     db_factory: Arc<dyn DbFactory>,
     upgrade_tx: mpsc::Sender<hrana::ws::Upgrade>,
+    hrana_http_srv: Arc<hrana::http::Server>,
     enable_console: bool,
     idle_shutdown_layer: Option<IdleShutdownLayer>,
     stats: Stats,
@@ -305,6 +314,7 @@ pub async fn run_http(
                 auth.clone(),
                 req,
                 upgrade_tx.clone(),
+                hrana_http_srv.clone(),
                 db_factory.clone(),
                 enable_console,
                 stats.clone(),

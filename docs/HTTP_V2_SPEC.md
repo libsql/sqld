@@ -37,7 +37,7 @@ negotiation mechanism by the client.
 ## Execute requests on a stream
 
 ```typescript
-POST /v2/stream
+POST /v2/pipeline
 
 -> {
     "baton": string | null,
@@ -65,17 +65,17 @@ type StreamResultError = {
 }
 ```
 
-The `stream` endpoint is used to execute requests on a stream. `baton` in the
-request specifies the stream. If the client sets `baton` to `null`, the server
-should create a new stream.
+The `pipeline` endpoint is used to execute a pipeline of requests on a stream.
+`baton` in the request specifies the stream. If the client sets `baton` to
+`null`, the server should create a new stream.
 
 Server responds with another `baton` value in the response. If the `baton` value
 in the response is `null`, it means that the server has closed the stream. The
 client must use this value to refer to this stream in the next request (the
 `baton` in the response should be different from the `baton` in the request).
 This forces the client to issue the requests serially: it must wait for the
-response from a previous `stream` request before issuing another request on the
-same stream.
+response from a previous `pipeline` request before issuing another request on
+the same stream.
 
 The server should ensure that the `baton` values are unpredictable and
 unforgeable, for example by cryptographically signing them.
@@ -92,7 +92,7 @@ the results in the `results` array in the response. Result is either a success
 executes all requests, even if some of them return errors.
 
 If the client receives an HTTP error (4xx or 5xx response) in response to the
-`stream` endpoint, it means that the server encountered an internal error and
+`pipeline` endpoint, it means that the server encountered an internal error and
 the stream is no longer valid.
 
 ## Requests

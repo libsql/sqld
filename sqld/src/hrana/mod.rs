@@ -8,6 +8,7 @@ pub use self::stmt::{
 };
 
 mod batch;
+pub mod http;
 pub mod proto;
 mod stmt;
 pub mod ws;
@@ -50,6 +51,15 @@ pub enum ProtocolError {
     SqlNotFound { sql_id: i32 },
     #[error("SQL text {sql_id} already exists")]
     SqlExists { sql_id: i32 },
+
+    #[error("Received an invalid baton")]
+    BatonInvalid,
+    #[error("Received a baton for a stream that is currently in use")]
+    BatonInUse,
+    #[error("Received a baton that has already been used")]
+    BatonReused,
+    #[error("Stream for this baton was closed")]
+    BatonStreamClosed,
 
     #[error("{what} is only supported in protocol version {min_version} and higher")]
     NotSupported {

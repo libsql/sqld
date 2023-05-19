@@ -123,11 +123,13 @@ async fn run_service(
     }
 
     if let Some(addr) = config.http_addr {
+        let hrana_http_srv = Arc::new(hrana::http::Server::new(db_factory.clone()));
         join_set.spawn(http::run_http(
             addr,
             auth,
             db_factory,
             hrana_upgrade_tx,
+            hrana_http_srv,
             config.enable_http_console,
             idle_shutdown_layer,
             stats.clone(),
