@@ -385,8 +385,8 @@ fn pump_expire(state: &mut ServerStreamState, cx: &mut task::Context) {
     let _: task::Poll<()> = state.expire_sleep.as_mut().poll(cx);
 }
 
-/// Rounds the `instant` to the next second. This is used to ensure that streams that expire
-/// should together are expired at exactly the same instant, thus reducing the number of times that
+/// Rounds the `instant` to the next second. This is used to ensure that streams that expire close
+/// together are expired at exactly the same instant, thus reducing the number of times that
 /// [`pump_expire()`] is called during periods of high load.
 fn roundup_instant(state: &ServerStreamState, instant: Instant) -> Instant {
     let duration_s = (instant - state.expire_round_base).as_secs();

@@ -175,7 +175,7 @@ type SequenceStreamReq = {
     "sql_id"?: int32 | null,
 }
 
-type SequenceResp = {
+type SequenceStreamResp = {
     "type": "sequence",
 }
 ```
@@ -192,7 +192,7 @@ type DescribeStreamReq = {
     "sql_id"?: int32 | null,
 }
 
-type DescribeResp = {
+type DescribeStreamResp = {
     "type": "describe",
     "result": DescribeResult,
 }
