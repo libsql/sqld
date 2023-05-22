@@ -424,6 +424,8 @@ async fn run_storage_monitor(mut db_path: PathBuf, stats: Stats) -> anyhow::Resu
 }
 
 pub async fn run_server(config: Config) -> anyhow::Result<()> {
+    // before anything init vfs
+    database::vfs::init();
     tracing::trace!("Backend: {:?}", config.backend);
 
     #[cfg(feature = "mwal_backend")]

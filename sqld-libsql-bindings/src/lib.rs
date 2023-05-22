@@ -94,6 +94,11 @@ pub fn open_with_regular_wal(
     }
     drop(opening_lock);
     conn.pragma_update(None, "journal_mode", "wal")?;
+    conn.pragma(None, "journal_mode", "", |v| {
+        dbg!(v.get_unwrap::<_, String>(0));
+        Ok(())
+    })
+    .unwrap();
 
     Ok(Connection {
         conn,
