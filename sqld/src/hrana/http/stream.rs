@@ -355,11 +355,12 @@ fn pump_expire(state: &mut ServerStreamState, cx: &mut task::Context) {
         };
         state.expire_queue.pop();
 
-        let handle = state.handles.get_mut(&stream_id);
-        if !matches!(handle, Some(Handle::Available(_))) {
-            continue;
+        match state.handles.get_mut(&stream_id) {
+            Some(handle @ Handle::Available(_)) => {
+                *handle = Handle::Expired;
+            }
+            _ => continue,
         }
-        *handle.unwrap() = Handle::Expired;
         tracing::debug!("Stream {stream_id} was expired");
 
         let cleanup_at = roundup_instant(state, now + CLEANUP);

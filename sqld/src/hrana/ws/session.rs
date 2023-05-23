@@ -49,6 +49,8 @@ pub enum ResponseError {
     Auth { source: AuthError },
     #[error("Stream {stream_id} has failed to open")]
     StreamNotOpen { stream_id: i32 },
+    #[error("The server already stores {count} SQL texts, it cannot store more")]
+    SqlTooMany { count: usize },
     #[error(transparent)]
     Stmt(stmt::StmtError),
 }
@@ -259,6 +261,10 @@ pub(super) async fn handle_request(
             let sql_id = req.sql_id;
             if session.sqls.contains_key(&sql_id) {
                 bail!(ProtocolError::SqlExists { sql_id })
+            } else if session.sqls.len() >= MAX_SQL_COUNT {
+                bail!(ResponseError::SqlTooMany {
+                    count: session.sqls.len()
+                })
             }
 
             session.sqls.insert(sql_id, req.sql);
@@ -272,6 +278,8 @@ pub(super) async fn handle_request(
     }
     Ok(resp_rx)
 }
+
+const MAX_SQL_COUNT: usize = 150;
 
 fn stream_spawn(join_set: &mut tokio::task::JoinSet<()>, stream: Stream) -> StreamHandle {
     let (job_tx, mut job_rx) = mpsc::channel::<StreamJob>(8);
@@ -311,6 +319,7 @@ impl ResponseError {
     pub fn code(&self) -> &'static str {
         match self {
             Self::Auth { source } => source.code(),
+            Self::SqlTooMany { .. } => "SQL_STORE_TOO_MANY",
             Self::StreamNotOpen { .. } => "STREAM_NOT_OPEN",
             Self::Stmt(err) => err.code(),
         }

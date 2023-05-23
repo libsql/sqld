@@ -7,6 +7,8 @@ use crate::auth::Authenticated;
 /// An error from executing a [`proto::StreamRequest`]
 #[derive(thiserror::Error, Debug)]
 pub enum StreamResponseError {
+    #[error("The server already stores {count} SQL texts, it cannot store more")]
+    SqlTooMany { count: usize },
     #[error(transparent)]
     Stmt(stmt::StmtError),
 }
@@ -83,6 +85,8 @@ async fn try_handle(
             let sql_id = req.sql_id;
             if sqls.contains_key(&sql_id) {
                 bail!(ProtocolError::SqlExists { sql_id })
+            } else if sqls.len() >= MAX_SQL_COUNT {
+                bail!(StreamResponseError::SqlTooMany { count: sqls.len() })
             }
             sqls.insert(sql_id, req.sql);
             proto::StreamResponse::StoreSql(proto::StoreSqlStreamResp {})
@@ -95,6 +99,8 @@ async fn try_handle(
     })
 }
 
+const MAX_SQL_COUNT: usize = 50;
+
 fn catch_stmt_error(err: anyhow::Error) -> anyhow::Error {
     match err.downcast::<stmt::StmtError>() {
         Ok(stmt_err) => anyhow!(StreamResponseError::Stmt(stmt_err)),
@@ -105,6 +111,7 @@ fn catch_stmt_error(err: anyhow::Error) -> anyhow::Error {
 impl StreamResponseError {
     pub fn code(&self) -> &'static str {
         match self {
+            Self::SqlTooMany { .. } => "SQL_STORE_TOO_MANY",
             Self::Stmt(err) => err.code(),
         }
     }
