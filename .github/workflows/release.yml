@@ -72,8 +72,8 @@ jobs:
         with:
           #name: sqld-${{ github.event.inputs.tag }}-${{ matrix.os }}
           #path: sqld-${{ github.event.inputs.tag }}-${{ matrix.os }}.zip
-          name: sqld-v0.15.0-${{ matrix-os }}
-          path: sqld-v0.15.0-${{ matrix-os }}.zip
+          name: sqld-v0.15.0-${{ matrix.os }}
+          path: sqld-v0.15.0-${{ matrix.os }}.zip
           retention-days: 1
 
   release:
