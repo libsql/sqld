@@ -12,7 +12,8 @@ on:
         description: 'Should this be a pre-release?'
         default: 'false'
         required: false
-
+  push:
+    branch: 'release-pipeline'
 jobs:
   build:
     # Build on Linux, Windows and MacOS
@@ -30,7 +31,8 @@ jobs:
 
       - uses: actions/checkout@v3
         with:
-          ref: ${{ github.event.inputs.tag }}
+          #ref: ${{ github.event.inputs.tag }}
+          ref: 'v0.15.0'
 
       - uses: dtolnay/rust-toolchain@1.65.0
 
@@ -52,7 +54,8 @@ jobs:
 
       - name: Zip artifact for deployment (windows)
         if: matrix.os == 'windows-latest'
-        run: zip sqld-${{ github.event.inputs.tag }}-${{ matrix.os }}.zip ./target/release/sqld
+        #run: zip sqld-${{ github.event.inputs.tag }}-${{ matrix.os }}.zip ./target/release/sqld
+        run: zip sqld-v0-15.0-${{ matrix.os }}.zip ./target/release/sqld
         shell: msys2 {0}
 
       - name: Build sqld (linux/macos)
@@ -62,12 +65,15 @@ jobs:
 
       - name: Zip artifact for deployment (linux/macos)
         if: matrix.os != 'windows-latest'
-        run: zip sqld-${{ github.event.inputs.tag }}-${{ matrix.os }}.zip ./target/release/sqld
+        #run: zip sqld-${{ github.event.inputs.tag }}-${{ matrix.os }}.zip ./target/release/sqld
+        run: zip sqld-v0.15.0-${{ matrix.os }}.zip ./target/release/sqld
 
       - uses: actions/upload-artifact@v3
         with:
-          name: sqld-${{ github.event.inputs.tag }}-${{ matrix.os }}
-          path: sqld-${{ github.event.inputs.tag }}-${{ matrix.os }}.zip
+          #name: sqld-${{ github.event.inputs.tag }}-${{ matrix.os }}
+          #path: sqld-${{ github.event.inputs.tag }}-${{ matrix.os }}.zip
+          name: sqld-v0.15.0-${{ matrix-os }}
+          path: sqld-v0.15.0-${{ matrix-os }}.zip
           retention-days: 1
 
   release:
@@ -86,10 +92,16 @@ jobs:
           token: "${{ secrets.GH_TOKEN }}"
           body_path: RELEASE_NOTES.md
           prerelease: ${{ github.event.inputs.pre-release }}
-          tag_name: "SQLd ${{ github.event.inputs.tag }}"
+          #tag_name: "SQLd ${{ github.event.inputs.tag }}"
+          tag_name: "SQLd v0.15.0"
           generate_release_notes: true
           fail_on_unmatched_files: false
           files: |
-            sqld-${{ github.event.inputs.tag }}-windows-latest/*
-            sqld-${{ github.event.inputs.tag }}-macos-latest/*
-            sqld-${{ github.event.inputs.tag }}-ubuntu-latest/*
+            sqld-v0.15.0-windows-latest/*
+            sqld-v0.15.0-macos-latest/*
+            sqld-v0.15.0-ubuntu-latest/*
+
+#          files: |
+#            sqld-${{ github.event.inputs.tag }}-windows-latest/*
+#            sqld-${{ github.event.inputs.tag }}-macos-latest/*
+#            sqld-${{ github.event.inputs.tag }}-ubuntu-latest/*
