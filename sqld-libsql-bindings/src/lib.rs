@@ -94,6 +94,7 @@ pub fn open_with_regular_wal(
     }
     drop(opening_lock);
     conn.pragma_update(None, "journal_mode", "wal")?;
+    conn.pragma_update(None, "locking_mode", "exclusive")?;
 
     Ok(Connection {
         conn,
