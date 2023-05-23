@@ -8,6 +8,7 @@ use crate::Result;
 pub mod dump;
 pub mod factory;
 pub mod libsql;
+pub mod vfs;
 pub mod write_proxy;
 
 const TXN_TIMEOUT_SECS: u64 = 5;
