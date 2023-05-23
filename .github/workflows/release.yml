@@ -49,7 +49,7 @@ jobs:
         if: matrix.os == 'windows-latest'
         run: |
           export CARGO_BIN="$(which cargo)"
-          cargo build --release
+          cargo build --release -Z sparse-registry
         shell: msys2 {0}
 
       - name: Zip artifact for deployment (windows)
@@ -61,7 +61,7 @@ jobs:
       - name: Build sqld (linux/macos)
         if: matrix.os != 'windows-latest'
         run: |
-          cargo build --release
+          cargo build --release -Z sparse-registry
 
       - name: Zip artifact for deployment (linux/macos)
         if: matrix.os != 'windows-latest'
