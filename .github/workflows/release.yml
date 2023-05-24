@@ -34,7 +34,7 @@ jobs:
           #ref: ${{ github.event.inputs.tag }}
           ref: 'v0.15.0'
 
-      - uses: dtolnay/rust-toolchain@1.65.0
+      - uses: dtolnay/rust-toolchain@1.67.0
 
       - name: setup msys2 for windows
         if: matrix.os == 'windows-latest'
