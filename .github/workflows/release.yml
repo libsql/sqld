@@ -57,6 +57,16 @@ jobs:
         #run: zip sqld-${{ github.event.inputs.tag }}-${{ matrix.os }}.zip ./target/release/sqld
         run: zip sqld-v0-15.0-${{ matrix.os }}.zip ./target/release/sqld
         shell: msys2 {0}
+      
+      - name: install dependencies (linux)
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          apt install --yes \
+            bundler \
+            libpq-dev \
+            libsqlite3-dev \
+            nodejs \
+            protobuf-compiler 
 
       - name: Build sqld (linux/macos)
         if: matrix.os != 'windows-latest'
