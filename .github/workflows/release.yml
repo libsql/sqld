@@ -61,7 +61,7 @@ jobs:
       - name: install dependencies (linux)
         if: matrix.os == 'ubuntu-latest'
         run: |
-          apt install --yes \
+          sudo apt install --yes \
             bundler \
             libpq-dev \
             libsqlite3-dev \
