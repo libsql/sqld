@@ -317,7 +317,7 @@ impl Connection {
                 continue;
             }
 
-            let mut values = vec![];
+            let mut values = Vec::with_capacity(columns.len());
             for (i, _) in columns.iter().enumerate() {
                 values.push(row.get::<usize, rusqlite::types::Value>(i)?.into());
             }
