@@ -103,8 +103,9 @@ jobs:
         uses: softprops/action-gh-release@v1
         with:
           token: "${{ secrets.GH_TOKEN }}"
-          body_path: RELEASE_NOTES.md
-          prerelease: ${{ github.event.inputs.pre-release }}
+          #body_path: RELEASE_NOTES.md
+          #prerelease: ${{ github.event.inputs.pre-release }}
+          prerelease: true
           #tag_name: "SQLd ${{ github.event.inputs.tag }}"
           tag_name: "SQLd v0.15.0"
           generate_release_notes: true
