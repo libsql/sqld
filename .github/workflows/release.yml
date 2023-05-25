@@ -1,25 +1,24 @@
 name: Release
 
 on:
-  workflow_dispatch:
-    # Inputs the workflow accepts.
-    inputs:
-      tag:
-        description: 'Tag, branch or SHA sum to release'
-        required: true
-        default: 'v0.0.99'
-      pre-release:
-        description: 'Should this be a pre-release?'
-        default: 'false'
-        required: false
+  # workflow_dispatch:
+  #   # Inputs the workflow accepts.
+  #   inputs:
+  #     tag:
+  #       description: 'Tag, branch or SHA sum to release'
+  #       required: true
+  #       default: 'v0.0.99'
+  #     pre-release:
+  #       description: 'Should this be a pre-release?'
+  #       default: 'false'
+  #       required: false
   push:
-    branch: 'release-pipeline'
+    #branch: 'release-pipeline'
     tags:
       - "v*.*.*"
  
 jobs:
   build:
-    # Build on Linux, Windows and MacOS
     strategy:
       matrix:
         os: [ubuntu-latest]
@@ -33,11 +32,15 @@ jobs:
           git config --global core.eol lf
 
       - uses: actions/checkout@v3
-        with:
-          #ref: ${{ github.event.inputs.tag }}
-          ref: 'v0.15.0'
 
-      - uses: dtolnay/rust-toolchain@1.67.0
+      - name: Get Rust toolchain version from rust-toolchain.toml
+        id: getrustver
+        run: |
+          RUST_VER=$(grep channel ./rust-toolchain.toml | awk '{print $NF}' | tr -d '"') >> $GITHUB_OUTPUT
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.getrustver.RUST_VER }}
 
       - name: setup msys2 for windows
         if: matrix.os == 'windows-latest'
@@ -58,7 +61,7 @@ jobs:
       - name: Zip artifact for deployment (windows)
         if: matrix.os == 'windows-latest'
         #run: zip sqld-${{ github.event.inputs.tag }}-${{ matrix.os }}.zip ./target/release/sqld
-        run: zip sqld-v0-15.0-${{ matrix.os }}.zip ./target/release/sqld
+        run: zip sqld-${{ github.ref }}-${{ matrix.os }}.zip ./target/release/sqld
         shell: msys2 {0}
       
       - name: install dependencies (linux)
@@ -82,14 +85,14 @@ jobs:
       - name: Zip artifact for deployment (linux/macos)
         if: matrix.os != 'windows-latest'
         #run: zip sqld-${{ github.event.inputs.tag }}-${{ matrix.os }}.zip ./target/release/sqld
-        run: zip sqld-v0.15.0-${{ matrix.os }}.zip ./target/release/sqld
+        run: zip sqld-${{ github.ref }}-${{ matrix.os }}.zip ./target/release/sqld
 
       - uses: actions/upload-artifact@v3
         with:
           #name: sqld-${{ github.event.inputs.tag }}-${{ matrix.os }}
           #path: sqld-${{ github.event.inputs.tag }}-${{ matrix.os }}.zip
-          name: sqld-v0.15.0-${{ matrix.os }}
-          path: sqld-v0.15.0-${{ matrix.os }}.zip
+          name: sqld-${{ github.ref }}-${{ matrix.os }}
+          path: sqld-${{ github.ref }}-${{ matrix.os }}.zip
           retention-days: 1
 
   release:
@@ -110,22 +113,14 @@ jobs:
         uses: softprops/action-gh-release@v1
         with:
           token: "${{ secrets.GH_TOKEN }}"
-
           body: |
-            SQLd ${{ github.event.inputs.tag }}" 
+            SQLd ${{ github.ref }}" 
           body_path: RELEASE_NOTES.md
-          #prerelease: ${{ github.event.inputs.pre-release }}
-          prerelease: true
-          #tag_name: "SQLd ${{ github.event.inputs.tag }}"
-          tag_name: "SQLd v0.15.0"
+          prerelease: false
+          tag_name: ${{ github.ref_name }}
           generate_release_notes: true
           fail_on_unmatched_files: false
           files: |
-            sqld-v0.15.0-windows-latest/*
-            sqld-v0.15.0-macos-latest/*
-            sqld-v0.15.0-ubuntu-latest/*
-
-#          files: |
-#            sqld-${{ github.event.inputs.tag }}-windows-latest/*
-#            sqld-${{ github.event.inputs.tag }}-macos-latest/*
-#            sqld-${{ github.event.inputs.tag }}-ubuntu-latest/*
+             sqld-${{ github.ref }}-windows-latest/*
+             sqld-${{ github.ref }}-macos-latest/*
+             sqld-${{ github.ref }}-ubuntu-latest/*
