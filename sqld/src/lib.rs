@@ -64,6 +64,7 @@ pub struct Config {
     pub http_addr: Option<SocketAddr>,
     pub enable_http_console: bool,
     pub http_auth: Option<String>,
+    pub http_self_url: Option<String>,
     pub hrana_addr: Option<SocketAddr>,
     pub auth_jwt_key: Option<String>,
     pub backend: Backend,
@@ -123,7 +124,10 @@ async fn run_service(
     }
 
     if let Some(addr) = config.http_addr {
-        let hrana_http_srv = Arc::new(hrana::http::Server::new(db_factory.clone()));
+        let hrana_http_srv = Arc::new(hrana::http::Server::new(
+            db_factory.clone(),
+            config.http_self_url.clone(),
+        ));
         join_set.spawn(http::run_http(
             addr,
             auth,

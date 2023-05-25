@@ -13,6 +13,7 @@ mod stream;
 
 pub struct Server {
     db_factory: Arc<dyn DbFactory>,
+    self_url: Option<String>,
     baton_key: [u8; 32],
     stream_state: Mutex<stream::ServerStreamState>,
 }
@@ -24,9 +25,10 @@ pub enum Route {
 }
 
 impl Server {
-    pub fn new(db_factory: Arc<dyn DbFactory>) -> Self {
+    pub fn new(db_factory: Arc<dyn DbFactory>, self_url: Option<String>) -> Self {
         Self {
             db_factory,
+            self_url,
             baton_key: rand::random(),
             stream_state: Mutex::new(stream::ServerStreamState::new()),
         }
@@ -79,7 +81,7 @@ async fn handle_pipeline(
 
     let resp_body = proto::PipelineResponseBody {
         baton: stream_guard.release(),
-        base_url: None, // TODO: take the base_url from a command-line argument
+        base_url: server.self_url.clone(),
         results,
     };
     Ok(json_response(hyper::StatusCode::OK, &resp_body))
