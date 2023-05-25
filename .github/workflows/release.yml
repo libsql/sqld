@@ -7,13 +7,16 @@ on:
       tag:
         description: 'Tag, branch or SHA sum to release'
         required: true
-        default: 'v0.0.0'
+        default: 'v0.0.99'
       pre-release:
         description: 'Should this be a pre-release?'
         default: 'false'
         required: false
   push:
     branch: 'release-pipeline'
+    tags:
+      - "v*.*.*"
+ 
 jobs:
   build:
     # Build on Linux, Windows and MacOS
@@ -99,11 +102,18 @@ jobs:
       - name: Display fetched artifacts
         run: ls -Rha
 
+        
+      # NOTE: When providing a body and body_path at the same time, 
+      # body_path will be attempted first, then falling back on body 
+      # if the path can not be read from.
       - name: Release
         uses: softprops/action-gh-release@v1
         with:
           token: "${{ secrets.GH_TOKEN }}"
-          #body_path: RELEASE_NOTES.md
+
+          body: |
+            SQLd ${{ github.event.inputs.tag }}" 
+          body_path: RELEASE_NOTES.md
           #prerelease: ${{ github.event.inputs.pre-release }}
           prerelease: true
           #tag_name: "SQLd ${{ github.event.inputs.tag }}"
