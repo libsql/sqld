@@ -4,7 +4,7 @@ use std::{
     marker::PhantomData,
 };
 
-use crate::ffi::{libsql_wal_methods, sqlite3_file, sqlite3_vfs, types::*, PgHdr, Wal};
+use crate::ffi::{libsql_wal_methods, sqlite3, sqlite3_file, sqlite3_vfs, types::*, PgHdr, Wal};
 use crate::get_orig_wal_methods;
 
 /// This macro handles the registering of a WalHook with the process's sqlite. It first instantiate a `WalMethodsHook`
@@ -88,6 +88,45 @@ pub unsafe trait WalHook {
         let ctx_ptr = wal.pMethodsData as *mut Self::Context;
         assert!(!ctx_ptr.is_null(), "missing wal context");
         unsafe { &mut *ctx_ptr }
+    }
+
+    fn on_savepoint_undo(
+        &mut self,
+        wal: *mut Wal,
+        wal_data: *mut u32,
+        orig: XWalSavePointUndoFn,
+    ) -> i32 {
+        unsafe { orig(wal, wal_data) }
+    }
+
+    fn on_checkpoint(
+        &mut self,
+        wal: *mut Wal,
+        db: *mut sqlite3,
+        emode: i32,
+        busy_handler: Option<unsafe extern "C" fn(*mut c_void) -> i32>,
+        busy_arg: *mut c_void,
+        sync_flags: i32,
+        n_buf: i32,
+        z_buf: *mut u8,
+        frames_in_wal: *mut i32,
+        backfilled_frames: *mut i32,
+        orig: XWalCheckpointFn,
+    ) -> i32 {
+        unsafe {
+            orig(
+                wal,
+                db,
+                emode,
+                busy_handler,
+                busy_arg,
+                sync_flags,
+                n_buf,
+                z_buf,
+                frames_in_wal,
+                backfilled_frames,
+            )
+        }
     }
 }
 
