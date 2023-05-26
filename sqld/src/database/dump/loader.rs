@@ -24,7 +24,7 @@ impl DumpLoader {
         path: PathBuf,
         logger: Arc<ReplicationLogger>,
         #[cfg(feature = "bottomless")] bottomless_replicator: Option<
-            Arc<bottomless::replicator::Replicator>,
+            Arc<std::sync::Mutex<bottomless::replicator::Replicator>>,
         >,
     ) -> anyhow::Result<Self> {
         let (sender, mut receiver) = mpsc::channel::<OpMsg>(1);

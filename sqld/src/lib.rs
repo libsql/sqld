@@ -386,9 +386,9 @@ async fn start_primary(
 
     #[cfg(feature = "bottomless")]
     let bottomless_replicator = if config.enable_bottomless_replication {
-        Some(Arc::new(
+        Some(Arc::new(std::sync::Mutex::new(
             init_bottomless_replicator(config.db_path.join("data")).await?,
-        ))
+        )))
     } else {
         None
     };
