@@ -90,18 +90,13 @@ pub unsafe trait WalHook {
         unsafe { &mut *ctx_ptr }
     }
 
-    fn on_savepoint_undo(
-        &mut self,
-        wal: *mut Wal,
-        wal_data: *mut u32,
-        orig: XWalSavePointUndoFn,
-    ) -> i32 {
+    fn on_savepoint_undo(wal: &mut Wal, wal_data: *mut u32, orig: XWalSavePointUndoFn) -> i32 {
         unsafe { orig(wal, wal_data) }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn on_checkpoint(
-        &mut self,
-        wal: *mut Wal,
+        wal: &mut Wal,
         db: *mut sqlite3,
         emode: i32,
         busy_handler: Option<unsafe extern "C" fn(*mut c_void) -> i32>,
@@ -151,11 +146,7 @@ impl<T: WalHook> Default for WalMethodsHook<T> {
 
 impl<T: WalHook> WalMethodsHook<T> {
     pub fn new() -> Self {
-        let default_methods =
-            get_orig_wal_methods(false).expect("failed to get original WAL methods");
-        // TODO: reenable bottomless
-        let maybe_bottomless_methods =
-            get_orig_wal_methods(false).expect("failed to get original WAL methods");
+        let default_methods = get_orig_wal_methods().expect("failed to get original WAL methods");
 
         WalMethodsHook {
             methods: libsql_wal_methods {
@@ -194,8 +185,7 @@ impl<T: WalHook> WalMethodsHook<T> {
                 bUsesShm: 0,
                 pNext: std::ptr::null_mut(),
             },
-            underlying_methods_for_bottomless: default_methods,
-            underlying_methods: maybe_bottomless_methods,
+            underlying_methods: default_methods,
             _pth: PhantomData,
         }
     }
@@ -443,8 +433,6 @@ unsafe impl<T> Sync for WalMethodsHook<T> {}
 #[allow(non_snake_case)]
 pub struct WalMethodsHook<T> {
     pub methods: libsql_wal_methods,
-    // extra-field used by our bottomless storage for nested WAL methods
-    underlying_methods_for_bottomless: *mut libsql_wal_methods,
     // user data
     underlying_methods: *mut libsql_wal_methods,
     _pth: PhantomData<T>,

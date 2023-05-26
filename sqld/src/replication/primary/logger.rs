@@ -16,7 +16,8 @@ use tokio::sync::watch;
 use uuid::Uuid;
 
 use crate::libsql::ffi::{
-    types::{XWalFrameFn, XWalUndoFn},
+    sqlite3,
+    types::{XWalCheckpointFn, XWalFrameFn, XWalSavePointUndoFn, XWalUndoFn},
     PgHdr, Wal,
 };
 use crate::libsql::{ffi::PageHdrIter, wal_hook::WalHook};
@@ -32,6 +33,8 @@ pub enum ReplicationLoggerHook {}
 pub struct ReplicationLoggerHookCtx {
     buffer: Vec<WalPage>,
     logger: Arc<ReplicationLogger>,
+    #[cfg(feature = "bottomless")]
+    bottomless_replicator: Option<Arc<bottomless::replicator::Replicator>>,
 }
 
 /// This implementation of WalHook intercepts calls to `on_frame`, and writes them to a
@@ -102,6 +105,12 @@ unsafe impl WalHook for ReplicationLoggerHook {
             }
         }
 
+        #[cfg(feature = "bottomless")]
+        tracing::error!(
+            "fixme: implement bottomless frames for {:?}",
+            ctx.bottomless_replicator
+        );
+
         rc
     }
 
@@ -113,7 +122,58 @@ unsafe impl WalHook for ReplicationLoggerHook {
     ) -> i32 {
         let ctx = Self::wal_extract_ctx(wal);
         ctx.rollback();
+
+        #[cfg(feature = "bottomless")]
+        tracing::error!(
+            "fixme: implement bottomless undo for {:?}",
+            ctx.bottomless_replicator
+        );
+
         unsafe { orig(wal, func, undo_ctx) }
+    }
+
+    fn on_savepoint_undo(wal: &mut Wal, wal_data: *mut u32, orig: XWalSavePointUndoFn) -> i32 {
+        #[cfg(feature = "bottomless")]
+        tracing::error!(
+            "fixme: implement bottomless savepoint undo for {:?}",
+            Self::wal_extract_ctx(wal).bottomless_replicator
+        );
+        unsafe { orig(wal, wal_data) }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn on_checkpoint(
+        wal: &mut Wal,
+        db: *mut sqlite3,
+        emode: i32,
+        busy_handler: Option<unsafe extern "C" fn(*mut c_void) -> i32>,
+        busy_arg: *mut c_void,
+        sync_flags: i32,
+        n_buf: i32,
+        z_buf: *mut u8,
+        frames_in_wal: *mut i32,
+        backfilled_frames: *mut i32,
+        orig: XWalCheckpointFn,
+    ) -> i32 {
+        #[cfg(feature = "bottomless")]
+        tracing::error!(
+            "fixme: implement bottomless checkpoint for {:?}",
+            Self::wal_extract_ctx(wal).bottomless_replicator
+        );
+        unsafe {
+            orig(
+                wal,
+                db,
+                emode,
+                busy_handler,
+                busy_arg,
+                sync_flags,
+                n_buf,
+                z_buf,
+                frames_in_wal,
+                backfilled_frames,
+            )
+        }
     }
 }
 
@@ -126,10 +186,19 @@ pub struct WalPage {
 }
 
 impl ReplicationLoggerHookCtx {
-    pub fn new(logger: Arc<ReplicationLogger>) -> Self {
+    pub fn new(
+        logger: Arc<ReplicationLogger>,
+        #[cfg(feature = "bottomless")] bottomless_replicator: Option<
+            Arc<bottomless::replicator::Replicator>,
+        >,
+    ) -> Self {
+        #[cfg(feature = "bottomless")]
+        tracing::trace!("bottomless replication enabled: {bottomless_replicator:?}");
         Self {
             buffer: Default::default(),
             logger,
+            #[cfg(feature = "bottomless")]
+            bottomless_replicator,
         }
     }
 
