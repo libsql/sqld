@@ -1,4 +1,5 @@
 mod hrana_over_http_1;
+mod result_builder;
 pub mod stats;
 mod types;
 
