@@ -5,6 +5,7 @@ use pgwire::error::{ErrorInfo, PgWireError};
 use crate::error::Error;
 
 mod handlers;
+mod result_builders;
 pub mod server;
 
 impl From<Error> for PgWireError {
