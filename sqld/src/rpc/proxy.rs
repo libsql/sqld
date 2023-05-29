@@ -26,7 +26,7 @@ pub mod rpc {
     use crate::query_analysis::Statement;
     use crate::{database, error::Error as SqldError};
 
-    use self::{error::ErrorCode, execute_results::State, };
+    use self::{error::ErrorCode, execute_results::State};
     tonic::include_proto!("proxy");
 
     impl From<SqldError> for Error {

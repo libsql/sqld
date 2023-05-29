@@ -32,13 +32,13 @@ impl PgResponseBuilder {
 fn type_from_str(s: &str) -> Type {
     match s.to_lowercase().as_str() {
         "integer" | "int" | "tinyint" | "smallint" | "mediumint" | "bigint"
-            | "unsigned big int" | "int2" | "int8" => Type::INT8,
-            "real" | "double" | "double precision" | "float" => Type::FLOAT8,
-            "text" | "character" | "varchar" | "varying character" | "nchar"
-                | "native character" | "nvarchar" | "clob" => Type::TEXT,
-            "blob" => Type::BYTEA,
-            "numeric" | "decimal" | "boolean" | "date" | "datetime" => Type::NUMERIC,
-            _ => Type::UNKNOWN,
+        | "unsigned big int" | "int2" | "int8" => Type::INT8,
+        "real" | "double" | "double precision" | "float" => Type::FLOAT8,
+        "text" | "character" | "varchar" | "varying character" | "nchar" | "native character"
+        | "nvarchar" | "clob" => Type::TEXT,
+        "blob" => Type::BYTEA,
+        "numeric" | "decimal" | "boolean" | "date" | "datetime" => Type::NUMERIC,
+        _ => Type::UNKNOWN,
     }
 }
 
@@ -105,10 +105,7 @@ impl QueryResultBuilder for PgResponseBuilder {
                 .map(|c| {
                     self.step_ncols += 1;
                     let c = c.into();
-                    let ty = c
-                        .decl_ty
-                        .map(type_from_str)
-                        .unwrap_or(Type::UNKNOWN);
+                    let ty = c.decl_ty.map(type_from_str).unwrap_or(Type::UNKNOWN);
                     FieldInfo::new(c.name.into(), None, None, ty, FieldFormat::Text)
                 })
                 .collect();
