@@ -6,9 +6,13 @@ use tokio::net::TcpStream;
 use tokio::task::JoinSet;
 
 use crate::database::factory::DbFactory;
+use crate::database::Database;
 use crate::postgres::handlers::QueryHandler;
 
-pub async fn run(addr: SocketAddr, factory: Arc<dyn DbFactory>) -> anyhow::Result<()> {
+pub async fn run<D: Database>(
+    addr: SocketAddr,
+    factory: Arc<dyn DbFactory<Db = D>>,
+) -> anyhow::Result<()> {
     let mut handles = JoinSet::new();
     let listener = tokio::net::TcpListener::bind(addr).await?;
 
@@ -35,9 +39,9 @@ pub async fn run(addr: SocketAddr, factory: Arc<dyn DbFactory>) -> anyhow::Resul
     }
 }
 
-fn handle_connection(
+fn handle_connection<D: Database>(
     stream: TcpStream,
-    factory: Arc<dyn DbFactory>,
+    factory: Arc<dyn DbFactory<Db = D>>,
     handles: &mut JoinSet<anyhow::Result<()>>,
 ) {
     handles.spawn(async move {

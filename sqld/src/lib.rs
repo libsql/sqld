@@ -5,21 +5,22 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Context as AnyhowContext;
-use database::dump::loader::DumpLoader;
-use database::factory::DbFactory;
-use database::libsql::{open_db, LibSqlDbFactory};
-use database::write_proxy::WriteProxyDbFactory;
 use futures::never::Never;
 use libsql::wal_hook::TRANSPARENT_METHODS;
 use once_cell::sync::Lazy;
-use replication::primary::logger::{ReplicationLoggerHookCtx, REPLICATION_METHODS};
-use replication::ReplicationLogger;
 use rpc::run_rpc_server;
 use tokio::sync::{mpsc, Notify};
 use tokio::task::JoinSet;
 use tonic::transport::Channel;
 use utils::services::idle_shutdown::IdleShutdownLayer;
 
+use self::database::dump::loader::DumpLoader;
+use self::database::factory::DbFactory;
+use self::database::libsql::{open_db, LibSqlDbFactory};
+use self::database::write_proxy::WriteProxyDbFactory;
+use self::database::Database;
+use self::replication::primary::logger::{ReplicationLoggerHookCtx, REPLICATION_METHODS};
+use self::replication::ReplicationLogger;
 use crate::auth::Auth;
 use crate::error::Error;
 use crate::replication::replica::Replicator;
@@ -94,8 +95,8 @@ pub struct Config {
     pub hard_heap_limit_mb: Option<usize>,
 }
 
-async fn run_service(
-    db_factory: Arc<dyn DbFactory>,
+async fn run_service<D: Database>(
+    db_factory: Arc<dyn DbFactory<Db = D>>,
     config: &Config,
     join_set: &mut JoinSet<anyhow::Result<()>>,
     idle_shutdown_layer: Option<IdleShutdownLayer>,

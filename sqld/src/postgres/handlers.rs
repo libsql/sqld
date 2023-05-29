@@ -14,18 +14,21 @@ use pgwire::messages::extendedquery::Describe;
 use pgwire::messages::PgWireBackendMessage;
 
 use crate::database::Database;
-use crate::query::{Params, Query, QueryResponse, ResultSet, Value};
+use crate::query::{Params, Query, Value};
 use crate::query_analysis::Statement;
+use crate::query_result_builder::QueryResultBuilder;
+
+use super::result_builders::PgResponseBuilder;
 
 /// This is a dummy handler, it's sole role is to send the response back to the client.
-pub struct QueryHandler {
-    database: Arc<dyn Database>,
+pub struct QueryHandler<D> {
+    database: D,
     query_parser: Arc<NoopQueryParser>,
     portal_store: Arc<MemPortalStore<String>>,
 }
 
-impl QueryHandler {
-    pub fn new(database: Arc<dyn Database>) -> Self {
+impl<D: Database> QueryHandler<D> {
+    pub fn new(database: D) -> Self {
         Self {
             database,
             query_parser: Arc::new(NoopQueryParser::new()),
@@ -39,31 +42,16 @@ impl QueryHandler {
         col_defs: bool,
     ) -> PgWireResult<Vec<Response>> {
         let auth = crate::auth::Authenticated::Authorized(crate::auth::Authorized::FullAccess);
-        //FIXME: handle poll_ready error
-        match self.database.execute_batch(queries, auth).await {
-            Ok((resp, _)) => {
-                let ret = resp
-                    .into_iter()
-                    .map(|r| match r {
-                        Some(Ok(QueryResponse::ResultSet(mut set))) => {
-                            set.include_column_defs = col_defs;
-                            set.into()
-                        }
-                        Some(Err(e)) => Response::Error(
-                            ErrorInfo::new("ERROR".into(), "XX000".into(), e.to_string()).into(),
-                        ),
-                        None => ResultSet::empty(false).into(),
-                    })
-                    .collect();
-                Ok(ret)
-            }
+        let builder = PgResponseBuilder::new(col_defs);
+        match self.database.execute_batch(queries, auth, builder).await {
+            Ok((resp, _)) => Ok(resp.into_ret()),
             Err(e) => Err(PgWireError::ApiError(e.into())),
         }
     }
 }
 
 #[async_trait::async_trait]
-impl SimpleQueryHandler for QueryHandler {
+impl<D: Database> SimpleQueryHandler for QueryHandler<D> {
     async fn do_query<'q, 'b: 'q, C>(
         &'b self,
         _client: &C,
@@ -94,7 +82,7 @@ impl SimpleQueryHandler for QueryHandler {
 const REQUEST_DESCRIBE: &str = "SQLD_REQUEST_DESCRIBE";
 
 #[async_trait::async_trait]
-impl ExtendedQueryHandler for QueryHandler {
+impl<D: Database> ExtendedQueryHandler for QueryHandler<D> {
     type Statement = String;
     type PortalStore = MemPortalStore<Self::Statement>;
     type QueryParser = NoopQueryParser;
