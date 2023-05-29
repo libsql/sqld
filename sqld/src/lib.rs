@@ -38,6 +38,7 @@ mod http;
 mod postgres;
 mod query;
 mod query_analysis;
+mod query_result_builder;
 mod replication;
 pub mod rpc;
 mod stats;
