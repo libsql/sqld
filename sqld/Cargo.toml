@@ -70,6 +70,7 @@ proptest = "1.0.0"
 rand = "0.8.5"
 tempfile = "3.3.0"
 insta = { version = "1.26.0", features = ["json"] }
+arbitrary = { version = "1.3.0", features = ["derive_arbitrary"] }
 
 [build-dependencies]
 prost-build = "0.11.4"
@@ -79,4 +80,4 @@ vergen = "6"
 [features]
 unix-excl-vfs = ["sqld-libsql-bindings/unix-excl-vfs"]
 bottomless = ["dep:bottomless"]
-debug-tools = ["console-subscriber","rusqlite/trace", "tokio/tracing"]
+debug-tools = ["console-subscriber", "rusqlite/trace", "tokio/tracing"]

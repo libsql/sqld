@@ -32,6 +32,25 @@ impl Program {
     pub fn steps(&self) -> &[Step] {
         self.steps.as_slice()
     }
+
+    #[cfg(test)]
+    pub fn seq(stmts: &[&str]) -> Self {
+        let mut steps = Vec::with_capacity(stmts.len());
+        for stmt in stmts {
+            let step = Step {
+                cond: None,
+                query: Query {
+                    stmt: Statement::parse(stmt).next().unwrap().unwrap(),
+                    params: Params::empty(),
+                    want_rows: true,
+                },
+            };
+
+            steps.push(step);
+        }
+
+        Self::new(steps)
+    }
 }
 
 #[derive(Debug, Clone)]
