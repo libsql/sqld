@@ -372,8 +372,8 @@ impl<B: QueryResultBuilder> QueryResultBuilder for Take<B> {
         if self.count < self.limit {
             self.inner
                 .finish_step(affected_row_count, last_insert_rowid)?;
+            self.count += 1;
         }
-        self.count += 1;
 
         Ok(())
     }

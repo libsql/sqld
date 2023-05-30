@@ -80,7 +80,7 @@ pub struct WriteProxyDatabase {
     applied_frame_no_receiver: watch::Receiver<FrameNo>,
 }
 
-fn execute_results_to_buidler<B: QueryResultBuilder>(
+fn execute_results_to_builder<B: QueryResultBuilder>(
     execute_result: ExecuteResults,
     mut builder: B,
 ) -> Result<B> {
@@ -166,7 +166,7 @@ impl WriteProxyDatabase {
                 let execute_result = r.into_inner();
                 *state = execute_result.state().into();
                 let current_frame_no = execute_result.current_frame_no;
-                let builder = execute_results_to_buidler(execute_result, builder)?;
+                let builder = execute_results_to_builder(execute_result, builder)?;
                 self.update_last_write_frame_no(current_frame_no);
 
                 Ok((builder, *state))
@@ -279,7 +279,7 @@ pub mod test {
             data.try_fill(&mut rand::thread_rng()).unwrap();
             let mut un = Unstructured::new(&data);
             let res = ExecuteResults::arbitrary(&mut un).unwrap();
-            execute_results_to_buidler(res, b)
+            execute_results_to_builder(res, b)
         });
     }
 }
