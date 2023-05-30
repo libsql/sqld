@@ -1,3 +1,5 @@
+use std::{fmt, io};
+
 use bytes::Bytes;
 use rusqlite::types::ValueRef;
 
@@ -14,6 +16,45 @@ pub struct SingleStatementBuilder {
     err: Option<crate::error::Error>,
     affected_row_count: u64,
     last_insert_rowid: Option<i64>,
+}
+
+struct SizeFormatter(usize);
+
+impl io::Write for SizeFormatter {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.0 += buf.len();
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+impl fmt::Write for SizeFormatter {
+    fn write_str(&mut self, s: &str) -> fmt::Result {
+        self.0 += s.len();
+        Ok(())
+    }
+
+    fn write_fmt(mut self: &mut Self, args: fmt::Arguments<'_>) -> fmt::Result {
+
+        args.
+        
+    }
+}
+
+fn estimate_value_json_size(v: &ValueRef) -> usize {
+    let mut f= SizeFormatter(0);
+    match v {
+        ValueRef::Null => write!(&mut f, r#"{"type":"null"}"#).unwrap(),
+        ValueRef::Integer(i) => write!(&mut f, r#"{"type":"integer", "value": "{}"}"#, i).unwrap(),
+        ValueRef::Real(_) => write!(&mut f, r#"{"type":"integer","value}"#).unwrap(),
+        ValueRef::Text(_) => write!(&mut f, r#"{"type":"null"}"#).unwrap(),
+        ValueRef::Blob(_) => write!(&mut f, r#"{"type":"null"}"#).unwrap(),
+    }
+
+    f(0)
 }
 
 impl QueryResultBuilder for SingleStatementBuilder {

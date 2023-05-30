@@ -1,18 +1,57 @@
-use std::io;
+use std::fmt;
+use std::io::{self, ErrorKind};
 use std::ops::{Deref, DerefMut};
 
 use anyhow::anyhow;
+use humansize::DECIMAL;
 use rusqlite::types::ValueRef;
 use serde::Serialize;
 use serde_json::ser::Formatter;
 
-#[derive(Debug, thiserror::Error)]
-#[error(transparent)]
-pub struct QueryResultBuilderError(#[from] anyhow::Error);
+#[derive(Debug)]
+pub enum QueryResultBuilderError {
+    ResponseTooLarge(usize),
+    Internal(anyhow::Error),
+}
+
+impl fmt::Display for QueryResultBuilderError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            QueryResultBuilderError::ResponseTooLarge(s) => {
+                write!(f, "query response exceeds the maximum size of {}. Try reducing the number of queried rows.", humansize::format_size(*s, DECIMAL))
+            }
+            QueryResultBuilderError::Internal(e) => e.fmt(f),
+        }
+    }
+}
+
+impl std::error::Error for QueryResultBuilderError {}
+
+impl From<anyhow::Error> for QueryResultBuilderError {
+    fn from(value: anyhow::Error) -> Self {
+        Self::Internal(value)
+    }
+}
 
 impl QueryResultBuilderError {
     pub fn from_any<E: Into<anyhow::Error>>(e: E) -> Self {
-        Self(e.into())
+        Self::Internal(e.into())
+    }
+}
+
+impl From<io::Error> for QueryResultBuilderError {
+    fn from(value: io::Error) -> Self {
+        if value.kind() == ErrorKind::OutOfMemory
+            && value.get_ref().is_some()
+            && value.get_ref().unwrap().is::<QueryResultBuilderError>()
+        {
+            return *value
+                .into_inner()
+                .unwrap()
+                .downcast::<QueryResultBuilderError>()
+                .unwrap();
+        }
+        Self::Internal(anyhow!(value))
     }
 }
 
@@ -180,12 +219,6 @@ impl<F> Deref for JsonFormatter<F> {
 impl<F> DerefMut for JsonFormatter<F> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.0
-    }
-}
-
-impl From<io::Error> for QueryResultBuilderError {
-    fn from(value: io::Error) -> Self {
-        Self(anyhow!(value))
     }
 }
 
