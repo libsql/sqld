@@ -36,7 +36,6 @@ mod error;
 mod heartbeat;
 mod hrana;
 mod http;
-mod postgres;
 mod query;
 mod query_analysis;
 mod query_result_builder;
@@ -65,7 +64,6 @@ pub(crate) static HARD_RESET: Lazy<Arc<Notify>> = Lazy::new(|| Arc::new(Notify::
 pub struct Config {
     pub db_path: PathBuf,
     pub extensions_path: Option<PathBuf>,
-    pub tcp_addr: Option<SocketAddr>,
     pub http_addr: Option<SocketAddr>,
     pub enable_http_console: bool,
     pub http_auth: Option<String>,
@@ -103,10 +101,6 @@ async fn run_service<D: Database>(
     stats: Stats,
 ) -> anyhow::Result<()> {
     let auth = get_auth(config)?;
-
-    if let Some(addr) = config.tcp_addr {
-        join_set.spawn(postgres::server::run(addr, db_factory.clone()));
-    }
 
     let (hrana_accept_tx, hrana_accept_rx) = mpsc::channel(8);
     let (hrana_upgrade_tx, hrana_upgrade_rx) = mpsc::channel(8);
