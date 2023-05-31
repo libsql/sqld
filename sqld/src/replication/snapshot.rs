@@ -455,7 +455,7 @@ mod test {
     use bytes::Bytes;
     use tempfile::tempdir;
 
-    use crate::replication::frame::FrameHeader;
+    use crate::replication::frame::{FrameHeader, FrameLocation};
     use crate::replication::primary::logger::WalPage;
     use crate::replication::snapshot::SnapshotFile;
 
@@ -464,7 +464,13 @@ mod test {
     #[test]
     fn compact_file_create_snapshot() {
         let temp = tempfile::NamedTempFile::new().unwrap();
-        let mut log_file = LogFile::new(temp.as_file().try_clone().unwrap(), 0).unwrap();
+        let temp_db = tempfile::tempdir().unwrap();
+        let mut log_file = LogFile::new(
+            temp.as_file().try_clone().unwrap(),
+            temp_db.path().to_owned(),
+            0,
+        )
+        .unwrap();
         let db_id = Uuid::new_v4();
         log_file.header.db_id = db_id.as_u128();
         log_file.write_header().unwrap();
@@ -472,15 +478,21 @@ mod test {
         // add 50 pages, each one in two versions
         for _ in 0..2 {
             for i in 0..25 {
-                let data = std::iter::repeat(0).take(4096).collect::<Bytes>();
+                let _data = std::iter::repeat(0).take(4096).collect::<Bytes>();
                 let page = WalPage {
                     page_no: i,
                     size_after: i + 1,
-                    data,
+                    data: FrameLocation::in_main_db_file(),
                 };
                 log_file.push_page(&page).unwrap();
             }
         }
+
+        // Fill the fake main db file with the aforementioned 50 pages
+        std::fs::File::create(temp_db.path().join("data"))
+            .unwrap()
+            .write_all(&[0; 4096 * 50])
+            .unwrap();
 
         log_file.commit().unwrap();
 
