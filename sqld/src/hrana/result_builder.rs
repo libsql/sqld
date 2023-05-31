@@ -127,7 +127,7 @@ impl QueryResultBuilder for SingleStatementBuilder {
 
         self.current_size += cols_size;
         if self.current_size > self.max_size {
-            return Err(QueryResultBuilderError::ResponseTooLarge(self.max_size))
+            return Err(QueryResultBuilderError::ResponseTooLarge(self.max_size));
         }
 
         Ok(())
