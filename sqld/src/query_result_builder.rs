@@ -2,7 +2,6 @@ use std::fmt;
 use std::io::{self, ErrorKind};
 use std::ops::{Deref, DerefMut};
 
-use anyhow::anyhow;
 use humansize::DECIMAL;
 use rusqlite::types::ValueRef;
 use serde::Serialize;
@@ -51,7 +50,7 @@ impl From<io::Error> for QueryResultBuilderError {
                 .downcast::<QueryResultBuilderError>()
                 .unwrap();
         }
-        Self::Internal(anyhow!(value))
+        Self::Internal(value.into())
     }
 }
 

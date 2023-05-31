@@ -1,4 +1,5 @@
-use std::{fmt, io};
+use std::fmt::{self, Write as _};
+use std::io;
 
 use bytes::Bytes;
 use rusqlite::types::ValueRef;
@@ -8,7 +9,7 @@ use crate::query_result_builder::{Column, QueryResultBuilder, QueryResultBuilder
 
 use super::proto;
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct SingleStatementBuilder {
     has_step: bool,
     cols: Vec<proto::Col>,
@@ -16,6 +17,23 @@ pub struct SingleStatementBuilder {
     err: Option<crate::error::Error>,
     affected_row_count: u64,
     last_insert_rowid: Option<i64>,
+    current_size: usize,
+    max_size: usize,
+}
+
+impl SingleStatementBuilder {
+    pub fn new(max_size: usize) -> Self {
+        Self {
+            has_step: false,
+            cols: Vec::new(),
+            rows: Vec::new(),
+            err: None,
+            affected_row_count: 0,
+            last_insert_rowid: None,
+            current_size: 0,
+            max_size,
+        }
+    }
 }
 
 struct SizeFormatter(usize);
@@ -36,32 +54,28 @@ impl fmt::Write for SizeFormatter {
         self.0 += s.len();
         Ok(())
     }
-
-    fn write_fmt(mut self: &mut Self, args: fmt::Arguments<'_>) -> fmt::Result {
-
-        args.
-        
-    }
 }
 
-fn estimate_value_json_size(v: &ValueRef) -> usize {
-    let mut f= SizeFormatter(0);
+fn value_json_size(v: &ValueRef) -> usize {
+    let mut f = SizeFormatter(0);
     match v {
-        ValueRef::Null => write!(&mut f, r#"{"type":"null"}"#).unwrap(),
-        ValueRef::Integer(i) => write!(&mut f, r#"{"type":"integer", "value": "{}"}"#, i).unwrap(),
-        ValueRef::Real(_) => write!(&mut f, r#"{"type":"integer","value}"#).unwrap(),
-        ValueRef::Text(_) => write!(&mut f, r#"{"type":"null"}"#).unwrap(),
-        ValueRef::Blob(_) => write!(&mut f, r#"{"type":"null"}"#).unwrap(),
+        ValueRef::Null => write!(&mut f, r#"{{"type":"null"}}"#).unwrap(),
+        ValueRef::Integer(i) => {
+            write!(&mut f, r#"{{"type":"integer", "value": "{}"}}"#, i).unwrap()
+        }
+        ValueRef::Real(_) => write!(&mut f, r#"{{"type":"integer","value}}"#).unwrap(),
+        ValueRef::Text(_) => write!(&mut f, r#"{{"type":"null"}}"#).unwrap(),
+        ValueRef::Blob(_) => write!(&mut f, r#"{{"type":"null"}}"#).unwrap(),
     }
 
-    f(0)
+    f.0
 }
 
 impl QueryResultBuilder for SingleStatementBuilder {
     type Ret = Result<proto::StmtResult, crate::error::Error>;
 
     fn init(&mut self) -> Result<(), QueryResultBuilderError> {
-        *self = Default::default();
+        *self = Self::new(self.max_size);
         Ok(())
     }
 
@@ -85,6 +99,9 @@ impl QueryResultBuilder for SingleStatementBuilder {
 
     fn step_error(&mut self, error: crate::error::Error) -> Result<(), QueryResultBuilderError> {
         assert!(self.err.is_none());
+        let mut f = SizeFormatter(0);
+        write!(&mut f, "{error}").unwrap();
+        self.current_size = f.0;
 
         self.err = Some(error);
 
@@ -98,11 +115,20 @@ impl QueryResultBuilder for SingleStatementBuilder {
         assert!(self.err.is_none());
         assert!(self.cols.is_empty());
 
-        self.cols
-            .extend(cols.into_iter().map(Into::into).map(|c| proto::Col {
+        let mut cols_size = 0;
+
+        self.cols.extend(cols.into_iter().map(Into::into).map(|c| {
+            cols_size += estimate_cols_json_size(&c);
+            proto::Col {
                 name: Some(c.name.to_owned()),
                 decltype: c.decl_ty.map(ToString::to_string),
-            }));
+            }
+        }));
+
+        self.current_size += cols_size;
+        if self.current_size > self.max_size {
+            return Err(QueryResultBuilderError::ResponseTooLarge(self.max_size))
+        }
 
         Ok(())
     }
@@ -121,6 +147,13 @@ impl QueryResultBuilder for SingleStatementBuilder {
 
     fn add_row_value(&mut self, v: ValueRef) -> Result<(), QueryResultBuilderError> {
         assert!(self.err.is_none());
+        let estimate_size = value_json_size(&v);
+        if self.current_size + estimate_size > self.max_size {
+            return Err(QueryResultBuilderError::ResponseTooLarge(self.max_size));
+        }
+
+        self.current_size += estimate_size;
+
         let val = match v {
             ValueRef::Null => proto::Value::Null,
             ValueRef::Integer(value) => proto::Value::Integer { value },
@@ -170,18 +203,44 @@ impl QueryResultBuilder for SingleStatementBuilder {
     }
 }
 
-#[derive(Debug, Default)]
+fn estimate_cols_json_size(c: &Column) -> usize {
+    let mut f = SizeFormatter(0);
+    write!(
+        &mut f,
+        r#"{{"name":"{}","decltype":"{}"}}"#,
+        c.name,
+        c.decl_ty.unwrap_or("null")
+    )
+    .unwrap();
+    f.0
+}
+
+#[derive(Debug)]
 pub struct HranaBatchProtoBuilder {
     step_results: Vec<Option<proto::StmtResult>>,
     step_errors: Vec<Option<crate::hrana::proto::Error>>,
     stmt_builder: SingleStatementBuilder,
+    max_size: usize,
+    current_size: usize,
+}
+
+impl HranaBatchProtoBuilder {
+    pub fn new(max_size: usize) -> Self {
+        Self {
+            step_results: Vec::new(),
+            step_errors: Vec::new(),
+            stmt_builder: SingleStatementBuilder::new(max_size),
+            max_size,
+            current_size: 0,
+        }
+    }
 }
 
 impl QueryResultBuilder for HranaBatchProtoBuilder {
     type Ret = proto::BatchResult;
 
     fn init(&mut self) -> Result<(), QueryResultBuilderError> {
-        *self = Default::default();
+        *self = Self::new(self.max_size);
         Ok(())
     }
 
@@ -196,8 +255,11 @@ impl QueryResultBuilder for HranaBatchProtoBuilder {
     ) -> Result<(), QueryResultBuilderError> {
         self.stmt_builder
             .finish_step(affected_row_count, last_insert_rowid)?;
+        self.current_size += self.stmt_builder.current_size;
 
-        match std::mem::take(&mut self.stmt_builder).into_ret() {
+        let mut new_builder = SingleStatementBuilder::new(self.max_size);
+        new_builder.current_size = self.current_size;
+        match std::mem::replace(&mut self.stmt_builder, new_builder).into_ret() {
             Ok(res) => {
                 self.step_results.push(Some(res));
                 self.step_errors.push(None);
