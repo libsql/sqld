@@ -5,11 +5,13 @@ use bytes::Bytes;
 use rusqlite::types::ValueRef;
 
 use crate::hrana::stmt::{proto_error_from_stmt_error, stmt_error_from_sqld_error};
-use crate::query_result_builder::{Column, QueryResultBuilder, QueryResultBuilderError};
+use crate::query_result_builder::{
+    Column, QueryBuilderConfig, QueryResultBuilder, QueryResultBuilderError,
+};
 
 use super::proto;
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct SingleStatementBuilder {
     has_step: bool,
     cols: Vec<proto::Col>,
@@ -18,22 +20,7 @@ pub struct SingleStatementBuilder {
     affected_row_count: u64,
     last_insert_rowid: Option<i64>,
     current_size: u64,
-    max_size: u64,
-}
-
-impl SingleStatementBuilder {
-    pub fn new(max_size: u64) -> Self {
-        Self {
-            has_step: false,
-            cols: Vec::new(),
-            rows: Vec::new(),
-            err: None,
-            affected_row_count: 0,
-            last_insert_rowid: None,
-            current_size: 0,
-            max_size,
-        }
-    }
+    max_response_size: u64,
 }
 
 struct SizeFormatter(u64);
@@ -74,8 +61,11 @@ fn value_json_size(v: &ValueRef) -> u64 {
 impl QueryResultBuilder for SingleStatementBuilder {
     type Ret = Result<proto::StmtResult, crate::error::Error>;
 
-    fn init(&mut self) -> Result<(), QueryResultBuilderError> {
-        *self = Self::new(self.max_size);
+    fn init(&mut self, config: &QueryBuilderConfig) -> Result<(), QueryResultBuilderError> {
+        *self = Self {
+            max_response_size: config.max_size.unwrap_or(u64::MAX),
+            ..Default::default()
+        };
         Ok(())
     }
 
@@ -126,8 +116,10 @@ impl QueryResultBuilder for SingleStatementBuilder {
         }));
 
         self.current_size += cols_size;
-        if self.current_size > self.max_size {
-            return Err(QueryResultBuilderError::ResponseTooLarge(self.max_size));
+        if self.current_size > self.max_response_size {
+            return Err(QueryResultBuilderError::ResponseTooLarge(
+                self.max_response_size,
+            ));
         }
 
         Ok(())
@@ -148,8 +140,10 @@ impl QueryResultBuilder for SingleStatementBuilder {
     fn add_row_value(&mut self, v: ValueRef) -> Result<(), QueryResultBuilderError> {
         assert!(self.err.is_none());
         let estimate_size = value_json_size(&v);
-        if self.current_size + estimate_size > self.max_size {
-            return Err(QueryResultBuilderError::ResponseTooLarge(self.max_size));
+        if self.current_size + estimate_size > self.max_response_size {
+            return Err(QueryResultBuilderError::ResponseTooLarge(
+                self.max_response_size,
+            ));
         }
 
         self.current_size += estimate_size;
@@ -215,32 +209,23 @@ fn estimate_cols_json_size(c: &Column) -> u64 {
     f.0
 }
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct HranaBatchProtoBuilder {
     step_results: Vec<Option<proto::StmtResult>>,
     step_errors: Vec<Option<crate::hrana::proto::Error>>,
     stmt_builder: SingleStatementBuilder,
-    max_size: u64,
     current_size: u64,
-}
-
-impl HranaBatchProtoBuilder {
-    pub fn new(max_size: u64) -> Self {
-        Self {
-            step_results: Vec::new(),
-            step_errors: Vec::new(),
-            stmt_builder: SingleStatementBuilder::new(max_size),
-            max_size,
-            current_size: 0,
-        }
-    }
+    max_response_size: u64,
 }
 
 impl QueryResultBuilder for HranaBatchProtoBuilder {
     type Ret = proto::BatchResult;
 
-    fn init(&mut self) -> Result<(), QueryResultBuilderError> {
-        *self = Self::new(self.max_size);
+    fn init(&mut self, config: &QueryBuilderConfig) -> Result<(), QueryResultBuilderError> {
+        *self = Self {
+            max_response_size: config.max_size.unwrap_or(u64::MAX),
+            ..Default::default()
+        };
         Ok(())
     }
 
@@ -257,8 +242,11 @@ impl QueryResultBuilder for HranaBatchProtoBuilder {
             .finish_step(affected_row_count, last_insert_rowid)?;
         self.current_size += self.stmt_builder.current_size;
 
-        let mut new_builder = SingleStatementBuilder::new(self.max_size);
-        new_builder.current_size = self.current_size;
+        let new_builder = SingleStatementBuilder {
+            current_size: self.current_size,
+            max_response_size: self.max_response_size,
+            ..Default::default()
+        };
         match std::mem::replace(&mut self.stmt_builder, new_builder).into_ret() {
             Ok(res) => {
                 self.step_results.push(Some(res));

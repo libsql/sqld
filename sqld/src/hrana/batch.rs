@@ -75,7 +75,7 @@ pub async fn execute_batch(
     auth: Authenticated,
     pgm: Program,
 ) -> Result<proto::BatchResult> {
-    let batch_builder = HranaBatchProtoBuilder::new(1000);
+    let batch_builder = HranaBatchProtoBuilder::default();
     let (builder, _state) = db.execute_program(pgm, auth, batch_builder).await?;
 
     Ok(builder.into_ret())

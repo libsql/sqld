@@ -9,7 +9,9 @@ use uuid::Uuid;
 use crate::auth::{Authenticated, Authorized};
 use crate::database::factory::DbFactory;
 use crate::database::{Database, Program};
-use crate::query_result_builder::{Column, QueryResultBuilder, QueryResultBuilderError};
+use crate::query_result_builder::{
+    Column, QueryBuilderConfig, QueryResultBuilder, QueryResultBuilderError,
+};
 use crate::replication::FrameNo;
 
 use self::rpc::proxy_server::Proxy;
@@ -268,6 +270,7 @@ impl<D: Database> ProxyService<D> {
     }
 }
 
+#[derive(Debug, Default)]
 struct ExecuteResultBuilder {
     results: Vec<QueryResult>,
     current_rows: Vec<Row>,
@@ -279,26 +282,14 @@ struct ExecuteResultBuilder {
     current_step_size: u64,
 }
 
-impl ExecuteResultBuilder {
-    fn new(max_size: u64) -> Self {
-        Self {
-            results: Vec::new(),
-            current_rows: Vec::new(),
-            current_row: rpc::Row { values: Vec::new() },
-            current_col_description: Vec::new(),
-            current_err: None,
-            max_size,
-            current_size: 0,
-            current_step_size: 0,
-        }
-    }
-}
-
 impl QueryResultBuilder for ExecuteResultBuilder {
     type Ret = Vec<QueryResult>;
 
-    fn init(&mut self) -> Result<(), QueryResultBuilderError> {
-        *self = Self::new(self.max_size);
+    fn init(&mut self, config: &QueryBuilderConfig) -> Result<(), QueryResultBuilderError> {
+        *self = Self {
+            max_size: config.max_size.unwrap_or(u64::MAX),
+            ..Default::default()
+        };
         Ok(())
     }
 
@@ -473,7 +464,7 @@ impl<D: Database> Proxy for ProxyService<D> {
         };
 
         tracing::debug!("executing request for {client_id}");
-        let builder = ExecuteResultBuilder::new(1000);
+        let builder = ExecuteResultBuilder::default();
         let (results, state) = db
             .execute_program(pgm, auth, builder)
             .await

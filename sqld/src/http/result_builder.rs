@@ -6,7 +6,7 @@ use serde::{Serialize, Serializer};
 use serde_json::ser::{CompactFormatter, Formatter};
 
 use crate::query_result_builder::{
-    Column, JsonFormatter, QueryResultBuilder, QueryResultBuilderError,
+    Column, JsonFormatter, QueryBuilderConfig, QueryResultBuilder, QueryResultBuilderError,
 };
 
 pub struct JsonHttpPayloadBuilder {
@@ -23,6 +23,7 @@ pub struct JsonHttpPayloadBuilder {
     is_step_empty: bool,
 }
 
+#[derive(Default)]
 struct LimitBuffer {
     buffer: Vec<u8>,
     limit: u64,
@@ -34,10 +35,6 @@ impl LimitBuffer {
             buffer: Vec::new(),
             limit,
         }
-    }
-
-    fn limit(&self) -> u64 {
-        self.limit
     }
 }
 
@@ -76,10 +73,10 @@ impl io::Write for LimitBuffer {
 struct HttpJsonValueSerializer<'a>(&'a ValueRef<'a>);
 
 impl JsonHttpPayloadBuilder {
-    pub fn new(max_size: u64) -> Self {
+    pub fn new() -> Self {
         Self {
             formatter: JsonFormatter(CompactFormatter),
-            buffer: LimitBuffer::new(max_size),
+            buffer: LimitBuffer::new(0),
             checkpoint: 0,
             step_count: 0,
             row_value_count: 0,
@@ -127,8 +124,11 @@ impl<'a> Serialize for HttpJsonValueSerializer<'a> {
 impl QueryResultBuilder for JsonHttpPayloadBuilder {
     type Ret = Vec<u8>;
 
-    fn init(&mut self) -> Result<(), QueryResultBuilderError> {
-        *self = Self::new(self.buffer.limit());
+    fn init(&mut self, config: &QueryBuilderConfig) -> Result<(), QueryResultBuilderError> {
+        *self = Self {
+            buffer: LimitBuffer::new(config.max_size.unwrap_or(u64::MAX)),
+            ..Self::new()
+        };
         // write fragment: `[`
         self.formatter.begin_array(&mut self.buffer)?;
         Ok(())
@@ -281,7 +281,7 @@ mod test {
     #[test]
     fn test_json_builder() {
         for _ in 0..1000 {
-            let builder = JsonHttpPayloadBuilder::new(1_000_000);
+            let builder = JsonHttpPayloadBuilder::new();
             let ret = random_builder_driver(100, builder).into_ret();
             println!("{}", std::str::from_utf8(&ret).unwrap());
             // we produce valid json

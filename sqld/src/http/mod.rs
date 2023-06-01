@@ -133,7 +133,7 @@ async fn handle_query<D: Database>(
 
     let db = db_factory.create().await?;
 
-    let builder = JsonHttpPayloadBuilder::new(1000);
+    let builder = JsonHttpPayloadBuilder::new();
     match db.execute_batch_or_rollback(batch, auth, builder).await {
         Ok((builder, _)) => Ok(Response::builder()
             .header("Content-Type", "application/json")
