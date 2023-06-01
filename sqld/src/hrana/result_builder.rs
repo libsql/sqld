@@ -17,12 +17,12 @@ pub struct SingleStatementBuilder {
     err: Option<crate::error::Error>,
     affected_row_count: u64,
     last_insert_rowid: Option<i64>,
-    current_size: usize,
-    max_size: usize,
+    current_size: u64,
+    max_size: u64,
 }
 
 impl SingleStatementBuilder {
-    pub fn new(max_size: usize) -> Self {
+    pub fn new(max_size: u64) -> Self {
         Self {
             has_step: false,
             cols: Vec::new(),
@@ -36,11 +36,11 @@ impl SingleStatementBuilder {
     }
 }
 
-struct SizeFormatter(usize);
+struct SizeFormatter(u64);
 
 impl io::Write for SizeFormatter {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        self.0 += buf.len();
+        self.0 += buf.len() as u64;
         Ok(buf.len())
     }
 
@@ -51,12 +51,12 @@ impl io::Write for SizeFormatter {
 
 impl fmt::Write for SizeFormatter {
     fn write_str(&mut self, s: &str) -> fmt::Result {
-        self.0 += s.len();
+        self.0 += s.len() as u64;
         Ok(())
     }
 }
 
-fn value_json_size(v: &ValueRef) -> usize {
+fn value_json_size(v: &ValueRef) -> u64 {
     let mut f = SizeFormatter(0);
     match v {
         ValueRef::Null => write!(&mut f, r#"{{"type":"null"}}"#).unwrap(),
@@ -203,7 +203,7 @@ impl QueryResultBuilder for SingleStatementBuilder {
     }
 }
 
-fn estimate_cols_json_size(c: &Column) -> usize {
+fn estimate_cols_json_size(c: &Column) -> u64 {
     let mut f = SizeFormatter(0);
     write!(
         &mut f,
@@ -220,12 +220,12 @@ pub struct HranaBatchProtoBuilder {
     step_results: Vec<Option<proto::StmtResult>>,
     step_errors: Vec<Option<crate::hrana::proto::Error>>,
     stmt_builder: SingleStatementBuilder,
-    max_size: usize,
-    current_size: usize,
+    max_size: u64,
+    current_size: u64,
 }
 
 impl HranaBatchProtoBuilder {
-    pub fn new(max_size: usize) -> Self {
+    pub fn new(max_size: u64) -> Self {
         Self {
             step_results: Vec::new(),
             step_errors: Vec::new(),

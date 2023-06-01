@@ -2,14 +2,14 @@ use std::fmt;
 use std::io::{self, ErrorKind};
 use std::ops::{Deref, DerefMut};
 
-use humansize::DECIMAL;
+use bytesize::ByteSize;
 use rusqlite::types::ValueRef;
 use serde::Serialize;
 use serde_json::ser::Formatter;
 
 #[derive(Debug)]
 pub enum QueryResultBuilderError {
-    ResponseTooLarge(usize),
+    ResponseTooLarge(u64),
     Internal(anyhow::Error),
 }
 
@@ -17,7 +17,7 @@ impl fmt::Display for QueryResultBuilderError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             QueryResultBuilderError::ResponseTooLarge(s) => {
-                write!(f, "query response exceeds the maximum size of {}. Try reducing the number of queried rows.", humansize::format_size(*s, DECIMAL))
+                write!(f, "query response exceeds the maximum size of {}. Try reducing the number of queried rows.", ByteSize(*s))
             }
             QueryResultBuilderError::Internal(e) => e.fmt(f),
         }

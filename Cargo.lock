@@ -805,6 +805,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "bytesize"
+version = "1.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "38fcc2979eff34a4b84e1cf9a1e3da42a7d44b3b690a40cdcb23e3d556cfb2e5"
+
+[[package]]
 name = "cap-fs-ext"
 version = "0.26.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1872,15 +1878,6 @@ name = "httpdate"
 version = "1.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c4a1e36c821dbe04574f602848a19f742f4fb3c98d40449f11bcad18d6b17421"
-
-[[package]]
-name = "humansize"
-version = "2.1.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6cb51c9a029ddc91b07a787f1d86b53ccfa49b0e86688c946ebe8d3555685dd7"
-dependencies = [
- "libm",
-]
 
 [[package]]
 name = "humantime"
@@ -3618,6 +3615,7 @@ dependencies = [
  "bottomless",
  "bytemuck",
  "bytes 1.4.0",
+ "bytesize",
  "clap",
  "console-subscriber",
  "crc",
@@ -3626,7 +3624,6 @@ dependencies = [
  "fallible-iterator",
  "futures",
  "hmac",
- "humansize",
  "hyper",
  "hyper-tungstenite",
  "insta",

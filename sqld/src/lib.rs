@@ -92,6 +92,7 @@ pub struct Config {
     pub soft_heap_limit_mb: Option<usize>,
     pub hard_heap_limit_mb: Option<usize>,
     pub allow_replica_overwrite: bool,
+    pub max_response_size: u64,
 }
 
 async fn run_service<D: Database>(

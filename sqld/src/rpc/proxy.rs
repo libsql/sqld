@@ -274,13 +274,13 @@ struct ExecuteResultBuilder {
     current_row: rpc::Row,
     current_col_description: Vec<rpc::Column>,
     current_err: Option<crate::error::Error>,
-    max_size: usize,
-    current_size: usize,
-    current_step_size: usize,
+    max_size: u64,
+    current_size: u64,
+    current_step_size: u64,
 }
 
 impl ExecuteResultBuilder {
-    fn new(max_size: usize) -> Self {
+    fn new(max_size: u64) -> Self {
         Self {
             results: Vec::new(),
             current_rows: Vec::new(),
@@ -343,7 +343,7 @@ impl QueryResultBuilder for ExecuteResultBuilder {
 
     fn step_error(&mut self, error: crate::error::Error) -> Result<(), QueryResultBuilderError> {
         assert!(self.current_err.is_none());
-        let error_size = error.to_string().len();
+        let error_size = error.to_string().len() as u64;
         if self.current_size + error_size > self.max_size {
             return Err(QueryResultBuilderError::ResponseTooLarge(self.max_size));
         }
@@ -361,15 +361,12 @@ impl QueryResultBuilder for ExecuteResultBuilder {
         assert!(self.current_col_description.is_empty());
         for col in cols {
             let col = col.into();
-            if col.decl_ty.map(|s| s.len()).unwrap_or_default()
-                + col.name.len()
-                + self.current_step_size
-                + self.current_size
-                > self.max_size
-            {
+            let col_len =
+                (col.decl_ty.map(|s| s.len()).unwrap_or_default() + col.name.len()) as u64;
+            if col_len + self.current_step_size + self.current_size > self.max_size {
                 return Err(QueryResultBuilderError::ResponseTooLarge(self.max_size));
             }
-            self.current_step_size += col.decl_ty.map(|s| s.len()).unwrap_or_default() + col.name.len();
+            self.current_step_size += col_len;
 
             let col = rpc::Column {
                 name: col.name.to_owned(),
@@ -395,23 +392,17 @@ impl QueryResultBuilder for ExecuteResultBuilder {
         v: rusqlite::types::ValueRef,
     ) -> Result<(), QueryResultBuilderError> {
         let data = bincode::serialize(
-            &crate::query::Value::try_from(v).map_err(QueryResultBuilderError::from_any)?)
-            .map_err(QueryResultBuilderError::from_any)?;
+            &crate::query::Value::try_from(v).map_err(QueryResultBuilderError::from_any)?,
+        )
+        .map_err(QueryResultBuilderError::from_any)?;
 
-        if data.len()
-            + self.current_step_size
-                + self.current_size
-                > self.max_size
-        {
+        if data.len() as u64 + self.current_step_size + self.current_size > self.max_size {
             return Err(QueryResultBuilderError::ResponseTooLarge(self.max_size));
         }
 
-        self.current_step_size += data.len();
+        self.current_step_size += data.len() as u64;
 
-        let value = rpc::Value {
-            data,
-            
-        };
+        let value = rpc::Value { data };
 
         self.current_row.values.push(value);
 

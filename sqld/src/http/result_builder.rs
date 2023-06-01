@@ -25,18 +25,18 @@ pub struct JsonHttpPayloadBuilder {
 
 struct LimitBuffer {
     buffer: Vec<u8>,
-    limit: usize,
+    limit: u64,
 }
 
 impl LimitBuffer {
-    fn new(limit: usize) -> Self {
+    fn new(limit: u64) -> Self {
         Self {
             buffer: Vec::new(),
             limit,
         }
     }
 
-    fn limit(&self) -> usize {
+    fn limit(&self) -> u64 {
         self.limit
     }
 }
@@ -57,7 +57,7 @@ impl DerefMut for LimitBuffer {
 
 impl io::Write for LimitBuffer {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        if self.buffer.len() + buf.len() > self.limit {
+        if (self.buffer.len() + buf.len()) as u64 > self.limit {
             return Err(io::Error::new(
                 io::ErrorKind::OutOfMemory,
                 QueryResultBuilderError::ResponseTooLarge(self.limit),
@@ -76,7 +76,7 @@ impl io::Write for LimitBuffer {
 struct HttpJsonValueSerializer<'a>(&'a ValueRef<'a>);
 
 impl JsonHttpPayloadBuilder {
-    pub fn new(max_size: usize) -> Self {
+    pub fn new(max_size: u64) -> Self {
         Self {
             formatter: JsonFormatter(CompactFormatter),
             buffer: LimitBuffer::new(max_size),
