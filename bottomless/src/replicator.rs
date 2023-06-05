@@ -1,8 +1,11 @@
-use aws_sdk_s3::types::ByteStream;
-use aws_sdk_s3::{Client, Endpoint};
+use aws_sdk_s3::Client;
 use bytes::{Bytes, BytesMut};
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
+use aws_sdk_s3::error::SdkError;
+use aws_sdk_s3::operation::get_object::builders::GetObjectFluentBuilder;
+use aws_sdk_s3::operation::list_objects::builders::ListObjectsFluentBuilder;
+use aws_sdk_s3::primitives::ByteStream;
 
 pub type Result<T> = anyhow::Result<T>;
 
@@ -82,22 +85,25 @@ impl Replicator {
         let write_buffer = BTreeMap::new();
         let mut loader = aws_config::from_env();
         if let Some(endpoint) = options.aws_endpoint.as_deref() {
-            loader = loader.endpoint_resolver(Endpoint::immutable(endpoint)?);
+            loader = loader.endpoint_url(endpoint);
         }
         let bucket = options.bucket_name.clone();
-        let client = Client::new(&loader.load().await);
+        let conf = aws_sdk_s3::config::Builder::from(&loader.load().await)
+            .force_path_style(true)
+            .build();
+        let client = Client::from_conf(conf);
         let generation = Self::generate_generation();
         tracing::debug!("Generation {}", generation);
 
         match client.head_bucket().bucket(&bucket).send().await {
             Ok(_) => tracing::info!("Bucket {} exists and is accessible", bucket),
-            Err(aws_sdk_s3::types::SdkError::ServiceError(err)) if err.err().is_not_found() => {
+            Err(SdkError::ServiceError(err)) if err.err().is_not_found() => {
                 if options.create_bucket_if_not_exists {
                     tracing::info!("Bucket {} not found, recreating", bucket);
                     client.create_bucket().bucket(&bucket).send().await?;
                 } else {
                     tracing::error!("Bucket {} does not exist", bucket);
-                    return Err(aws_sdk_s3::types::SdkError::ServiceError(err).into());
+                    return Err(SdkError::ServiceError(err).into());
                 }
             }
             Err(e) => {
@@ -142,12 +148,12 @@ impl Replicator {
     }
 
     // Gets an object from the current bucket
-    fn get_object(&self, key: String) -> aws_sdk_s3::client::fluent_builders::GetObject {
+    fn get_object(&self, key: String) -> GetObjectFluentBuilder {
         self.client.get_object().bucket(&self.bucket).key(key)
     }
 
     // Lists objects from the current bucket
-    fn list_objects(&self) -> aws_sdk_s3::client::fluent_builders::ListObjects {
+    fn list_objects(&self) -> ListObjectsFluentBuilder {
         self.client.list_objects().bucket(&self.bucket)
     }
 
@@ -262,7 +268,7 @@ impl Replicator {
                 self.db_name, self.generation, frame, pgno, crc
             );
 
-            let body: ByteStream = if self.use_compression {
+            let body = if self.use_compression {
                 let mut compressor = async_compression::tokio::bufread::GzipEncoder::new(&data[..]);
                 let mut compressed: Vec<u8> = Vec::with_capacity(self.page_size);
                 tokio::io::copy(&mut compressor, &mut compressed).await?;

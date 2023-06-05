@@ -1,4 +1,4 @@
-use std::net::SocketAddr;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::RecvTimeoutError;
 use std::sync::Arc;
@@ -101,7 +101,7 @@ impl Default for Config {
         Config {
             db_path: "data.sqld".into(),
             extensions_path: None,
-            http_addr: None,
+            http_addr: Some(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080)),
             enable_http_console: false,
             http_auth: None,
             http_self_url: None,
