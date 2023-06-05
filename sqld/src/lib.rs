@@ -43,6 +43,8 @@ mod replication;
 pub mod rpc;
 mod stats;
 mod utils;
+#[cfg(test)]
+mod test;
 
 const MAX_CONCCURENT_DBS: usize = 128;
 const DB_CREATE_TIMEOUT: Duration = Duration::from_secs(1);
@@ -61,6 +63,7 @@ type Result<T, E = Error> = std::result::Result<T, E>;
 /// /!\ use with caution.
 pub(crate) static HARD_RESET: Lazy<Arc<Notify>> = Lazy::new(|| Arc::new(Notify::new()));
 
+#[derive(Debug, Clone)]
 pub struct Config {
     pub db_path: PathBuf,
     pub extensions_path: Option<PathBuf>,
@@ -91,6 +94,42 @@ pub struct Config {
     pub heartbeat_period: Duration,
     pub soft_heap_limit_mb: Option<usize>,
     pub hard_heap_limit_mb: Option<usize>,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Config {
+            db_path: "data.sqld".into(),
+            extensions_path: None,
+            http_addr: None,
+            enable_http_console: false,
+            http_auth: None,
+            http_self_url: None,
+            hrana_addr: None,
+            auth_jwt_key: None,
+            backend: Backend::Libsql,
+            writer_rpc_addr: None,
+            writer_rpc_tls: false,
+            writer_rpc_cert: None,
+            writer_rpc_key: None,
+            writer_rpc_ca_cert: None,
+            rpc_server_addr: None,
+            rpc_server_tls: false,
+            rpc_server_cert: None,
+            rpc_server_key: None,
+            rpc_server_ca_cert: None,
+            #[cfg(feature = "bottomless")]
+            enable_bottomless_replication: false,
+            idle_shutdown_timeout: None,
+            load_from_dump: None,
+            max_log_size: 200,
+            heartbeat_url: None,
+            heartbeat_auth: None,
+            heartbeat_period: Duration::from_secs(30),
+            soft_heap_limit_mb: None,
+            hard_heap_limit_mb: None,
+        }
+    }
 }
 
 async fn run_service<D: Database>(
@@ -339,6 +378,7 @@ pub async fn init_bottomless_replicator(
             create_bucket_if_not_exists: true,
             verify_crc: false,
             use_compression: false,
+            ..Default::default()
         })
         .await?;
 

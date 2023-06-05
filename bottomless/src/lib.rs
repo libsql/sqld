@@ -10,6 +10,7 @@ use crate::ffi::{
     bottomless_methods, libsql_wal_methods, sqlite3, sqlite3_file, sqlite3_vfs, PgHdr, Wal,
 };
 use std::ffi::{c_char, c_void};
+use crate::replicator::Options;
 
 // Just heuristics, but should work for ~100% of cases
 fn is_regular(vfs: *const sqlite3_vfs) -> bool {
@@ -489,6 +490,7 @@ pub extern "C" fn xPreMainDbOpen(_methods: *mut libsql_wal_methods, path: *const
             create_bucket_if_not_exists: true,
             verify_crc: true,
             use_compression: false,
+            ..Options::default()
         })
     );
     let mut replicator = match replicator {

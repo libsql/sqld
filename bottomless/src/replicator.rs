@@ -47,33 +47,44 @@ pub enum RestoreAction {
     ReuseGeneration(uuid::Uuid),
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct Options {
     pub create_bucket_if_not_exists: bool,
     pub verify_crc: bool,
     pub use_compression: bool,
+    pub aws_endpoint: Option<String>,
+    pub bucket_name: String,
+}
+
+impl Default for Options {
+    fn default() -> Self {
+        let aws_endpoint = std::env::var("LIBSQL_BOTTOMLESS_ENDPOINT").ok();
+        let bucket_name = std::env::var("LIBSQL_BOTTOMLESS_BUCKET").unwrap_or_else(|_| "bottomless".to_string());
+        Options {
+            create_bucket_if_not_exists: false,
+            verify_crc: true,
+            use_compression: false,
+            aws_endpoint,
+            bucket_name,
+        }
+    }
 }
 
 impl Replicator {
     pub const UNSET_PAGE_SIZE: usize = usize::MAX;
 
     pub async fn new() -> Result<Self> {
-        Self::create(Options {
-            create_bucket_if_not_exists: false,
-            verify_crc: true,
-            use_compression: false,
-        })
+        Self::create(Options::default())
         .await
     }
 
     pub async fn create(options: Options) -> Result<Self> {
         let write_buffer = BTreeMap::new();
         let mut loader = aws_config::from_env();
-        if let Ok(endpoint) = std::env::var("LIBSQL_BOTTOMLESS_ENDPOINT") {
+        if let Some(endpoint) = options.aws_endpoint.as_deref() {
             loader = loader.endpoint_resolver(Endpoint::immutable(endpoint)?);
         }
-        let bucket =
-            std::env::var("LIBSQL_BOTTOMLESS_BUCKET").unwrap_or_else(|_| "bottomless".to_string());
+        let bucket = options.bucket_name.clone();
         let client = Client::new(&loader.load().await);
         let generation = Self::generate_generation();
         tracing::debug!("Generation {}", generation);

@@ -1019,7 +1019,7 @@ dependencies = [
 [[package]]
 name = "containers-api"
 version = "0.8.0"
-source = "git+https://github.com/vv9k/containers-api#6ce7b3dc998b47bf36a25f8d9bbc17f50c76e8a9"
+source = "git+https://github.com/vv9k/containers-api#00efa72b05225df04f030284cd924cd9688a37a0"
 dependencies = [
  "chrono",
  "flate2",
@@ -3622,6 +3622,7 @@ dependencies = [
  "insta",
  "itertools",
  "jsonwebtoken",
+ "libsql-client",
  "memmap",
  "mimalloc",
  "nix",
@@ -3652,6 +3653,8 @@ dependencies = [
  "tower-http",
  "tracing",
  "tracing-subscriber",
+ "tracing-test",
+ "url",
  "uuid",
  "vergen",
 ]
@@ -4205,6 +4208,29 @@ dependencies = [
  "tracing",
  "tracing-core",
  "tracing-log",
+]
+
+[[package]]
+name = "tracing-test"
+version = "0.2.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3a2c0ff408fe918a94c428a3f2ad04e4afd5c95bbc08fcf868eff750c15728a4"
+dependencies = [
+ "lazy_static",
+ "tracing-core",
+ "tracing-subscriber",
+ "tracing-test-macro",
+]
+
+[[package]]
+name = "tracing-test-macro"
+version = "0.2.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "258bc1c4f8e2e73a977812ab339d503e6feeb92700f6d07a6de4d321522d5c08"
+dependencies = [
+ "lazy_static",
+ "quote",
+ "syn 1.0.109",
 ]
 
 [[package]]
