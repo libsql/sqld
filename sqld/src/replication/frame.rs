@@ -34,6 +34,66 @@ pub struct Frame {
     data: Bytes,
 }
 
+#[repr(transparent)]
+#[derive(Clone, Copy, Debug, Zeroable, Pod)]
+// NOTICE: frame number 0 indicates that the frame is in the main db file.
+// Any other number indicates that it's in the WAL file.
+// We do not use an enum here in order to make this struct transparently
+// serializable for C code and on-disk representation.
+pub struct FrameLocation {
+    pub frame_no: u32,
+}
+
+impl FrameLocation {
+    pub const IN_MAIN_DB_FILE: u32 = 0;
+
+    pub fn new(frame_no: u32) -> Self {
+        Self { frame_no }
+    }
+
+    pub fn in_wal_file(frame_no: u32) -> Self {
+        assert_ne!(frame_no, FrameLocation::IN_MAIN_DB_FILE);
+        Self { frame_no }
+    }
+
+    pub fn in_main_db_file() -> Self {
+        Self {
+            frame_no: Self::IN_MAIN_DB_FILE,
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Zeroable, Pod)]
+pub struct FrameRef {
+    pub header: FrameHeader,
+    pub location: FrameLocation,
+    _pad: u32,
+}
+
+impl FrameRef {
+    pub const SIZE: usize = size_of::<Self>();
+
+    pub fn new(header: FrameHeader, location: FrameLocation) -> Self {
+        Self {
+            header,
+            location,
+            _pad: 0,
+        }
+    }
+
+    pub fn as_bytes(&self) -> Bytes {
+        Bytes::copy_from_slice(bytes_of(self))
+    }
+
+    pub fn try_from_bytes(data: Bytes) -> anyhow::Result<Self> {
+        anyhow::ensure!(data.len() == Self::SIZE, "invalid frame size");
+        try_from_bytes(&data)
+            .copied()
+            .map_err(|e| anyhow::anyhow!(e))
+    }
+}
+
 impl fmt::Debug for Frame {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Frame")
