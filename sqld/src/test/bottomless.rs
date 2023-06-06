@@ -1,7 +1,5 @@
 use crate::{run_server, Config};
 use anyhow::Result;
-use aws_config::SdkConfig;
-use futures::executor::block_on;
 use libsql_client::{Connection, QueryResult, Value};
 use reqwest::StatusCode;
 use std::net::ToSocketAddrs;
@@ -68,7 +66,7 @@ async fn backup_restore() {
 
     {
         // 2: recreate the database, wait for restore from backup
-        let cleaner = DbFileCleaner::new(PATH);
+        let _ = DbFileCleaner::new(PATH);
         let db_job = tokio::spawn(run_server(db_config));
 
         sleep(Duration::from_secs(2)).await;
@@ -92,7 +90,7 @@ async fn sql<I: IntoIterator<Item = &'static str>>(
     stmts: I,
 ) -> Result<Vec<QueryResult>> {
     let db = libsql_client::reqwest::Connection::connect_from_url(url)?;
-    Ok(db.batch(stmts).await?)
+    db.batch(stmts).await
 }
 
 /// Verify that MinIO (S3 local stub) is up.
@@ -141,10 +139,6 @@ impl DbFileCleaner {
     fn cleanup(path: &PathBuf) {
         let _ = std::fs::remove_dir_all(path);
     }
-
-    fn path(&self) -> &PathBuf {
-        &self.0
-    }
 }
 
 impl Drop for DbFileCleaner {
@@ -182,7 +176,7 @@ impl S3BucketCleaner {
             delete_keys.push(id);
         }
 
-        let res = client
+        let _ = client
             .delete_objects()
             .bucket(bucket)
             .delete(Delete::builder().set_objects(Some(delete_keys)).build())
