@@ -85,7 +85,7 @@ pub struct Config {
     pub rpc_server_key: Option<PathBuf>,
     pub rpc_server_ca_cert: Option<PathBuf>,
     #[cfg(feature = "bottomless")]
-    pub enable_bottomless_replication: bool,
+    pub bottomless_replication: Option<bottomless::replicator::Options>,
     pub idle_shutdown_timeout: Option<Duration>,
     pub load_from_dump: Option<PathBuf>,
     pub max_log_size: u64,
@@ -119,7 +119,7 @@ impl Default for Config {
             rpc_server_key: None,
             rpc_server_ca_cert: None,
             #[cfg(feature = "bottomless")]
-            enable_bottomless_replication: false,
+            bottomless_replication: None,
             idle_shutdown_timeout: None,
             load_from_dump: None,
             max_log_size: 200,
@@ -371,15 +371,11 @@ fn validate_extensions(extensions_path: Option<PathBuf>) -> anyhow::Result<Vec<P
 #[cfg(feature = "bottomless")]
 pub async fn init_bottomless_replicator(
     path: impl AsRef<std::path::Path>,
+    options: bottomless::replicator::Options,
 ) -> anyhow::Result<bottomless::replicator::Replicator> {
     tracing::debug!("Initializing bottomless replication");
     let mut replicator =
-        bottomless::replicator::Replicator::create(bottomless::replicator::Options {
-            create_bucket_if_not_exists: true,
-            verify_crc: false,
-            use_compression: false,
-            ..Default::default()
-        })
+        bottomless::replicator::Replicator::create(options)
         .await?;
 
     // NOTICE: LIBSQL_BOTTOMLESS_DATABASE_ID env variable can be used
@@ -421,9 +417,9 @@ async fn start_primary(
     )?);
 
     #[cfg(feature = "bottomless")]
-    let bottomless_replicator = if config.enable_bottomless_replication {
+    let bottomless_replicator = if let Some(options) = &config.bottomless_replication {
         Some(Arc::new(std::sync::Mutex::new(
-            init_bottomless_replicator(config.db_path.join("data")).await?,
+            init_bottomless_replicator(config.db_path.join("data"), options.clone()).await?,
         )))
     } else {
         None
@@ -538,7 +534,7 @@ pub async fn run_server(config: Config) -> anyhow::Result<()> {
     tracing::trace!("Backend: {:?}", config.backend);
 
     #[cfg(feature = "bottomless")]
-    if config.enable_bottomless_replication {
+    if config.bottomless_replication.is_some() {
         bottomless::static_init::register_bottomless_methods();
     }
 
