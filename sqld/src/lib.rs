@@ -94,6 +94,8 @@ pub struct Config {
     pub heartbeat_period: Duration,
     pub soft_heap_limit_mb: Option<usize>,
     pub hard_heap_limit_mb: Option<usize>,
+    pub allow_replica_overwrite: bool,
+    pub max_response_size: u64,
 }
 
 impl Default for Config {
@@ -290,7 +292,12 @@ async fn start_replica(
     stats: Stats,
 ) -> anyhow::Result<()> {
     let (channel, uri) = configure_rpc(config)?;
-    let replicator = Replicator::new(config.db_path.clone(), channel.clone(), uri.clone());
+    let replicator = Replicator::new(
+        config.db_path.clone(),
+        channel.clone(),
+        uri.clone(),
+        config.allow_replica_overwrite,
+    );
     let applied_frame_no_receiver = replicator.current_frame_no_notifier.subscribe();
 
     join_set.spawn(replicator.run());
@@ -304,6 +311,7 @@ async fn start_replica(
         uri,
         stats.clone(),
         applied_frame_no_receiver,
+        config.max_response_size,
     )
     .throttled(MAX_CONCCURENT_DBS, Some(DB_CREATE_TIMEOUT));
 
@@ -459,6 +467,7 @@ async fn start_primary(
         },
         stats.clone(),
         valid_extensions,
+        config.max_response_size,
     )
     .await?
     .throttled(MAX_CONCCURENT_DBS, Some(DB_CREATE_TIMEOUT))
@@ -564,13 +573,17 @@ pub async fn run_server(config: Config) -> anyhow::Result<()> {
 
         let stats = Stats::new(&config.db_path)?;
 
-        if config.heartbeat_url.is_some() {
-            join_set.spawn(run_storage_monitor(config.db_path.clone(), stats.clone()));
+        match config.writer_rpc_addr {
+            Some(_) => {
+                start_replica(&config, &mut join_set, idle_shutdown_layer, stats.clone()).await?
+            }
+            None => {
+                start_primary(&config, &mut join_set, idle_shutdown_layer, stats.clone()).await?
+            }
         }
 
-        match config.writer_rpc_addr {
-            Some(_) => start_replica(&config, &mut join_set, idle_shutdown_layer, stats).await?,
-            None => start_primary(&config, &mut join_set, idle_shutdown_layer, stats).await?,
+        if config.heartbeat_url.is_some() {
+            join_set.spawn(run_storage_monitor(config.db_path.clone(), stats));
         }
 
         let reset = HARD_RESET.clone();

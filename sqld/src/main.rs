@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::{bail, Context as _, Result};
+use bytesize::ByteSize;
 use clap::Parser;
 use mimalloc::MiMalloc;
 use sqld::{database::dump::exporter::export_dump, Config};
@@ -155,6 +156,15 @@ struct Cli {
     /// if it goes over this limit with memory usage.
     #[clap(long, env = "SQLD_HARD_HEAP_LIMIT_MB")]
     hard_heap_limit_mb: Option<usize>,
+
+    /// Allow the replica to overwrite its data if the primary starts replicating a different
+    /// database. This is often the case when the primary goes through a recovery process.
+    #[clap(long, env = "SQLD_ALLOW_REPLICA_OVERWRITE")]
+    allow_replica_overwrite: bool,
+
+    /// Set the maximum size for a response. e.g 5KB, 10MB...
+    #[clap(long, env = "SQLD_MAX_RESPONSE_SIZE", default_value = "10MB")]
+    max_response_size: ByteSize,
 }
 
 #[derive(clap::Subcommand, Debug)]
@@ -263,6 +273,8 @@ fn config_from_args(args: Cli) -> Result<Config> {
         heartbeat_period: Duration::from_secs(args.heartbeat_period_s),
         soft_heap_limit_mb: args.soft_heap_limit_mb,
         hard_heap_limit_mb: args.hard_heap_limit_mb,
+        allow_replica_overwrite: args.allow_replica_overwrite,
+        max_response_size: args.max_response_size.0,
     })
 }
 
