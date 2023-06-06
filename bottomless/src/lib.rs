@@ -9,8 +9,8 @@ pub mod replicator;
 use crate::ffi::{
     bottomless_methods, libsql_wal_methods, sqlite3, sqlite3_file, sqlite3_vfs, PgHdr, Wal,
 };
-use std::ffi::{c_char, c_void};
 use crate::replicator::Options;
+use std::ffi::{c_char, c_void};
 
 // Just heuristics, but should work for ~100% of cases
 fn is_regular(vfs: *const sqlite3_vfs) -> bool {

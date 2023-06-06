@@ -1,14 +1,14 @@
-use std::net::ToSocketAddrs;
-use std::path::PathBuf;
-use std::time::Duration;
-use crate::{Config, run_server};
-use libsql_client::{Connection, QueryResult, Value};
-use reqwest::StatusCode;
-use tokio::time::sleep;
-use tracing_test::traced_test;
+use crate::{run_server, Config};
 use anyhow::Result;
 use aws_config::SdkConfig;
 use futures::executor::block_on;
+use libsql_client::{Connection, QueryResult, Value};
+use reqwest::StatusCode;
+use std::net::ToSocketAddrs;
+use std::path::PathBuf;
+use std::time::Duration;
+use tokio::time::sleep;
+use tracing_test::traced_test;
 use url::Url;
 
 #[tokio::test]
@@ -23,7 +23,11 @@ async fn backup_restore() {
     let _ = S3BucketCleaner::new(BUCKET).await;
     assert_bucket_occupancy(BUCKET, true).await;
 
-    let listener_addr = format!("0.0.0.0:{}", PORT).to_socket_addrs().unwrap().next().unwrap();
+    let listener_addr = format!("0.0.0.0:{}", PORT)
+        .to_socket_addrs()
+        .unwrap()
+        .next()
+        .unwrap();
     let connection_addr = Url::parse(&format!("http://localhost:{}", PORT)).unwrap();
     let db_config = Config {
         bottomless_replication: Some(bottomless::replicator::Options {
@@ -45,10 +49,12 @@ async fn backup_restore() {
 
         sleep(Duration::from_secs(2)).await;
 
-        let _ = sql(&connection_addr, [
-            "CREATE TABLE t(id)",
-            "INSERT INTO t VALUES (42)"
-        ]).await.unwrap();
+        let _ = sql(
+            &connection_addr,
+            ["CREATE TABLE t(id)", "INSERT INTO t VALUES (42)"],
+        )
+        .await
+        .unwrap();
 
         sleep(Duration::from_millis(100)).await;
 
@@ -68,7 +74,12 @@ async fn backup_restore() {
         sleep(Duration::from_secs(2)).await;
 
         let result = sql(&connection_addr, ["SELECT id FROM t"]).await.unwrap();
-        let rs = result.into_iter().next().unwrap().into_result_set().unwrap();
+        let rs = result
+            .into_iter()
+            .next()
+            .unwrap()
+            .into_result_set()
+            .unwrap();
         assert_eq!(rs.rows.len(), 1);
         assert_eq!(rs.rows[0].cells["id"], Value::Integer(42));
 
@@ -76,7 +87,10 @@ async fn backup_restore() {
     }
 }
 
-async fn sql<I: IntoIterator<Item=&'static str>>(url: &Url, stmts: I) -> Result<Vec<QueryResult>> {
+async fn sql<I: IntoIterator<Item = &'static str>>(
+    url: &Url,
+    stmts: I,
+) -> Result<Vec<QueryResult>> {
     let db = libsql_client::reqwest::Connection::connect_from_url(url)?;
     Ok(db.batch(stmts).await?)
 }
@@ -86,7 +100,11 @@ async fn assert_minio_ready() {
     const MINIO_URL: &str = "http://127.0.0.1:9090/";
 
     let status = reqwest::get(format!("{}/minio/health/ready", MINIO_URL))
-        .await.expect(&format!("couldn't reach minio health check: '{}'", MINIO_URL))
+        .await
+        .expect(&format!(
+            "couldn't reach minio health check: '{}'",
+            MINIO_URL
+        ))
         .status();
     assert_eq!(status, StatusCode::OK);
 }
@@ -108,7 +126,6 @@ async fn assert_bucket_occupancy(bucket: &str, expect_empty: bool) {
         panic!("bucket '{}' doesn't exist", bucket);
     }
 }
-
 
 /// Guardian struct used for cleaning up the test data from
 /// database file dir at the beginning and end of a test.
@@ -141,7 +158,6 @@ impl Drop for DbFileCleaner {
 struct S3BucketCleaner(&'static str);
 
 impl S3BucketCleaner {
-
     async fn new(bucket: &'static str) -> Self {
         let _ = Self::cleanup(bucket).await; // cleanup the bucket before test
         S3BucketCleaner(bucket)
@@ -149,8 +165,8 @@ impl S3BucketCleaner {
 
     /// Delete all objects from S3 bucket with provided name (doesn't delete bucket itself).
     async fn cleanup(bucket: &str) -> Result<()> {
-        use aws_sdk_s3::Client;
         use aws_sdk_s3::types::{Delete, ObjectIdentifier};
+        use aws_sdk_s3::Client;
 
         let loader = aws_config::from_env().endpoint_url("http://127.0.0.1:9000/");
         let conf = aws_sdk_s3::config::Builder::from(&loader.load().await)
@@ -166,10 +182,12 @@ impl S3BucketCleaner {
             delete_keys.push(id);
         }
 
-        let res = client.delete_objects()
+        let res = client
+            .delete_objects()
             .bucket(bucket)
             .delete(Delete::builder().set_objects(Some(delete_keys)).build())
-            .send().await?;
+            .send()
+            .await?;
 
         Ok(())
     }

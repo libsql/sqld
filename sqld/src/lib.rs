@@ -42,9 +42,9 @@ mod query_result_builder;
 mod replication;
 pub mod rpc;
 mod stats;
-mod utils;
 #[cfg(test)]
 mod test;
+mod utils;
 
 const MAX_CONCCURENT_DBS: usize = 128;
 const DB_CREATE_TIMEOUT: Duration = Duration::from_secs(1);
@@ -384,9 +384,7 @@ pub async fn init_bottomless_replicator(
     options: bottomless::replicator::Options,
 ) -> anyhow::Result<bottomless::replicator::Replicator> {
     tracing::debug!("Initializing bottomless replication");
-    let mut replicator =
-        bottomless::replicator::Replicator::create(options)
-        .await?;
+    let mut replicator = bottomless::replicator::Replicator::create(options).await?;
 
     // NOTICE: LIBSQL_BOTTOMLESS_DATABASE_ID env variable can be used
     // to pass an additional prefix for the database identifier

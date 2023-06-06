@@ -260,7 +260,8 @@ fn config_from_args(args: Cli) -> Result<Config> {
                 verify_crc: false,
                 use_compression: false,
                 aws_endpoint: env::var("LIBSQL_BOTTOMLESS_ENDPOINT").ok(),
-                bucket_name: env::var("LIBSQL_BOTTOMLESS_BUCKET").unwrap_or_else(|_| "bottomless".to_string()),
+                bucket_name: env::var("LIBSQL_BOTTOMLESS_BUCKET")
+                    .unwrap_or_else(|_| "bottomless".to_string()),
             })
         } else {
             None

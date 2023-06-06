@@ -1,11 +1,11 @@
-use aws_sdk_s3::Client;
-use bytes::{Bytes, BytesMut};
-use std::cmp::Ordering;
-use std::collections::BTreeMap;
 use aws_sdk_s3::error::SdkError;
 use aws_sdk_s3::operation::get_object::builders::GetObjectFluentBuilder;
 use aws_sdk_s3::operation::list_objects::builders::ListObjectsFluentBuilder;
 use aws_sdk_s3::primitives::ByteStream;
+use aws_sdk_s3::Client;
+use bytes::{Bytes, BytesMut};
+use std::cmp::Ordering;
+use std::collections::BTreeMap;
 
 pub type Result<T> = anyhow::Result<T>;
 
@@ -62,7 +62,8 @@ pub struct Options {
 impl Default for Options {
     fn default() -> Self {
         let aws_endpoint = std::env::var("LIBSQL_BOTTOMLESS_ENDPOINT").ok();
-        let bucket_name = std::env::var("LIBSQL_BOTTOMLESS_BUCKET").unwrap_or_else(|_| "bottomless".to_string());
+        let bucket_name =
+            std::env::var("LIBSQL_BOTTOMLESS_BUCKET").unwrap_or_else(|_| "bottomless".to_string());
         Options {
             create_bucket_if_not_exists: false,
             verify_crc: true,
@@ -77,8 +78,7 @@ impl Replicator {
     pub const UNSET_PAGE_SIZE: usize = usize::MAX;
 
     pub async fn new() -> Result<Self> {
-        Self::create(Options::default())
-        .await
+        Self::create(Options::default()).await
     }
 
     pub async fn create(options: Options) -> Result<Self> {
