@@ -130,6 +130,8 @@ impl Default for Config {
             heartbeat_period: Duration::from_secs(30),
             soft_heap_limit_mb: None,
             hard_heap_limit_mb: None,
+            allow_replica_overwrite: false,
+            max_response_size: 10 * 1024 * 1024, // 10MiB
         }
     }
 }
