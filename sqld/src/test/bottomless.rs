@@ -99,10 +99,7 @@ async fn assert_minio_ready() {
 
     let status = reqwest::get(format!("{}/minio/health/ready", MINIO_URL))
         .await
-        .expect(&format!(
-            "couldn't reach minio health check: '{}'",
-            MINIO_URL
-        ))
+        .expect("couldn't reach minio health check")
         .status();
     assert_eq!(status, StatusCode::OK);
 }
