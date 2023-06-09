@@ -62,6 +62,15 @@ jobs:
 
       - uses: actions/checkout@v3
 
+      - name: Get Rust toolchain version from rust-toolchain.toml
+        id: getrustver
+        run: |
+          echo "RUST_VER=$(grep channel ./rust-toolchain.toml | awk '{print $NF}' | tr -d '"')" >> $GITHUB_ENV
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_VER }}
+
       # Check Cargo.toml in sqld sbdir has the correct tag
       - name: Verify sqld/Cargo.toml version is same as git tag
         if: ${{ startsWith(github.ref, 'refs/tags/') }} && ${{ matrix.os }} == ubuntu-latest
@@ -114,15 +123,6 @@ jobs:
           script: |
             core.setFailed('ERROR: sqld/Cargo.toml version section has not been updated to the release tag. Failing the release build.')
         
-      - name: Get Rust toolchain version from rust-toolchain.toml
-        id: getrustver
-        run: |
-          echo "RUST_VER=$(grep channel ./rust-toolchain.toml | awk '{print $NF}' | tr -d '"')" >> $GITHUB_ENV
-
-      - uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: ${{ env.RUST_VER }}
-
       - name: setup msys2 for windows
         if: matrix.os == 'windows-latest'
         uses: msys2/setup-msys2@v2
