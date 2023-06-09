@@ -1,10 +1,12 @@
 use crate::{run_server, Config};
 use anyhow::Result;
-use libsql_client::{Connection, QueryResult, Value};
+use libsql_client::{Connection, QueryResult, Statement, Value};
 use reqwest::StatusCode;
+use std::io::Write;
 use std::net::ToSocketAddrs;
 use std::path::PathBuf;
 use std::time::Duration;
+use tokio::io::AsyncWriteExt;
 use tokio::time::sleep;
 use tracing_test::traced_test;
 use url::Url;
@@ -49,10 +51,22 @@ async fn backup_restore() {
 
         let _ = sql(
             &connection_addr,
-            ["CREATE TABLE t(id)", "INSERT INTO t VALUES (42)"],
+            ["CREATE TABLE t(id INT PRIMARY KEY, name TEXT);"],
         )
         .await
         .unwrap();
+
+        let stmts: Vec<_> = (0u32..100)
+            .map(|i| {
+                format!(
+                    "INSERT INTO t(id, name) VALUES({}, '{}') ON CONFLICT (id) DO UPDATE SET name = '{}';",
+                    i % 10,
+                    i,
+                    i
+                )
+            })
+            .collect();
+        let _ = sql(&connection_addr, stmts).await.unwrap();
 
         sleep(Duration::from_millis(100)).await;
 
@@ -71,24 +85,38 @@ async fn backup_restore() {
 
         sleep(Duration::from_secs(2)).await;
 
-        let result = sql(&connection_addr, ["SELECT id FROM t"]).await.unwrap();
+        let result = sql(&connection_addr, ["SELECT id, name FROM t ORDER BY id;"])
+            .await
+            .unwrap();
         let rs = result
             .into_iter()
             .next()
             .unwrap()
             .into_result_set()
             .unwrap();
-        assert_eq!(rs.rows.len(), 1);
-        assert_eq!(rs.rows[0].cells["id"], Value::Integer(42));
+        assert_eq!(rs.rows.len(), 10, "unexpected number of rows");
+        let mut i = 0;
+        for row in rs.rows.iter() {
+            let id = row.cells["id"].clone();
+            let name = row.cells["name"].clone();
+            assert_eq!(
+                (id, name),
+                (Value::Integer(i), Value::Text((90 + i).to_string())),
+                "unexpected values for row {}",
+                i
+            );
+            i += 1;
+        }
 
         db_job.abort();
     }
 }
 
-async fn sql<I: IntoIterator<Item = &'static str>>(
-    url: &Url,
-    stmts: I,
-) -> Result<Vec<QueryResult>> {
+async fn sql<I, S>(url: &Url, stmts: I) -> Result<Vec<QueryResult>>
+where
+    I: IntoIterator<Item = S>,
+    S: Into<Statement>,
+{
     let db = libsql_client::reqwest::Connection::connect_from_url(url)?;
     db.batch(stmts).await
 }

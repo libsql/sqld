@@ -4,7 +4,10 @@
 
 mod ffi;
 
+mod read;
 pub mod replicator;
+mod wal;
+mod write;
 
 use crate::ffi::{
     bottomless_methods, libsql_wal_methods, sqlite3, sqlite3_file, sqlite3_vfs, PgHdr, Wal,
