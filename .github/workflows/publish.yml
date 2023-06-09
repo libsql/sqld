@@ -1,4 +1,4 @@
-name: Create and publish qld binaried and Docker image
+name: Create and publish sqld binaried and Docker image
 
 on:
   push:
