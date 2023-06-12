@@ -1,49 +1,65 @@
 use crate::wal::{WalFileReader, WalFrameHeader};
-use anyhow::Result;
-use std::collections::{BTreeMap, BTreeSet};
-use tokio::io::AsyncWrite;
+use anyhow::{anyhow, Result};
+use async_compression::tokio::bufread::GzipEncoder;
+use std::ops::Range;
 
 pub(crate) struct BatchWriter {
-    frames: BTreeSet<u32>,
+    frames: Range<u32>,
+    last_frame_crc: u64,
     use_compression: bool,
 }
 
 impl BatchWriter {
-    pub fn new(use_compression: bool) -> Self {
+    pub fn new(use_compression: bool, frames: Range<u32>) -> Self {
         BatchWriter {
+            last_frame_crc: 0,
             use_compression,
-            frames: BTreeSet::default(),
+            frames,
         }
     }
 
-    pub fn attach(&mut self, frame_no: u32) {
-        self.frames.insert(frame_no);
+    pub fn last_frame_crc(&self) -> u64 {
+        self.last_frame_crc
     }
 
-    pub async fn finalize<W>(self, wal: &mut WalFileReader, writer: &mut W) -> Result<u32>
-    where
-        W: AsyncWrite + Unpin,
-    {
-        if self.frames.is_empty() {
+    pub async fn flush(&mut self, wal: &mut WalFileReader) -> Result<Option<Vec<u8>>> {
+        if self.frames.len() == 0 {
             tracing::trace!("Attempting to flush an empty buffer");
-            return Ok(0);
+            return Ok(None);
         }
-
-        let mut page = vec![0u8; wal.page_size() as usize];
-        for frame_no in self.frames {
-            wal.seek_frame(frame_no).await?;
-            let header = wal.read_frame(&mut page).await?;
-            if self.use_compression {
-            } else {
-            }
+        wal.seek_frame(self.frames.start).await?;
+        let capacity = self.frames.len() * wal.frame_size() as usize;
+        let mut buf = Vec::with_capacity(capacity);
+        unsafe { buf.set_len(capacity) }; // we require to fill entire buffer anyway
+        let frames_read = wal.read_frame_range(buf.as_mut()).await?;
+        if frames_read != self.frames.len() {
+            return Err(anyhow!(
+                "Specified write request was {} frames, but only {} were found in WAL.",
+                self.frames.len(),
+                frames_read
+            ));
         }
-
-        todo!()
+        self.last_frame_crc = {
+            let last_frame_offset = (frames_read - 1) * wal.frame_size() as usize;
+            let header: [u8; WalFrameHeader::SIZE as usize] = (&buf
+                [last_frame_offset..(last_frame_offset + WalFrameHeader::SIZE as usize)])
+                .try_into()
+                .unwrap();
+            WalFrameHeader::from(header).crc
+        };
+        let data = if self.use_compression {
+            let mut gzip = GzipEncoder::new(&buf[..]);
+            let mut compressed = Vec::with_capacity(capacity);
+            tokio::io::copy(&mut gzip, &mut compressed).await?;
+            tracing::trace!(
+                "Compressed {} frames into {}B)",
+                frames_read,
+                compressed.len()
+            );
+            compressed
+        } else {
+            buf
+        };
+        Ok(Some(data))
     }
-}
-
-#[derive(Debug, Clone)]
-pub(crate) struct Options {
-    pub use_compression: bool,
-    pub page_size: usize,
 }

@@ -1,19 +1,17 @@
-use crate::wal::{crc64, WalFrameHeader};
+use crate::wal::WalFrameHeader;
 use anyhow::{anyhow, Result};
 use async_compression::tokio::bufread::GzipDecoder;
 use aws_sdk_s3::primitives::ByteStream;
 use bytes::Bytes;
-use futures::TryStreamExt;
-use std::io::{Cursor, ErrorKind};
-use tokio::io::{AsyncReadExt, BufReader};
+use std::io::ErrorKind;
+use tokio::io::{AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio_util::io::StreamReader;
 
 #[derive(Debug)]
 pub(crate) struct BatchReader {
     next_frame_no: u32,
-    last_crc: u64,
+    page_size: usize,
     use_compression: bool,
-    verify_crc: bool,
     reader: BufReader<StreamReader<ByteStream, Bytes>>,
 }
 
@@ -21,16 +19,16 @@ impl BatchReader {
     pub fn new(
         key: &str,
         content: ByteStream,
+        page_size: usize,
         use_compression: bool,
-        verify_crc: bool,
     ) -> Result<Self> {
-        if let Some((init_frame_no, init_crc)) = Self::parse_frame_crc(key) {
+        if let Some(init_frame_no) = Self::parse_frame(key) {
+            let frame_size = page_size + WalFrameHeader::SIZE as usize;
             Ok(BatchReader {
                 next_frame_no: init_frame_no,
-                last_crc: init_crc,
+                page_size,
                 use_compression,
-                verify_crc,
-                reader: BufReader::new(StreamReader::new(content)),
+                reader: BufReader::with_capacity(frame_size, StreamReader::new(content)),
             })
         } else {
             Err(anyhow!("Failed to parse frame batch: '{}'", key))
@@ -38,56 +36,45 @@ impl BatchReader {
     }
 
     // Parses the frame and page number from given key.
-    // Format: <db-name>-<generation>/<frame-number>-<prev-crc64>
-    fn parse_frame_crc(key: &str) -> Option<(u32, u64)> {
-        let checksum_delim = key.rfind('-')?;
-        let frame_delim = key[0..checksum_delim].rfind('/')?;
-        let frame_no = key[frame_delim + 1..checksum_delim].parse::<u32>().ok()?;
-        let crc = u64::from_str_radix(&key[checksum_delim + 1..], 16).ok()?;
-        Some((frame_no, crc))
+    // Format: <db-name>-<generation>/<first-frame-number>
+    fn parse_frame(key: &str) -> Option<u32> {
+        let frame_delim = key.rfind('/')?;
+        let frame_no = key[(frame_delim + 1)..].parse::<u32>().ok()?;
+        Some(frame_no)
     }
 
-    /// Reads the next page stored in a current batch. Provided `page_buffer` length must the
-    /// the same as expected page size.
-    pub async fn next_frame(&mut self, page_buffer: &mut [u8]) -> Result<Option<WalFrameHeader>> {
-        let mut frame_header = [0u8; WalFrameHeader::SIZE as usize];
-        let header = match self.reader.read_exact(frame_header.as_mut()).await {
-            Ok(_) => WalFrameHeader::from(frame_header),
-            Err(e) if e.kind() == ErrorKind::UnexpectedEof => return Ok(None),
-            Err(e) => return Err(e.into()),
-        };
-        let result = if !self.use_compression {
-            self.reader.read_exact(page_buffer).await
-        } else {
+    /// Reads next frame header without frame body (WAL page).
+    pub(crate) async fn next_frame_header(&mut self) -> Result<Option<WalFrameHeader>> {
+        let mut buf = [0u8; WalFrameHeader::SIZE as usize];
+        let res = if self.use_compression {
             let mut gzip = GzipDecoder::new(&mut self.reader);
-            gzip.read_exact(page_buffer).await
+            gzip.read_exact(&mut buf).await
+        } else {
+            self.reader.read_exact(&mut buf).await
         };
-        match result {
-            Ok(n) => {
-                if n != page_buffer.len() {
-                    return Err(anyhow!(
-                        "read non page aligned number of bytes: {}. Page size: {}",
-                        n,
-                        page_buffer.len()
-                    ));
-                }
-                if self.verify_crc {
-                    let crc = crc64(self.last_crc, page_buffer);
-                    if crc != header.crc {
-                        return Err(anyhow!(
-                            "Checksum verification failed for frame {}. Expected: {}. Actual: {}",
-                            self.next_frame_no,
-                            header.crc,
-                            crc,
-                        ));
-                    }
-                }
-                self.last_crc = header.crc;
-                self.next_frame_no += 1;
-                Ok(Some(header))
-            }
+        match res {
+            Ok(_) => Ok(Some(WalFrameHeader::from(buf))),
             Err(e) if e.kind() == ErrorKind::UnexpectedEof => Ok(None),
             Err(e) => Err(e.into()),
         }
+    }
+
+    /// Reads the next frame stored in a current batch.
+    /// Returns a frame number or `None` if no frame was remaining in the buffer.
+    pub(crate) async fn read_page<W>(&mut self, db_file: &mut W) -> Result<()>
+    where
+        W: AsyncWrite + Unpin,
+    {
+        let mut page = Vec::with_capacity(self.page_size);
+        unsafe { page.set_len(self.page_size) }; // we require to fill entire page anyway
+        if self.use_compression {
+            let mut gzip = GzipDecoder::new(&mut self.reader);
+            gzip.read_exact(&mut page).await?;
+        } else {
+            self.reader.read_exact(&mut page).await?;
+        };
+        db_file.write_all(&page).await?;
+        self.next_frame_no += 1;
+        Ok(())
     }
 }

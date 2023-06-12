@@ -1,11 +1,19 @@
+use crate::wal::WalFileReader;
+use crate::write::BatchWriter;
+use anyhow::anyhow;
+use arc_swap::ArcSwap;
 use aws_sdk_s3::error::SdkError;
 use aws_sdk_s3::operation::get_object::builders::GetObjectFluentBuilder;
 use aws_sdk_s3::operation::list_objects::builders::ListObjectsFluentBuilder;
+use aws_sdk_s3::operation::put_object::{PutObjectError, PutObjectOutput};
 use aws_sdk_s3::primitives::ByteStream;
 use aws_sdk_s3::Client;
 use bytes::{Bytes, BytesMut};
+use futures::future::try_join_all;
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicU32, AtomicUsize};
+use std::time::Duration;
 
 pub type Result<T> = anyhow::Result<T>;
 
@@ -21,20 +29,28 @@ struct Frame {
 #[derive(Debug)]
 pub struct Replicator {
     pub client: Client,
-    write_buffer: BTreeMap<u32, Frame>,
+
+    /// Frame number, incremented whenever a new frame is written from SQLite.
+    next_frame_no: u32,
+    /// Last frame which has been requested to be sent to S3.
+    /// Always: [last_sent_frame_no] <= [next_frame_no].
+    last_sent_frame_no: u32,
+    /// Last frame which has been confirmed as sent to S3.
+    /// Always: [last_committed_frame_no] <= [last_sent_frame_no].
+    last_committed_frame_no: u32,
+
+    wal: Option<WalFileReader>,
 
     pub page_size: usize,
     generation: uuid::Uuid,
     pub commits_in_current_generation: u32,
-    next_frame: u32,
     verify_crc: bool,
-    last_frame_crc: u64,
-    last_transaction_crc: u64,
     pub bucket: String,
     pub db_path: String,
     pub db_name: String,
 
     use_compression: bool,
+    max_frames_per_batch: usize,
 }
 
 #[derive(Debug)]
@@ -57,6 +73,8 @@ pub struct Options {
     pub use_compression: bool,
     pub aws_endpoint: Option<String>,
     pub bucket_name: String,
+    pub max_frames_per_batch: usize,
+    pub max_batch_interval: Duration,
 }
 
 impl Default for Options {
@@ -68,6 +86,8 @@ impl Default for Options {
             create_bucket_if_not_exists: false,
             verify_crc: true,
             use_compression: false,
+            max_batch_interval: Duration::from_secs(15),
+            max_frames_per_batch: 64,
             aws_endpoint,
             bucket_name,
         }
@@ -82,7 +102,6 @@ impl Replicator {
     }
 
     pub async fn create(options: Options) -> Result<Self> {
-        let write_buffer = BTreeMap::new();
         let mut loader = aws_config::from_env();
         if let Some(endpoint) = options.aws_endpoint.as_deref() {
             loader = loader.endpoint_url(endpoint);
@@ -114,19 +133,25 @@ impl Replicator {
 
         Ok(Self {
             client,
-            write_buffer,
             bucket,
             page_size: Self::UNSET_PAGE_SIZE,
             generation,
             commits_in_current_generation: 0,
-            next_frame: 1,
+            next_frame_no: 1,
+            last_sent_frame_no: 0,
+            last_committed_frame_no: 0,
             verify_crc: options.verify_crc,
-            last_frame_crc: 0,
-            last_transaction_crc: 0,
+            wal: None,
             db_path: String::new(),
             db_name: String::new(),
             use_compression: options.use_compression,
+            max_frames_per_batch: options.max_frames_per_batch,
         })
+    }
+
+    /// Returns number of frames waiting to be replicated.
+    pub fn pending_frames(&self) -> u32 {
+        self.next_frame_no - self.last_sent_frame_no - 1
     }
 
     // The database can use different page size - as soon as it's known,
@@ -178,10 +203,10 @@ impl Replicator {
     // Sets a generation for this replicator instance. This function
     // should be called if a generation number from S3-compatible storage
     // is reused in this session.
-    pub fn set_generation(&mut self, generation: uuid::Uuid) {
+    pub async fn set_generation(&mut self, generation: uuid::Uuid) {
         self.generation = generation;
         self.commits_in_current_generation = 0;
-        self.next_frame = 1; // New generation marks a new WAL
+        self.next_frame_no = 1; // New generation marks a new WAL
         tracing::debug!("Generation set to {}", self.generation);
     }
 
@@ -201,102 +226,77 @@ impl Replicator {
 
     // Returns the next free frame number for the replicated log
     fn next_frame(&mut self) -> u32 {
-        self.next_frame += 1;
-        self.next_frame - 1
+        self.next_frame_no += 1;
+        self.next_frame_no - 1
     }
 
     // Returns the current last valid frame in the replicated log
     pub fn peek_last_valid_frame(&self) -> u32 {
-        self.next_frame.saturating_sub(1)
+        self.next_frame_no.saturating_sub(1)
     }
 
     // Sets the last valid frame in the replicated log.
     pub fn register_last_valid_frame(&mut self, frame: u32) {
         if frame != self.peek_last_valid_frame() {
-            if self.next_frame != 1 {
+            if self.next_frame_no != 1 {
                 tracing::error!(
                     "[BUG] Local max valid frame is {}, while replicator thinks it's {}",
                     frame,
                     self.peek_last_valid_frame()
                 );
             }
-            self.next_frame = frame + 1
+            self.next_frame_no = frame + 1
         }
     }
 
     // Writes pages to a local in-memory buffer
     pub fn write(&mut self, pgno: u32, data: &[u8]) {
         let frame = self.next_frame();
-        let mut crc = CRC_64.digest_with_initial(self.last_frame_crc);
-        crc.update(data);
-        let crc = crc.finalize();
-        tracing::trace!(
-            "Writing page {}:{} at frame {}, crc: {}",
-            pgno,
-            data.len(),
-            frame,
-            crc
-        );
-        let mut bytes = BytesMut::new();
-        bytes.extend_from_slice(data);
-        self.write_buffer.insert(frame, Frame { pgno, bytes, crc });
-        self.last_frame_crc = crc;
+        tracing::trace!("Writing page {}:{} at frame {}", pgno, data.len(), frame);
     }
 
     // Sends pages participating in current transaction to S3.
     // Returns the frame number holding the last flushed page.
     pub async fn flush(&mut self) -> Result<u32> {
-        if self.write_buffer.is_empty() {
+        let frames = self.last_sent_frame_no..self.next_frame_no;
+        if frames.is_empty() {
             tracing::trace!("Attempting to flush an empty buffer");
             return Ok(0);
         }
-        tracing::trace!("Flushing {} frames", self.write_buffer.len());
+        tracing::trace!("Flushing {} frames", frames.len());
         self.commits_in_current_generation += 1;
-        let mut tasks = vec![];
-        // FIXME: instead of batches processed in bursts, better to allow X concurrent tasks with a semaphore
-        const CONCURRENCY: usize = 64;
-        let last_frame_in_transaction_crc = self.write_buffer.iter().last().unwrap().1.crc;
-        let write_buffer = std::mem::take(&mut self.write_buffer);
-        for (frame, Frame { pgno, bytes, crc }) in write_buffer.into_iter() {
-            let data = bytes;
-            if data.len() != self.page_size {
-                tracing::warn!("Unexpected truncated page of size {}", data.len())
+
+        let wal_file = {
+            if self.wal.is_none() {
+                self.wal = WalFileReader::open(&format!("{}-wal", &self.db_path)).await?;
             }
-
-            let key = format!(
-                "{}-{}/{:012}-{:012}-{:016x}",
-                self.db_name, self.generation, frame, pgno, crc
-            );
-
-            let body = if self.use_compression {
-                let mut compressor = async_compression::tokio::bufread::GzipEncoder::new(&data[..]);
-                let mut compressed: Vec<u8> = Vec::with_capacity(self.page_size);
-                tokio::io::copy(&mut compressor, &mut compressed).await?;
-                tracing::trace!("Flushing {} (compressed size: {})", key, compressed.len());
-                ByteStream::from(compressed)
+            if let Some(wal) = self.wal.as_mut() {
+                wal
             } else {
-                ByteStream::from(data.freeze())
-            };
-
-            tasks.push(
-                self.client
+                return Err(anyhow!("WAL file not found"));
+            }
+        };
+        for start in frames.step_by(self.max_frames_per_batch) {
+            let mut writer = BatchWriter::new(
+                self.use_compression,
+                start..(start + self.max_frames_per_batch as u32),
+            );
+            if let Some(body) = writer.flush(wal_file).await? {
+                let key = format!("{}-{}/{:012}", self.db_name, self.generation, start);
+                let task = self
+                    .client
                     .put_object()
                     .bucket(&self.bucket)
                     .key(key)
-                    .body(body)
-                    .send(),
-            );
-            if tasks.len() >= CONCURRENCY {
-                futures::future::try_join_all(std::mem::take(&mut tasks)).await?;
-                tasks.clear();
+                    .body(body.into())
+                    .send()
+                    .await?;
             }
         }
-        if !tasks.is_empty() {
-            futures::future::try_join_all(tasks).await?;
-        }
+        /*
         self.last_transaction_crc = last_frame_in_transaction_crc;
-        tracing::trace!("Last transaction crc: {}", self.last_transaction_crc);
-        Ok(self.next_frame - 1)
+        tracing::trace!("Last transaction crc: {}", self.last_transaction_crc);*/
+        Ok(self.next_frame_no - 1)
     }
 
     // Marks all recently flushed pages as committed and updates the frame number
@@ -320,26 +320,17 @@ impl Replicator {
             .send()
             .await?;
         tracing::trace!("Commit successful");
+        self.wal.take();
         Ok(())
     }
 
     // Drops uncommitted frames newer than given last valid frame
     pub fn rollback_to_frame(&mut self, last_valid_frame: u32) {
         // NOTICE: O(size), can be optimized to O(removed) if ever needed
-        self.write_buffer.retain(|&k, _| k <= last_valid_frame);
-        self.next_frame = last_valid_frame + 1;
-        self.last_frame_crc = self
-            .write_buffer
-            .iter()
-            .next_back()
-            .map(|entry| entry.1.crc)
-            .unwrap_or(self.last_transaction_crc);
-        tracing::debug!(
-            "Rolled back to {}, crc {} (last transaction crc = {})",
-            self.next_frame - 1,
-            self.last_frame_crc,
-            self.last_transaction_crc,
-        );
+        self.next_frame_no = last_valid_frame + 1;
+        self.last_sent_frame_no = self.last_sent_frame_no.min(last_valid_frame);
+        self.last_committed_frame_no = self.last_committed_frame_no.min(last_valid_frame);
+        tracing::debug!("Rolled back to {}", self.next_frame_no - 1,);
     }
 
     // Tries to read the local change counter from the given database file
@@ -430,10 +421,10 @@ impl Replicator {
         if last_written_frame > 0 {
             self.finalize_commit(last_written_frame, checksum).await?;
         }
-        if !self.write_buffer.is_empty() {
-            tracing::warn!("Uncommited WAL entries: {}", self.write_buffer.len());
+        let pending_frames = self.pending_frames();
+        if pending_frames != 0 {
+            tracing::warn!("Uncommited WAL entries: {}", pending_frames);
         }
-        self.write_buffer.clear();
         tracing::info!("Local WAL replicated");
         Ok(())
     }
@@ -697,7 +688,7 @@ impl Replicator {
                         tracing::info!(
                             "Remote generation is up-to-date, reusing it in this session"
                         );
-                        self.next_frame = wal_pages + 1;
+                        self.next_frame_no = wal_pages + 1;
                         return Ok(RestoreAction::ReuseGeneration(generation));
                     }
                     Ordering::Greater => {

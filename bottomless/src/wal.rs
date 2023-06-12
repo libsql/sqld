@@ -100,6 +100,10 @@ impl WalFileReader {
         self.header.page_size
     }
 
+    pub fn frame_size(&self) -> u64 {
+        WalFrameHeader::SIZE + (self.page_size() as u64)
+    }
+
     /// Returns checksum stored in WAL file header.
     pub fn checksum(&self) -> u64 {
         self.header.crc
@@ -107,7 +111,7 @@ impl WalFileReader {
 
     /// Returns an offset in a WAL file, where the data of a frame with given number starts.
     pub fn offset_in_wal(&self, frame_no: u32) -> u64 {
-        WalHeader::SIZE + ((frame_no - 1) as u64) * (WalFrameHeader::SIZE + self.page_size() as u64)
+        WalHeader::SIZE + ((frame_no - 1) as u64) * self.frame_size()
     }
 
     /// Returns a number of pages stored in current WAL file.
@@ -116,7 +120,7 @@ impl WalFileReader {
         if len < WalHeader::SIZE {
             0
         } else {
-            ((len - WalHeader::SIZE) / (WalFrameHeader::SIZE + self.page_size() as u64)) as u32
+            ((len - WalHeader::SIZE) / self.frame_size()) as u32
         }
     }
 
@@ -152,6 +156,28 @@ impl WalFileReader {
         let frame_header = self.read_frame_header().await?;
         self.file.read_exact(page).await?;
         Ok(frame_header)
+    }
+
+    /// Reads a range of next consecutive frames, including headers, into given buffer.
+    /// Returns a number of frames read this way.
+    ///
+    /// # Errors
+    ///
+    /// This function will propagate any WAL file I/O errors.
+    /// It will return an error if provided `buf` length is not multiplication of an underlying
+    /// WAL frame size.
+    /// It will return an error if at least one frame was not fully read.
+    pub async fn read_frame_range(&mut self, buf: &mut [u8]) -> Result<usize> {
+        let frame_size = self.frame_size() as usize;
+        if buf.len() % frame_size != 0 {
+            return Err(anyhow!("Provided buffer doesn't fit full frames"));
+        }
+        let read = self.file.read_exact(buf).await?;
+        if read % frame_size != 0 {
+            Err(anyhow!("Some of the read frames where not complete"))
+        } else {
+            Ok(read / frame_size)
+        }
     }
 }
 
