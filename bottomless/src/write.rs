@@ -27,6 +27,12 @@ impl BatchWriter {
             tracing::trace!("Attempting to flush an empty buffer");
             return Ok(None);
         }
+        tracing::trace!(
+            "Flushing frames: {}..{} (total: {} frames)",
+            self.frames.start,
+            self.frames.end,
+            self.frames.len()
+        );
         wal.seek_frame(self.frames.start).await?;
         let capacity = self.frames.len() * wal.frame_size() as usize;
         let mut buf = Vec::with_capacity(capacity);

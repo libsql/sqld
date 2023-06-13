@@ -258,7 +258,7 @@ pub extern "C" fn xFrames(
             return ffi::SQLITE_IOERR_WRITE;
         }
         for (pgno, data) in ffi::PageHdrIter::new(page_headers, page_size as usize) {
-            ctx.replicator.write(pgno, data);
+            ctx.replicator.write(pgno);
         }
 
         // TODO: flushing can be done even if is_commit == 0, in order to drain
@@ -294,12 +294,12 @@ pub extern "C" fn xFrames(
 
     let ctx = get_replicator_context(wal);
     if is_commit != 0 {
-        let frame_checksum = unsafe { (*wal).hdr.aFrameCksum };
+        let frame_checksum: [u8; 8] = unsafe { std::mem::transmute((*wal).hdr.aFrameCksum) };
 
         if let Err(e) = block_on!(
             ctx.runtime,
             ctx.replicator
-                .finalize_commit(last_consistent_frame, frame_checksum)
+                .finalize_commit(last_consistent_frame, u64::from_be_bytes(frame_checksum))
         ) {
             tracing::error!("Failed to finalize replication: {}", e);
             return ffi::SQLITE_IOERR_WRITE;

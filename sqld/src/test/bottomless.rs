@@ -2,21 +2,20 @@ use crate::{run_server, Config};
 use anyhow::Result;
 use libsql_client::{Connection, QueryResult, Statement, Value};
 use reqwest::StatusCode;
-use std::io::Write;
+use std::env;
 use std::net::ToSocketAddrs;
 use std::path::PathBuf;
 use std::time::Duration;
-use tokio::io::AsyncWriteExt;
 use tokio::time::sleep;
-use tracing_test::traced_test;
 use url::Url;
 
 #[tokio::test]
-#[traced_test]
 async fn backup_restore() {
+    let _ = env_logger::builder().is_test(true).try_init();
     const BUCKET: &str = "testbackuprestore";
     const PATH: &str = "backup_restore.sqld";
     const PORT: u16 = 15001;
+    const OPS: usize = 100;
 
     // assert that MinIO (S3 mockup) is up and doesn't keep data from previous test run
     assert_minio_ready().await;
@@ -56,7 +55,7 @@ async fn backup_restore() {
         .await
         .unwrap();
 
-        let stmts: Vec<_> = (0u32..100)
+        let stmts: Vec<_> = (0u32..OPS as u32)
             .map(|i| {
                 format!(
                     "INSERT INTO t(id, name) VALUES({}, '{}') ON CONFLICT (id) DO UPDATE SET name = '{}';",
@@ -94,14 +93,15 @@ async fn backup_restore() {
             .unwrap()
             .into_result_set()
             .unwrap();
-        assert_eq!(rs.rows.len(), 10, "unexpected number of rows");
+        assert_eq!(rs.rows.len(), OPS / 10, "unexpected number of rows");
         let mut i = 0;
+        let base = if OPS < 10 { 0 } else { OPS - 10 } as i64;
         for row in rs.rows.iter() {
             let id = row.cells["id"].clone();
             let name = row.cells["name"].clone();
             assert_eq!(
                 (id, name),
-                (Value::Integer(i), Value::Text((90 + i).to_string())),
+                (Value::Integer(i), Value::Text((base + i).to_string())),
                 "unexpected values for row {}",
                 i
             );

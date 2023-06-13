@@ -91,11 +91,22 @@ unsafe impl WalHook for ReplicationLoggerHook {
             return SQLITE_IOERR;
         }
 
+        let rc = unsafe {
+            orig(
+                wal_ptr,
+                page_size,
+                page_headers,
+                ntruncate,
+                is_commit,
+                sync_flags,
+            )
+        };
+
         // FIXME: instead of block_on, we should consider replicating asynchronously in the background,
         // e.g. by sending the data to another fiber by an unbounded channel (which allows sync insertions).
         #[allow(clippy::await_holding_lock)] // uncontended -> only gets called under a libSQL write lock
         #[cfg(feature = "bottomless")]
-        let last_consistent_frame = {
+        if rc == 0 {
             let runtime = tokio::runtime::Handle::current();
             if let Some(replicator) = ctx.bottomless_replicator.as_mut() {
                 match runtime.block_on(async move {
@@ -108,51 +119,28 @@ unsafe impl WalHook for ReplicationLoggerHook {
                     // supported by bottomless storage.
                     replicator.set_page_size(page_size as usize)?;
                     for (pgno, data) in PageHdrIter::new(page_headers, page_size as usize) {
-                        replicator.write(pgno, data);
+                        replicator.write(pgno);
                     }
 
-                    replicator.flush().await
+                    let last_consistent_frame = replicator.flush().await?;
+                    if is_commit != 0 {
+                        let checksum = unsafe { std::mem::transmute(frame_checksum) };
+                        replicator
+                            .finalize_commit(last_consistent_frame, u64::from_be_bytes(checksum))
+                            .await?;
+                    }
+                    Ok::<(), anyhow::Error>(())
                 }) {
-                    Ok(last_consistent_frame) => last_consistent_frame,
+                    Ok(()) => {}
                     Err(e) => {
                         tracing::error!("error writing to bottomless: {e}");
                         return SQLITE_IOERR_WRITE;
                     }
                 }
-            } else {
-                0
             }
-        };
-
-        let rc = unsafe {
-            orig(
-                wal_ptr,
-                page_size,
-                page_headers,
-                ntruncate,
-                is_commit,
-                sync_flags,
-            )
-        };
+        }
 
         if is_commit != 0 && rc == 0 {
-            #[allow(clippy::await_holding_lock)] // uncontended -> only gets called under a libSQL write lock
-            #[cfg(feature = "bottomless")]
-            {
-                let runtime = tokio::runtime::Handle::current();
-                if let Some(replicator) = ctx.bottomless_replicator.as_mut() {
-                    if let Err(e) = runtime.block_on(async move {
-                        let mut replicator = replicator.lock().unwrap();
-                        replicator
-                            .finalize_commit(last_consistent_frame, frame_checksum)
-                            .await
-                    }) {
-                        tracing::error!("error writing to bottomless: {e}");
-                        return SQLITE_IOERR_WRITE;
-                    }
-                }
-            }
-
             if let Err(e) = ctx.commit() {
                 // If we reach this point, it means that we have commited a transaction to sqlite wal,
                 // but failed to commit it to the shadow WAL, which leaves us in an inconsistent state.

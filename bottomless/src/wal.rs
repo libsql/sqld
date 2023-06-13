@@ -1,5 +1,6 @@
 use anyhow::{anyhow, Result};
 use std::io::SeekFrom;
+use std::mem::MaybeUninit;
 use std::path::Path;
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
 
@@ -25,21 +26,41 @@ pub(crate) struct WalFrameHeader {
 
 impl WalFrameHeader {
     pub const SIZE: u64 = 24;
+
+    /// In multi-page transactions, only the last page in the transaction contains
+    /// the size_after_transaction field. If it's zero, it means it's an uncommited
+    /// page.
+    pub fn is_committed(&self) -> bool {
+        self.size_after != 0
+    }
 }
 
 impl From<[u8; WalFrameHeader::SIZE as usize]> for WalFrameHeader {
-    fn from(value: [u8; WalFrameHeader::SIZE as usize]) -> Self {
-        unsafe { std::mem::transmute(value) }
+    fn from(v: [u8; WalFrameHeader::SIZE as usize]) -> Self {
+        WalFrameHeader {
+            pgno: u32::from_be_bytes([v[0], v[1], v[2], v[3]]),
+            size_after: u32::from_be_bytes([v[4], v[5], v[6], v[7]]),
+            salt: u64::from_be_bytes([v[8], v[9], v[10], v[11], v[12], v[13], v[14], v[15]]),
+            crc: u64::from_be_bytes([v[16], v[17], v[18], v[19], v[20], v[21], v[22], v[23]]),
+        }
     }
 }
 
 impl Into<[u8; WalFrameHeader::SIZE as usize]> for WalFrameHeader {
     fn into(self) -> [u8; WalFrameHeader::SIZE as usize] {
-        unsafe { std::mem::transmute(self) }
+        let mut result = [0u8; WalFrameHeader::SIZE as usize];
+        let d = result.as_mut_ptr() as *mut u8;
+        unsafe {
+            std::ptr::copy_nonoverlapping(self.pgno.to_be_bytes().as_ptr(), d, 4);
+            std::ptr::copy_nonoverlapping(self.size_after.to_be_bytes().as_ptr(), d.add(4), 4);
+            std::ptr::copy_nonoverlapping(self.salt.to_be_bytes().as_ptr(), d.add(8), 8);
+            std::ptr::copy_nonoverlapping(self.crc.to_be_bytes().as_ptr(), d.add(16), 8);
+            result
+        }
     }
 }
 
-#[repr(C)]
+#[repr(C, packed)]
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub(crate) struct WalHeader {
     /// Magic number. 0x377f0682 or 0x377f0683
@@ -63,14 +84,16 @@ impl WalHeader {
 }
 
 impl From<[u8; WalHeader::SIZE as usize]> for WalHeader {
-    fn from(value: [u8; WalHeader::SIZE as usize]) -> Self {
-        unsafe { std::mem::transmute(value) }
-    }
-}
-
-impl Into<[u8; WalHeader::SIZE as usize]> for WalHeader {
-    fn into(self) -> [u8; WalHeader::SIZE as usize] {
-        unsafe { std::mem::transmute(self) }
+    fn from(v: [u8; WalHeader::SIZE as usize]) -> Self {
+        WalHeader {
+            magic_no: u32::from_be_bytes([v[0], v[1], v[2], v[3]]),
+            version: u32::from_be_bytes([v[4], v[5], v[6], v[7]]),
+            page_size: u32::from_be_bytes([v[8], v[9], v[10], v[11]]),
+            checkpoint_seq_no: u32::from_be_bytes([v[12], v[13], v[14], v[15]]),
+            salt_1: u32::from_be_bytes([v[16], v[17], v[18], v[19]]),
+            salt_2: u32::from_be_bytes([v[20], v[21], v[22], v[23]]),
+            crc: u64::from_be_bytes([v[24], v[25], v[26], v[27], v[28], v[29], v[30], v[31]]),
+        }
     }
 }
 
@@ -115,7 +138,7 @@ impl WalFileReader {
     }
 
     /// Returns a number of pages stored in current WAL file.
-    pub async fn page_count(&self) -> u32 {
+    pub async fn frame_count(&self) -> u32 {
         let len = self.file.metadata().await.map(|m| m.len()).unwrap_or(0);
         if len < WalHeader::SIZE {
             0
@@ -142,20 +165,21 @@ impl WalFileReader {
     }
 
     /// Reads a header of a WAL frame, filling the frame page data into provided slice buffer.
-    /// Slice size must be equal to WAL page size.
+    /// Slice size must be equal to WAL frame size.
     ///
     /// For reading specific frame use [WalFileReader::seek_frame] before calling this method.
-    pub async fn read_frame(&mut self, page: &mut [u8]) -> Result<WalFrameHeader> {
-        if page.len() != self.page_size() as usize {
+    pub async fn read_frame(&mut self, frame: &mut [u8]) -> Result<WalFrameHeader> {
+        if frame.len() != self.frame_size() as usize {
             return Err(anyhow!(
                 "Cannot read WAL frame page. Expected buffer size is {} bytes, provided buffer has {}",
-                self.page_size(),
-                page.len()
+                self.frame_size(),
+                frame.len()
             ));
         }
-        let frame_header = self.read_frame_header().await?;
-        self.file.read_exact(page).await?;
-        Ok(frame_header)
+        self.file.read_exact(frame).await?;
+        let frame_header: [u8; WalFrameHeader::SIZE as usize] =
+            frame[0..WalFrameHeader::SIZE as usize].try_into().unwrap();
+        Ok(WalFrameHeader::from(frame_header))
     }
 
     /// Reads a range of next consecutive frames, including headers, into given buffer.
@@ -200,17 +224,21 @@ mod test {
 
     #[test]
     fn wal_header_mem_mapping() {
-        let wh = WalHeader {
+        // copied from actual SQLite WAL file
+        let source = [
+            55, 127, 6, 130, 0, 45, 226, 24, 0, 0, 16, 0, 0, 0, 0, 0, 190, 6, 47, 124, 39, 191, 98,
+            92, 81, 22, 9, 209, 101, 96, 160, 157,
+        ];
+        let expected = WalHeader {
             magic_no: 0x377f0682,
             version: 3007000,
             page_size: 4096,
-            checkpoint_seq_no: 1,
-            salt_1: 1,
-            salt_2: 0xa1243b,
-            crc: 0x935baad,
+            checkpoint_seq_no: 0,
+            salt_1: 3188076412,
+            salt_2: 666853980,
+            crc: 5842868361513443485,
         };
-        let bin: [u8; WalHeader::SIZE as usize] = wh.clone().into();
-        let wh2 = WalHeader::from(bin);
-        assert_eq!(wh, wh2);
+        let actual = WalHeader::from(source);
+        assert_eq!(actual, expected);
     }
 }

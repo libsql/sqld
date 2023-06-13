@@ -3,44 +3,40 @@ use anyhow::{anyhow, Result};
 use async_compression::tokio::bufread::GzipDecoder;
 use aws_sdk_s3::primitives::ByteStream;
 use bytes::Bytes;
-use std::io::ErrorKind;
-use tokio::io::{AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
+use std::io::{ErrorKind, SeekFrom};
+use tokio::io::{AsyncReadExt, AsyncSeek, AsyncSeekExt, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio_util::io::StreamReader;
 
 #[derive(Debug)]
 pub(crate) struct BatchReader {
     next_frame_no: u32,
-    page_size: usize,
     use_compression: bool,
+    page_buf: Box<[u8]>, // Box over Vec to be sure its size won't change
     reader: BufReader<StreamReader<ByteStream, Bytes>>,
 }
 
 impl BatchReader {
     pub fn new(
-        key: &str,
+        init_frame_no: u32,
         content: ByteStream,
         page_size: usize,
         use_compression: bool,
-    ) -> Result<Self> {
-        if let Some(init_frame_no) = Self::parse_frame(key) {
-            let frame_size = page_size + WalFrameHeader::SIZE as usize;
-            Ok(BatchReader {
-                next_frame_no: init_frame_no,
-                page_size,
-                use_compression,
-                reader: BufReader::with_capacity(frame_size, StreamReader::new(content)),
-            })
-        } else {
-            Err(anyhow!("Failed to parse frame batch: '{}'", key))
+    ) -> Self {
+        let mut buf = Vec::with_capacity(page_size);
+        unsafe { buf.set_len(page_size) };
+        BatchReader {
+            next_frame_no: init_frame_no,
+            page_buf: buf.into_boxed_slice(),
+            use_compression,
+            reader: BufReader::with_capacity(
+                page_size + WalFrameHeader::SIZE as usize,
+                StreamReader::new(content),
+            ),
         }
     }
 
-    // Parses the frame and page number from given key.
-    // Format: <db-name>-<generation>/<first-frame-number>
-    fn parse_frame(key: &str) -> Option<u32> {
-        let frame_delim = key.rfind('/')?;
-        let frame_no = key[(frame_delim + 1)..].parse::<u32>().ok()?;
-        Some(frame_no)
+    fn page_size(&self) -> u64 {
+        self.page_buf.len() as u64
     }
 
     /// Reads next frame header without frame body (WAL page).
@@ -61,19 +57,19 @@ impl BatchReader {
 
     /// Reads the next frame stored in a current batch.
     /// Returns a frame number or `None` if no frame was remaining in the buffer.
-    pub(crate) async fn read_page<W>(&mut self, db_file: &mut W) -> Result<()>
+    pub(crate) async fn restore_page<W>(&mut self, pgno: u32, db_file: &mut W) -> Result<()>
     where
-        W: AsyncWrite + Unpin,
+        W: AsyncWrite + AsyncSeek + Unpin,
     {
-        let mut page = Vec::with_capacity(self.page_size);
-        unsafe { page.set_len(self.page_size) }; // we require to fill entire page anyway
         if self.use_compression {
             let mut gzip = GzipDecoder::new(&mut self.reader);
-            gzip.read_exact(&mut page).await?;
+            gzip.read_exact(&mut self.page_buf).await?;
         } else {
-            self.reader.read_exact(&mut page).await?;
+            self.reader.read_exact(&mut self.page_buf).await?;
         };
-        db_file.write_all(&page).await?;
+        let offset = (pgno - 1) as u64 * self.page_size();
+        db_file.seek(SeekFrom::Start(offset)).await?;
+        db_file.write_all(&self.page_buf).await?;
         self.next_frame_no += 1;
         Ok(())
     }
