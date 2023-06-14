@@ -1,5 +1,6 @@
+use crate::replicator::crc;
 use anyhow::{anyhow, Result};
-use std::io::SeekFrom;
+use std::io::{ErrorKind, SeekFrom};
 use std::mem::MaybeUninit;
 use std::path::Path;
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
@@ -202,6 +203,33 @@ impl WalFileReader {
         } else {
             Ok(read / frame_size)
         }
+    }
+
+    /// Verifies entire WAL file with regards to frame headers checksums.
+    pub async fn checksum_verification(&mut self) -> Result<()> {
+        self.seek_frame(1).await?;
+        let mut page = vec![0u8; self.page_size() as usize];
+        let mut header = [0u8; WalFrameHeader::SIZE as usize];
+        let mut last_crc = self.checksum();
+        let mut frame_no = 1;
+        loop {
+            if let Err(e) = self.file.read_exact(&mut header).await {
+                if e.kind() == ErrorKind::UnexpectedEof {
+                    return Ok(());
+                }
+            }
+            self.file.read_exact(page.as_mut_slice()).await?;
+            let h = WalFrameHeader::from(header.clone());
+            let computed_crc = crc(last_crc, &page);
+            if computed_crc != h.crc {
+                return Err(panic!(
+                    "Failed checksum verification for frame no {}. Expected: {}. Got: {}",
+                    frame_no, h.crc, computed_crc
+                ));
+            }
+            frame_no += 1;
+        }
+        Ok(())
     }
 }
 

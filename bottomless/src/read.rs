@@ -1,3 +1,4 @@
+use crate::replicator::crc;
 use crate::wal::WalFrameHeader;
 use anyhow::Result;
 use async_compression::tokio::bufread::GzipDecoder;
@@ -8,8 +9,6 @@ use tokio::io::{
     AsyncRead, AsyncReadExt, AsyncSeek, AsyncSeekExt, AsyncWrite, AsyncWriteExt, BufReader,
 };
 use tokio_util::io::StreamReader;
-
-const CRC_64: crc::Crc<u64> = crc::Crc::<u64>::new(&crc::CRC_64_ECMA_182);
 
 type AsyncByteReader = dyn AsyncRead + Send + Sync;
 
@@ -83,9 +82,7 @@ impl BatchReader {
     {
         self.reader.read_exact(&mut self.page_buf).await?;
         if self.verify_crc {
-            let mut digest = CRC_64.digest_with_initial(self.prev_crc);
-            digest.update(&self.page_buf);
-            let crc = digest.finalize();
+            let crc = crc(self.prev_crc, &self.page_buf);
             if self.curr_crc == crc {
                 self.prev_crc = crc;
             } else {

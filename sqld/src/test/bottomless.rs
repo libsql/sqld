@@ -31,7 +31,7 @@ async fn backup_restore() {
         bottomless_replication: Some(bottomless::replicator::Options {
             create_bucket_if_not_exists: true,
             verify_crc: false,
-            use_compression: false,
+            use_compression: true,
             bucket_name: BUCKET.to_string(),
             ..Default::default()
         }),

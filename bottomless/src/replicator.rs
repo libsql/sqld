@@ -20,6 +20,13 @@ pub type Result<T> = anyhow::Result<T>;
 
 const CRC_64: crc::Crc<u64> = crc::Crc::<u64>::new(&crc::CRC_64_ECMA_182);
 
+/// Calculates checksum for SQLite page data.
+pub(crate) fn crc(prev_crc: u64, page: &[u8]) -> u64 {
+    let mut digest = CRC_64.digest_with_initial(prev_crc);
+    digest.update(page);
+    digest.finalize()
+}
+
 #[derive(Debug)]
 struct Frame {
     pgno: u32,
@@ -250,9 +257,12 @@ impl Replicator {
         }
     }
 
-    // Writes pages to a local in-memory buffer
+    /// Submit next `frame_count` of frames to be replicated.
     pub fn submit_frames(&mut self, frame_count: u32) {
-        self.next_frame_no += frame_count;
+        let prev = self.next_frame_no;
+        let next = prev + frame_count;
+        self.next_frame_no = next;
+        tracing::trace!("Submitted frames {}..{} for replication", prev, next);
     }
 
     // Sends pages participating in current transaction to S3.
@@ -276,6 +286,7 @@ impl Replicator {
                 return Err(anyhow!("WAL file not found: {}-wal", &self.db_path));
             }
         };
+        //wal_file.checksum_verification().await?;
         for start in frames.clone().step_by(self.max_frames_per_batch) {
             let end = (start + self.max_frames_per_batch as u32).min(frames.end);
             let mut writer = BatchWriter::new(self.use_compression, start..end);
@@ -669,7 +680,7 @@ impl Replicator {
                     break;
                 }
             };
-            let mut prev_crc = checksum;
+            let mut prev_crc = 0;
             for obj in objs {
                 let key = obj
                     .key()
@@ -708,6 +719,12 @@ impl Replicator {
                     crc,
                 );
                 while let Some(frame) = reader.next_frame_header().await? {
+                    tracing::debug!(
+                        "Restoring next frame {} as main db page {}, crc: {}",
+                        frameno,
+                        frame.pgno,
+                        frame.crc
+                    );
                     reader.restore_page(frame.pgno, &mut main_db_writer).await?;
                     tracing::debug!("Written frame {} as main db page {}", frameno, frame.pgno);
                     prev_crc = frame.crc;
