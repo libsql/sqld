@@ -82,15 +82,6 @@ pub extern "C" fn xOpen(
         }
     };
 
-    let replicator = block_on!(runtime, replicator::Replicator::new());
-    let mut replicator = match replicator {
-        Ok(repl) => repl,
-        Err(e) => {
-            tracing::error!("Failed to initialize replicator: {}", e);
-            return ffi::SQLITE_CANTOPEN;
-        }
-    };
-
     let path = unsafe {
         match std::ffi::CStr::from_ptr(wal_name).to_str() {
             Ok(path) if path.len() >= 4 => &path[..path.len() - 4],
@@ -102,7 +93,15 @@ pub extern "C" fn xOpen(
         }
     };
 
-    replicator.register_db(path);
+    let replicator = block_on!(runtime, replicator::Replicator::new(path));
+    let mut replicator = match replicator {
+        Ok(repl) => repl,
+        Err(e) => {
+            tracing::error!("Failed to initialize replicator: {}", e);
+            return ffi::SQLITE_CANTOPEN;
+        }
+    };
+
     let rc = block_on!(runtime, try_restore(&mut replicator));
     if rc != ffi::SQLITE_OK {
         return rc;
@@ -488,12 +487,15 @@ pub extern "C" fn xPreMainDbOpen(_methods: *mut libsql_wal_methods, path: *const
 
     let replicator = block_on!(
         runtime,
-        replicator::Replicator::create(replicator::Options {
-            create_bucket_if_not_exists: true,
-            verify_crc: true,
-            use_compression: false,
-            ..Options::default()
-        })
+        replicator::Replicator::create(
+            path,
+            replicator::Options {
+                create_bucket_if_not_exists: true,
+                verify_crc: true,
+                use_compression: false,
+                ..Options::default()
+            }
+        )
     );
     let mut replicator = match replicator {
         Ok(repl) => repl,
@@ -502,8 +504,6 @@ pub extern "C" fn xPreMainDbOpen(_methods: *mut libsql_wal_methods, path: *const
             return ffi::SQLITE_CANTOPEN;
         }
     };
-
-    replicator.register_db(path);
     block_on!(runtime, try_restore(&mut replicator))
 }
 

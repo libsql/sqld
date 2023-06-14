@@ -222,9 +222,11 @@ impl WalFileReader {
             let h = WalFrameHeader::from(header.clone());
             let computed_crc = crc(last_crc, &page);
             if computed_crc != h.crc {
-                return Err(panic!(
+                return Err(anyhow!(
                     "Failed checksum verification for frame no {}. Expected: {}. Got: {}",
-                    frame_no, h.crc, computed_crc
+                    frame_no,
+                    h.crc,
+                    computed_crc
                 ));
             }
             frame_no += 1;

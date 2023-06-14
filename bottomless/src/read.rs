@@ -1,6 +1,6 @@
 use crate::replicator::crc;
 use crate::wal::WalFrameHeader;
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use async_compression::tokio::bufread::GzipDecoder;
 use aws_sdk_s3::primitives::ByteStream;
 use std::io::{ErrorKind, SeekFrom};
@@ -86,9 +86,11 @@ impl BatchReader {
             if self.curr_crc == crc {
                 self.prev_crc = crc;
             } else {
-                return Err(panic!(
+                return Err(anyhow!(
                     "Checksum verification failed for page: {}. Expected: {}, got: {}",
-                    pgno, self.curr_crc, crc
+                    pgno,
+                    self.curr_crc,
+                    crc
                 ));
             }
         }

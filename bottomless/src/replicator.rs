@@ -13,6 +13,7 @@ use bytes::{Bytes, BytesMut};
 use futures::future::try_join_all;
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
+use std::path::Path;
 use std::sync::atomic::{AtomicU32, AtomicUsize};
 use std::time::Duration;
 
@@ -80,6 +81,7 @@ pub struct Options {
     pub verify_crc: bool,
     pub use_compression: bool,
     pub aws_endpoint: Option<String>,
+    pub db_id: Option<String>,
     pub bucket_name: String,
     pub max_frames_per_batch: usize,
     pub max_batch_interval: Duration,
@@ -90,12 +92,14 @@ impl Default for Options {
         let aws_endpoint = std::env::var("LIBSQL_BOTTOMLESS_ENDPOINT").ok();
         let bucket_name =
             std::env::var("LIBSQL_BOTTOMLESS_BUCKET").unwrap_or_else(|_| "bottomless".to_string());
+        let db_id = std::env::var("LIBSQL_BOTTOMLESS_DATABASE_ID").ok();
         Options {
             create_bucket_if_not_exists: false,
             verify_crc: true,
             use_compression: false,
             max_batch_interval: Duration::from_secs(15),
             max_frames_per_batch: 64,
+            db_id,
             aws_endpoint,
             bucket_name,
         }
@@ -105,11 +109,11 @@ impl Default for Options {
 impl Replicator {
     pub const UNSET_PAGE_SIZE: usize = usize::MAX;
 
-    pub async fn new() -> Result<Self> {
-        Self::create(Options::default()).await
+    pub async fn new<S: Into<String>>(db_path: S) -> Result<Self> {
+        Self::create(db_path, Options::default()).await
     }
 
-    pub async fn create(options: Options) -> Result<Self> {
+    pub async fn create<S: Into<String>>(db_path: S, options: Options) -> Result<Self> {
         let mut loader = aws_config::from_env();
         if let Some(endpoint) = options.aws_endpoint.as_deref() {
             loader = loader.endpoint_url(endpoint);
@@ -139,6 +143,16 @@ impl Replicator {
             }
         }
 
+        let db_path = db_path.into();
+        let db_name = {
+            let mut db_id = options.db_id.unwrap_or_default();
+            let name = match db_path.rfind('/') {
+                Some(index) => &db_path[index + 1..],
+                None => &db_path,
+            };
+            db_id + name
+        };
+
         Ok(Self {
             client,
             bucket,
@@ -150,8 +164,8 @@ impl Replicator {
             last_committed_frame_no: 0,
             verify_crc: options.verify_crc,
             wal: None,
-            db_path: String::new(),
-            db_name: String::new(),
+            db_path,
+            db_name,
             use_compression: options.use_compression,
             max_frames_per_batch: options.max_frames_per_batch,
         })
@@ -222,20 +236,6 @@ impl Replicator {
         self.commits_in_current_generation = 0;
         self.reset_frames(0);
         tracing::debug!("Generation set to {}", self.generation);
-    }
-
-    // Registers a database path for this replicator.
-    pub fn register_db(&mut self, db_path: impl Into<String>) {
-        let db_path = db_path.into();
-        // An optional prefix to differentiate between databases with the same filename
-        let db_id = std::env::var("LIBSQL_BOTTOMLESS_DATABASE_ID").unwrap_or_default();
-        let name = match db_path.rfind('/') {
-            Some(index) => &db_path[index + 1..],
-            None => &db_path,
-        };
-        self.db_name = db_id + name;
-        self.db_path = db_path;
-        tracing::trace!("Registered {} (full path: {})", self.db_name, self.db_path);
     }
 
     // Returns the current last valid frame in the replicated log
