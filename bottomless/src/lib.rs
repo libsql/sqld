@@ -257,9 +257,8 @@ pub extern "C" fn xFrames(
             tracing::error!("{}", e);
             return ffi::SQLITE_IOERR_WRITE;
         }
-        for (pgno, data) in ffi::PageHdrIter::new(page_headers, page_size as usize) {
-            ctx.replicator.write(pgno);
-        }
+        let frame_count = ffi::PageHdrIter::new(page_headers, page_size as usize).count();
+        ctx.replicator.submit_frames(frame_count as u32);
 
         // TODO: flushing can be done even if is_commit == 0, in order to drain
         // the local cache and free its memory. However, that complicates rollbacks (xUndo),

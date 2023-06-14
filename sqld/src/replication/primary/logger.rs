@@ -118,9 +118,8 @@ unsafe impl WalHook for ReplicationLoggerHook {
                     // FIXME: changing the page size in the middle of operation is *not*
                     // supported by bottomless storage.
                     replicator.set_page_size(page_size as usize)?;
-                    for (pgno, data) in PageHdrIter::new(page_headers, page_size as usize) {
-                        replicator.write(pgno);
-                    }
+                    let frame_count = PageHdrIter::new(page_headers, page_size as usize).count();
+                    replicator.submit_frames(frame_count as u32);
 
                     let last_consistent_frame = replicator.flush().await?;
                     if is_commit != 0 {

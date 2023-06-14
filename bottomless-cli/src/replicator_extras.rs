@@ -116,10 +116,11 @@ impl Replicator {
                     println!("{uuid}");
                     if verbose {
                         let counter = self.get_remote_change_counter(&uuid).await?;
-                        let (consistent_frame, checksum) =
+                        let (page_size, consistent_frame, checksum) =
                             self.get_last_consistent_frame(&uuid).await?;
                         println!("\tcreated at (UTC):     {datetime}");
                         println!("\tchange counter:       {counter:?}");
+                        println!("\tpage size:            {page_size}");
                         println!("\tconsistent WAL frame: {consistent_frame}");
                         println!("\tWAL frame checksum:   {checksum:x}");
                         self.print_snapshot_summary(&uuid).await?;
@@ -260,10 +261,12 @@ impl Replicator {
             })?;
 
         let counter = self.get_remote_change_counter(&generation).await?;
-        let (consistent_frame, checksum) = self.get_last_consistent_frame(&generation).await?;
+        let (page_size, consistent_frame, checksum) =
+            self.get_last_consistent_frame(&generation).await?;
         println!("Generation {} for {}", generation, self.db_name);
         println!("\tcreated at:           {}", uuid_to_datetime(&generation));
         println!("\tchange counter:       {counter:?}");
+        println!("\tpage size:            {page_size}");
         println!("\tconsistent WAL frame: {consistent_frame}");
         println!("\tWAL frame checksum:   {checksum:x}");
         self.print_snapshot_summary(&generation).await?;

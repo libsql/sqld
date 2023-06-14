@@ -210,7 +210,7 @@ impl Replicator {
     // Sets a generation for this replicator instance. This function
     // should be called if a generation number from S3-compatible storage
     // is reused in this session.
-    pub async fn set_generation(&mut self, generation: uuid::Uuid) {
+    pub fn set_generation(&mut self, generation: uuid::Uuid) {
         self.generation = generation;
         self.commits_in_current_generation = 0;
         self.reset_frames(0);
@@ -229,12 +229,6 @@ impl Replicator {
         self.db_name = db_id + name;
         self.db_path = db_path;
         tracing::trace!("Registered {} (full path: {})", self.db_name, self.db_path);
-    }
-
-    // Returns the next free frame number for the replicated log
-    fn next_frame(&mut self) -> u32 {
-        self.next_frame_no += 1;
-        self.next_frame_no - 1
     }
 
     // Returns the current last valid frame in the replicated log
@@ -257,9 +251,8 @@ impl Replicator {
     }
 
     // Writes pages to a local in-memory buffer
-    pub fn write(&mut self, pgno: u32) {
-        let frame = self.next_frame();
-        tracing::trace!("Writing page {} at frame {}", pgno, frame);
+    pub fn submit_frames(&mut self, frame_count: u32) {
+        self.next_frame_no += frame_count;
     }
 
     // Sends pages participating in current transaction to S3.
@@ -312,7 +305,7 @@ impl Replicator {
         let last_consistent_frame_key = format!("{}-{}/.consistent", self.db_name, self.generation);
         tracing::trace!("Finalizing frame: {}, checksum: {}", last_frame, checksum);
         // Information kept in this entry: [last consistent frame number: 4 bytes][last checksum: 8 bytes]
-        let mut consistent_info = BytesMut::with_capacity(12);
+        let mut consistent_info = BytesMut::with_capacity(16);
         consistent_info.extend_from_slice(&(self.page_size as u32).to_be_bytes());
         consistent_info.extend_from_slice(&last_frame.to_be_bytes());
         consistent_info.extend_from_slice(&checksum.to_be_bytes());
@@ -392,7 +385,7 @@ impl Replicator {
         for i in 0..frame_count {
             wal_file.seek_frame(i).await?;
             let header = wal_file.read_frame_header().await?;
-            self.write(header.pgno);
+            self.submit_frames(1);
             if header.is_committed() {
                 last_written_frame = self.flush().await?;
             }
@@ -676,7 +669,7 @@ impl Replicator {
                     break;
                 }
             };
-            let mut prev_crc = 0;
+            let mut prev_crc = checksum;
             for obj in objs {
                 let key = obj
                     .key()
@@ -702,13 +695,23 @@ impl Replicator {
                                 frameno, last_consistent_frame);
                     break;
                 }
-                let mut reader =
-                    BatchReader::new(frameno, frame.body, self.page_size, self.use_compression);
+                let crc = if self.verify_crc {
+                    Some(prev_crc)
+                } else {
+                    None
+                };
+                let mut reader = BatchReader::new(
+                    frameno,
+                    frame.body,
+                    self.page_size,
+                    self.use_compression,
+                    crc,
+                );
                 while let Some(frame) = reader.next_frame_header().await? {
                     reader.restore_page(frame.pgno, &mut main_db_writer).await?;
+                    tracing::debug!("Written frame {} as main db page {}", frameno, frame.pgno);
                     prev_crc = frame.crc;
                     frameno += 1;
-                    tracing::debug!("Written frame {} as main db page {}", frameno, frame.pgno);
                 }
                 applied_wal_frame = true;
             }

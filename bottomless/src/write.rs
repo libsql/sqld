@@ -58,7 +58,7 @@ impl BatchWriter {
             let mut compressed = Vec::with_capacity(capacity);
             tokio::io::copy(&mut gzip, &mut compressed).await?;
             tracing::trace!(
-                "Compressed {} frames into {}B)",
+                "Compressed {} frames into {}B",
                 frames_read,
                 compressed.len()
             );

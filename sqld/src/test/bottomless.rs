@@ -2,7 +2,6 @@ use crate::{run_server, Config};
 use anyhow::Result;
 use libsql_client::{Connection, QueryResult, Statement, Value};
 use reqwest::StatusCode;
-use std::env;
 use std::net::ToSocketAddrs;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -93,7 +92,8 @@ async fn backup_restore() {
             .unwrap()
             .into_result_set()
             .unwrap();
-        assert_eq!(rs.rows.len(), OPS / 10, "unexpected number of rows");
+        const OPS_CEIL: usize = (OPS + 9) / 10;
+        assert_eq!(rs.rows.len(), OPS_CEIL, "unexpected number of rows");
         let mut i = 0;
         let base = if OPS < 10 { 0 } else { OPS - 10 } as i64;
         for row in rs.rows.iter() {
