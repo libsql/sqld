@@ -18,11 +18,7 @@ impl BatchWriter {
         }
     }
 
-    pub fn last_frame_crc(&self) -> u64 {
-        self.last_frame_crc
-    }
-
-    pub async fn flush(&mut self, wal: &mut WalFileReader) -> Result<Option<Vec<u8>>> {
+    pub async fn read_frames(&mut self, wal: &mut WalFileReader) -> Result<Option<Vec<u8>>> {
         if self.frames.len() == 0 {
             tracing::trace!("Attempting to flush an empty buffer");
             return Ok(None);

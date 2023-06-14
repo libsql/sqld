@@ -120,9 +120,12 @@ unsafe impl WalHook for ReplicationLoggerHook {
                     replicator.set_page_size(page_size as usize)?;
                     let frame_count = PageHdrIter::new(page_headers, page_size as usize).count();
                     replicator.submit_frames(frame_count as u32);
-
-                    let last_consistent_frame = replicator.flush().await?;
+                    let mut last_consistent_frame = last_valid_frame as u32 + frame_count as u32;
                     if is_commit != 0 {
+                        replicator.request_flush();
+                        last_consistent_frame = replicator
+                            .wait_until_committed(last_consistent_frame)
+                            .await?;
                         let checksum = unsafe { std::mem::transmute(frame_checksum) };
                         replicator
                             .finalize_commit(last_consistent_frame, u64::from_be_bytes(checksum))
@@ -259,7 +262,7 @@ unsafe impl WalHook for ReplicationLoggerHook {
             let runtime = tokio::runtime::Handle::current();
             if let Some(replicator) = ctx.bottomless_replicator.as_mut() {
                 let mut replicator = replicator.lock().unwrap();
-                if replicator.commits_in_current_generation == 0 {
+                if replicator.commits_in_current_generation() == 0 {
                     tracing::debug!("No commits happened in this generation, not snapshotting");
                     return SQLITE_OK;
                 }

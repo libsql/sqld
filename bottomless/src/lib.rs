@@ -265,13 +265,16 @@ pub extern "C" fn xFrames(
         // location. It's not complicated, but potentially costly in terms of latency,
         // so for now it is not yet implemented.
         if is_commit != 0 {
-            last_consistent_frame = match block_on!(ctx.runtime, ctx.replicator.flush()) {
-                Ok(frame) => frame,
-                Err(e) => {
-                    tracing::error!("Failed to replicate: {}", e);
-                    return ffi::SQLITE_IOERR_WRITE;
-                }
-            };
+            let frame_no = ctx.replicator.next_frame_no() - 1;
+            ctx.replicator.request_flush();
+            last_consistent_frame =
+                match block_on!(ctx.runtime, ctx.replicator.wait_until_committed(frame_no)) {
+                    Ok(frame) => frame,
+                    Err(e) => {
+                        tracing::error!("Failed to replicate: {}", e);
+                        return ffi::SQLITE_IOERR_WRITE;
+                    }
+                };
         }
     }
 
@@ -367,7 +370,7 @@ pub extern "C" fn xCheckpoint(
     }
 
     let ctx = get_replicator_context(wal);
-    if ctx.replicator.commits_in_current_generation == 0 {
+    if ctx.replicator.commits_in_current_generation() == 0 {
         tracing::debug!("No commits happened in this generation, not snapshotting");
         return ffi::SQLITE_OK;
     }

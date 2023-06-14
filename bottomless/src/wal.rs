@@ -1,7 +1,6 @@
 use crate::replicator::crc;
 use anyhow::{anyhow, Result};
 use std::io::{ErrorKind, SeekFrom};
-use std::mem::MaybeUninit;
 use std::path::Path;
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
 
@@ -231,7 +230,6 @@ impl WalFileReader {
             }
             frame_no += 1;
         }
-        Ok(())
     }
 }
 

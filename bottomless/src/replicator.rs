@@ -11,11 +11,17 @@ use aws_sdk_s3::primitives::ByteStream;
 use aws_sdk_s3::Client;
 use bytes::{Bytes, BytesMut};
 use futures::future::try_join_all;
-use std::cmp::Ordering;
 use std::collections::BTreeMap;
+use std::ops::{Deref, Range};
 use std::path::Path;
-use std::sync::atomic::{AtomicU32, AtomicUsize};
+use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::watch::error::RecvError;
+use tokio::sync::watch::{channel, Receiver, Sender};
+use tokio::time::error::Elapsed;
+use tokio::time::{timeout_at, Instant};
+use uuid::Uuid;
 
 pub type Result<T> = anyhow::Result<T>;
 
@@ -40,19 +46,18 @@ pub struct Replicator {
     pub client: Client,
 
     /// Frame number, incremented whenever a new frame is written from SQLite.
-    next_frame_no: u32,
+    next_frame_no: Arc<AtomicU32>,
     /// Last frame which has been requested to be sent to S3.
     /// Always: [last_sent_frame_no] <= [next_frame_no].
-    last_sent_frame_no: u32,
+    last_sent_frame_no: Arc<AtomicU32>,
     /// Last frame which has been confirmed as sent to S3.
     /// Always: [last_committed_frame_no] <= [last_sent_frame_no].
-    last_committed_frame_no: u32,
-
-    wal: Option<WalFileReader>,
+    last_committed_frame_no: Receiver<Result<u32>>,
+    flush_trigger: Sender<()>,
 
     pub page_size: usize,
-    generation: uuid::Uuid,
-    pub commits_in_current_generation: u32,
+    generation: Arc<ArcSwap<uuid::Uuid>>,
+    pub commits_in_current_generation: Arc<AtomicU32>,
     verify_crc: bool,
     pub bucket: String,
     pub db_path: String,
@@ -123,8 +128,8 @@ impl Replicator {
             .force_path_style(true)
             .build();
         let client = Client::from_conf(conf);
-        let generation = Self::generate_generation();
-        tracing::debug!("Generation {}", generation);
+        let generation = Arc::new(ArcSwap::new(Arc::new(Self::generate_generation())));
+        tracing::debug!("Generation {}", generation.load());
 
         match client.head_bucket().bucket(&bucket).send().await {
             Ok(_) => tracing::info!("Bucket {} exists and is accessible", bucket),
@@ -153,17 +158,62 @@ impl Replicator {
             db_id + name
         };
 
+        let (flush_trigger, mut flush_trigger_rx) = channel(());
+        let (last_committed_frame_no_sender, last_committed_frame_no) = channel(Ok(0));
+
+        let next_frame_no = Arc::new(AtomicU32::new(1));
+        let last_sent_frame_no = Arc::new(AtomicU32::new(0));
+        let commits_in_current_generation = Arc::new(AtomicU32::new(0));
+
+        let backup_job = {
+            let mut flush_manager = FlushManager::new(
+                client.clone(),
+                generation.clone(),
+                commits_in_current_generation.clone(),
+                format!("{}-wal", &db_path),
+                bucket.clone(),
+                db_name.clone(),
+                options.max_frames_per_batch,
+                options.use_compression,
+            );
+            let next_frame_no = next_frame_no.clone();
+            let last_sent_frame_no = last_sent_frame_no.clone();
+            let batch_interval = options.max_batch_interval;
+            tokio::spawn(async move {
+                loop {
+                    let mut timeout = Instant::now() + batch_interval;
+                    let trigger = match timeout_at(timeout, flush_trigger_rx.changed()).await {
+                        Ok(Ok(())) => true,
+                        Ok(Err(_)) => {
+                            return;
+                        }
+                        Err(_) => true, // timeout reached
+                    };
+                    if trigger {
+                        let next_frame = next_frame_no.load(Ordering::Acquire);
+                        let last_sent_frame =
+                            last_sent_frame_no.swap(next_frame, Ordering::Acquire);
+                        let frames = (last_sent_frame + 1)..next_frame;
+                        let res = flush_manager.flush(frames).await;
+                        if let Err(_) = last_committed_frame_no_sender.send(res) {
+                            return;
+                        }
+                    }
+                }
+            })
+        };
+
         Ok(Self {
             client,
             bucket,
             page_size: Self::UNSET_PAGE_SIZE,
             generation,
-            commits_in_current_generation: 0,
-            next_frame_no: 1,
-            last_sent_frame_no: 0,
-            last_committed_frame_no: 0,
+            commits_in_current_generation,
+            next_frame_no,
+            last_sent_frame_no,
+            flush_trigger,
+            last_committed_frame_no,
             verify_crc: options.verify_crc,
-            wal: None,
             db_path,
             db_name,
             use_compression: options.use_compression,
@@ -171,9 +221,38 @@ impl Replicator {
         })
     }
 
+    pub fn next_frame_no(&self) -> u32 {
+        self.next_frame_no.load(Ordering::Acquire)
+    }
+
+    pub fn last_sent_frame_no(&self) -> u32 {
+        self.last_sent_frame_no.load(Ordering::Acquire)
+    }
+
+    /// Waits until the commit for a given frame_no or higher was given.
+    pub async fn wait_until_committed(&mut self, frame_no: u32) -> Result<u32> {
+        loop {
+            {
+                let last_committed = self.last_committed_frame_no.borrow();
+                match last_committed.deref() {
+                    Ok(last_committed) if *last_committed >= frame_no => {
+                        return Ok(*last_committed)
+                    }
+                    Ok(_) => {}
+                    Err(e) => return Err(anyhow!("Failed to flush frames: {}", e)),
+                }
+            }
+            self.last_committed_frame_no.changed().await?;
+        }
+    }
+
+    pub fn commits_in_current_generation(&self) -> u32 {
+        self.commits_in_current_generation.load(Ordering::Acquire)
+    }
+
     /// Returns number of frames waiting to be replicated.
     pub fn pending_frames(&self) -> u32 {
-        self.next_frame_no - self.last_sent_frame_no - 1
+        self.next_frame_no() - self.last_sent_frame_no() - 1
     }
 
     // The database can use different page size - as soon as it's known,
@@ -205,9 +284,10 @@ impl Replicator {
     }
 
     fn reset_frames(&mut self, frame_no: u32) {
-        self.next_frame_no = frame_no + 1;
-        self.last_sent_frame_no = self.last_sent_frame_no.min(frame_no);
-        self.last_committed_frame_no = self.last_committed_frame_no.min(frame_no);
+        let last_sent = self.last_sent_frame_no();
+        self.next_frame_no.store(frame_no + 1, Ordering::Release);
+        self.last_sent_frame_no
+            .store(last_sent.min(frame_no), Ordering::Release);
     }
 
     // Generates a new generation UUID v7, which contains a timestamp and is binary-sortable.
@@ -232,25 +312,27 @@ impl Replicator {
     // should be called if a generation number from S3-compatible storage
     // is reused in this session.
     pub fn set_generation(&mut self, generation: uuid::Uuid) {
-        self.generation = generation;
-        self.commits_in_current_generation = 0;
+        self.generation.swap(Arc::new(generation));
+        self.commits_in_current_generation
+            .store(0, Ordering::Release);
         self.reset_frames(0);
         tracing::debug!("Generation set to {}", self.generation);
     }
 
     // Returns the current last valid frame in the replicated log
     pub fn peek_last_valid_frame(&self) -> u32 {
-        self.next_frame_no.saturating_sub(1)
+        self.next_frame_no().saturating_sub(1)
     }
 
     // Sets the last valid frame in the replicated log.
     pub fn register_last_valid_frame(&mut self, frame: u32) {
-        if frame != self.peek_last_valid_frame() {
-            if self.next_frame_no != 1 {
+        let last_valid_frame = self.peek_last_valid_frame();
+        if frame != last_valid_frame {
+            if last_valid_frame != 0 {
                 tracing::error!(
                     "[BUG] Local max valid frame is {}, while replicator thinks it's {}",
                     frame,
-                    self.peek_last_valid_frame()
+                    last_valid_frame
                 );
             }
             self.reset_frames(frame);
@@ -259,52 +341,17 @@ impl Replicator {
 
     /// Submit next `frame_count` of frames to be replicated.
     pub fn submit_frames(&mut self, frame_count: u32) {
-        let prev = self.next_frame_no;
-        let next = prev + frame_count;
-        self.next_frame_no = next;
-        tracing::trace!("Submitted frames {}..{} for replication", prev, next);
+        let prev = self.next_frame_no.fetch_add(frame_count, Ordering::SeqCst);
+        let last_sent = self.last_sent_frame_no();
+        let last_known = prev + frame_count - 1;
+        if last_known - last_sent >= self.max_frames_per_batch as u32 {
+            tracing::trace!("Triggering flush for frames {}..{}", last_sent, last_known);
+            self.request_flush();
+        }
     }
 
-    // Sends pages participating in current transaction to S3.
-    // Returns the frame number holding the last flushed page.
-    pub async fn flush(&mut self) -> Result<u32> {
-        let frames = (self.last_sent_frame_no + 1)..self.next_frame_no;
-        if frames.is_empty() {
-            tracing::trace!("Attempting to flush an empty buffer");
-            return Ok(0);
-        }
-        tracing::trace!("Flushing {} frames", frames.len());
-        self.commits_in_current_generation += 1;
-
-        let wal_file = {
-            if self.wal.is_none() {
-                self.wal = WalFileReader::open(&format!("{}-wal", &self.db_path)).await?;
-            }
-            if let Some(wal) = self.wal.as_mut() {
-                wal
-            } else {
-                return Err(anyhow!("WAL file not found: {}-wal", &self.db_path));
-            }
-        };
-        //wal_file.checksum_verification().await?;
-        for start in frames.clone().step_by(self.max_frames_per_batch) {
-            let end = (start + self.max_frames_per_batch as u32).min(frames.end);
-            let mut writer = BatchWriter::new(self.use_compression, start..end);
-            if let Some(body) = writer.flush(wal_file).await? {
-                let key = format!("{}-{}/{:012}", self.db_name, self.generation, start);
-                self.client
-                    .put_object()
-                    .bucket(&self.bucket)
-                    .key(key)
-                    .body(body.into())
-                    .send()
-                    .await?;
-            }
-        }
-        /*
-        self.last_transaction_crc = last_frame_in_transaction_crc;
-        tracing::trace!("Last transaction crc: {}", self.last_transaction_crc);*/
-        Ok(self.next_frame_no - 1)
+    pub fn request_flush(&self) {
+        let _ = self.flush_trigger.send(());
     }
 
     // Marks all recently flushed pages as committed and updates the frame number
@@ -335,7 +382,7 @@ impl Replicator {
     pub fn rollback_to_frame(&mut self, last_valid_frame: u32) {
         // NOTICE: O(size), can be optimized to O(removed) if ever needed
         self.reset_frames(last_valid_frame);
-        tracing::debug!("Rolled back to {}", self.next_frame_no - 1,);
+        tracing::debug!("Rolled back to {}", last_valid_frame);
     }
 
     // Tries to read the local change counter from the given database file
@@ -398,7 +445,8 @@ impl Replicator {
             let header = wal_file.read_frame_header().await?;
             self.submit_frames(1);
             if header.is_committed() {
-                last_written_frame = self.flush().await?;
+                self.request_flush();
+                last_written_frame = self.wait_until_committed(i).await?;
             }
         }
         if last_written_frame > 0 {
@@ -602,32 +650,32 @@ impl Replicator {
 
         let wal_pages = self.get_local_wal_page_count().await;
         match local_counter.cmp(&remote_counter) {
-            Ordering::Equal => {
+            std::cmp::Ordering::Equal => {
                 tracing::debug!(
                     "Consistent: {}; wal pages: {}",
                     last_consistent_frame,
                     wal_pages
                 );
                 match wal_pages.cmp(&last_consistent_frame) {
-                    Ordering::Equal => {
+                    std::cmp::Ordering::Equal => {
                         tracing::info!(
                             "Remote generation is up-to-date, reusing it in this session"
                         );
-                        self.next_frame_no = wal_pages + 1;
+                        self.reset_frames(wal_pages + 1);
                         return Ok(RestoreAction::ReuseGeneration(generation));
                     }
-                    Ordering::Greater => {
+                    std::cmp::Ordering::Greater => {
                         tracing::info!("Local change counter matches the remote one, but local WAL contains newer data, which needs to be replicated");
                         return Ok(RestoreAction::SnapshotMainDbFile);
                     }
-                    Ordering::Less => (),
+                    std::cmp::Ordering::Less => (),
                 }
             }
-            Ordering::Greater => {
+            std::cmp::Ordering::Greater => {
                 tracing::info!("Local change counter is larger than its remote counterpart - a new snapshot needs to be replicated");
                 return Ok(RestoreAction::SnapshotMainDbFile);
             }
-            Ordering::Less => (),
+            std::cmp::Ordering::Less => (),
         }
 
         tokio::fs::rename(&self.db_path, format!("{}.bottomless.backup", self.db_path))
@@ -737,6 +785,7 @@ impl Replicator {
                 .then(|| objs.last().map(|elem| elem.key().unwrap().to_string()))
                 .flatten();
             if next_marker.is_none() {
+                tracing::trace!("Restored DB from S3 backup using generation {}", generation);
                 break;
             }
         }
@@ -766,4 +815,78 @@ impl Replicator {
 pub struct Context {
     pub replicator: Replicator,
     pub runtime: tokio::runtime::Runtime,
+}
+
+struct FlushManager {
+    wal: Option<WalFileReader>,
+    client: Client,
+    use_compression: bool,
+    max_frames_per_batch: usize,
+    wal_path: String,
+    bucket: String,
+    db_name: String,
+    generation: Arc<ArcSwap<Uuid>>,
+    commits_in_current_generation: Arc<AtomicU32>,
+}
+
+impl FlushManager {
+    fn new(
+        client: Client,
+        generation: Arc<ArcSwap<Uuid>>,
+        commits_in_current_generation: Arc<AtomicU32>,
+        wal_path: String,
+        bucket: String,
+        db_name: String,
+        max_frames_per_batch: usize,
+        use_compression: bool,
+    ) -> Self {
+        FlushManager {
+            wal: None,
+            client,
+            use_compression,
+            max_frames_per_batch,
+            wal_path,
+            bucket,
+            db_name,
+            generation,
+            commits_in_current_generation,
+        }
+    }
+
+    async fn flush(&mut self, frames: Range<u32>) -> Result<u32> {
+        if frames.is_empty() {
+            tracing::trace!("Trying to flush empty frame range");
+            return Ok(frames.start - 1);
+        }
+        let wal_file = {
+            if self.wal.is_none() {
+                self.wal = WalFileReader::open(&self.wal_path).await?;
+            }
+            if let Some(wal) = self.wal.as_mut() {
+                wal
+            } else {
+                return Err(anyhow!("WAL file not found: {}", self.wal_path));
+            }
+        };
+        tracing::trace!("Flushing {} frames", frames.len());
+        self.commits_in_current_generation
+            .fetch_add(1, Ordering::SeqCst);
+        //wal_file.checksum_verification().await?;
+        for start in frames.clone().step_by(self.max_frames_per_batch) {
+            let end = (start + self.max_frames_per_batch as u32).min(frames.end);
+            let mut writer = BatchWriter::new(self.use_compression, start..end);
+            if let Some(body) = writer.read_frames(wal_file).await? {
+                let generation = self.generation.load();
+                let key = format!("{}-{}/{:012}", self.db_name, &generation, start);
+                self.client
+                    .put_object()
+                    .bucket(&self.bucket)
+                    .key(key)
+                    .body(body.into())
+                    .send()
+                    .await?;
+            }
+        }
+        Ok(frames.end - 1)
+    }
 }

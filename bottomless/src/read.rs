@@ -18,7 +18,6 @@ pub(crate) struct BatchReader {
     prev_crc: u64,
     curr_crc: u64,
     next_frame_no: u32,
-    use_compression: bool,
     verify_crc: bool,
 }
 
@@ -37,7 +36,6 @@ impl BatchReader {
             next_frame_no: init_frame_no,
             page_buf: buf.into_boxed_slice(),
             verify_crc,
-            use_compression,
             prev_crc: prev_crc.unwrap_or(0),
             curr_crc: 0,
             reader: if use_compression {
