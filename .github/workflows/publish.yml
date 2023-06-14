@@ -49,7 +49,7 @@ jobs:
     strategy:
       matrix:
         #unless we want windows binaries as well, keep the matrix as is
-        os: [ubuntu-latest, macos-latest]
+        os: [ubuntu-latest, macos-latest, macos-arm64]
         #os: [ubuntu-latest, windows-latest, macos-latest]
     runs-on: ${{ matrix.os }}
     steps:
@@ -159,7 +159,7 @@ jobs:
             protobuf-compiler
 
       - name: install dependencies (macos)
-        if: matrix.os == 'macos-latest'
+        if: startsWith(matrix.os, 'macos')
         run: |
           brew install llvm
           brew install pkg-config
@@ -183,11 +183,13 @@ jobs:
           popd
 
       - name: Zip artifact for deployment (macos)
-        if: matrix.os == 'macos-latest'
+        if: startsWith(matrix.os, 'macos')
         run: |
           uname -a
+          OS=$(uname -s)
+          ARCH=$(uname -m)
           pushd ./target/release
-          zip ../../sqld-${{ github.ref_name }}-darwin-x86.zip sqld
+          zip ../../sqld-${{ github.ref_name }}-$OS-$ARCH.zip sqld
           popd
 
 #      - uses: actions/upload-artifact@v3
@@ -213,5 +215,6 @@ jobs:
           fail_on_unmatched_files: false
           files: |
             sqld-${{ github.ref_name }}-linux-x86_64.tar.gz
-            sqld-${{ github.ref_name }}-darwin-x86.zip
+            sqld-${{ github.ref_name }}-Darwin-x86_64.zip
+            sqld-${{ github.ref_name }}-Darwin-arm64.zip
 
