@@ -50,7 +50,6 @@ jobs:
       matrix:
         #unless we want windows binaries as well, keep the matrix as is
         os: [ubuntu-latest, macos-latest, macos-arm64]
-        #os: [ubuntu-latest, windows-latest, macos-latest]
     runs-on: ${{ matrix.os }}
     steps:
       #for windows only, use correct newlines
@@ -162,7 +161,7 @@ jobs:
         if: startsWith(matrix.os, 'macos')
         run: |
           brew install llvm
-          brew install pkg-config
+          brew install pkg-config<<<<<<< publish-release
           brew install protobuf
 
       - name: Build sqld (linux/macos)

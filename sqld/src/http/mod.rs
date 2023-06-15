@@ -32,6 +32,7 @@ use crate::query_analysis::{predict_final_state, State, Statement};
 use crate::query_result_builder::QueryResultBuilder;
 use crate::stats::Stats;
 use crate::utils::services::idle_shutdown::IdleShutdownLayer;
+use crate::version;
 
 use self::result_builder::JsonHttpPayloadBuilder;
 use self::types::QueryObject;
@@ -231,8 +232,8 @@ async fn handle_request<D: Database>(
 }
 
 fn handle_version() -> Response<Body> {
-    let version = env!("CARGO_PKG_VERSION");
-    Response::new(Body::from(version.as_bytes()))
+    let version = version::version();
+    Response::new(Body::from(version))
 }
 
 // TODO: refactor
@@ -250,7 +251,7 @@ pub async fn run_http<D: Database>(
     tracing::info!("listening for HTTP requests on {addr}");
 
     fn trace_request<B>(req: &Request<B>, _span: &Span) {
-        tracing::info!("got request: {} {}", req.method(), req.uri());
+        tracing::debug!("got request: {} {}", req.method(), req.uri());
     }
     let service = ServiceBuilder::new()
         .option_layer(idle_shutdown_layer)
