@@ -33,6 +33,8 @@ pub enum BlockLevel {
     BlockWrites,
     /// Block both read and write SQL statements.
     BlockReads,
+    /// Block all SQL statements.
+    BlockEverything,
 }
 
 impl DatabaseConfigStore {

@@ -343,7 +343,7 @@ impl<'a> Connection<'a> {
         let max_block_level = match query.stmt.kind {
             StmtKind::Read | StmtKind::TxnBegin | StmtKind::Other => BlockLevel::BlockReads,
             StmtKind::Write => BlockLevel::BlockWrites,
-            StmtKind::TxnEnd => BlockLevel::BlockNothing,
+            StmtKind::TxnEnd => BlockLevel::BlockEverything,
         };
         self.config_store.check_block_level(max_block_level)?;
 
