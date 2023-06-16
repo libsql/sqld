@@ -14,6 +14,7 @@ use tokio::task::JoinSet;
 use tonic::transport::Channel;
 use utils::services::idle_shutdown::IdleShutdownLayer;
 
+use self::database::config::DatabaseConfigStore;
 use self::database::dump::loader::DumpLoader;
 use self::database::factory::DbFactory;
 use self::database::libsql::{open_db, LibSqlDbFactory};
@@ -293,6 +294,7 @@ async fn start_replica(
     join_set: &mut JoinSet<anyhow::Result<()>>,
     idle_shutdown_layer: Option<IdleShutdownLayer>,
     stats: Stats,
+    db_config_store: Arc<DatabaseConfigStore>,
 ) -> anyhow::Result<()> {
     let (channel, uri) = configure_rpc(config)?;
     let replicator = Replicator::new(
@@ -313,6 +315,7 @@ async fn start_replica(
         channel,
         uri,
         stats.clone(),
+        db_config_store,
         applied_frame_no_receiver,
         config.max_response_size,
     )
@@ -418,6 +421,7 @@ async fn start_primary(
     join_set: &mut JoinSet<anyhow::Result<()>>,
     idle_shutdown_layer: Option<IdleShutdownLayer>,
     stats: Stats,
+    db_config_store: Arc<DatabaseConfigStore>,
     db_is_dirty: bool,
 ) -> anyhow::Result<()> {
     let is_fresh_db = check_fresh_db(&config.db_path);
@@ -469,6 +473,7 @@ async fn start_primary(
             }
         },
         stats.clone(),
+        db_config_store,
         valid_extensions,
         config.max_response_size,
     )
@@ -615,9 +620,20 @@ pub async fn run_server(config: Config) -> anyhow::Result<()> {
 
         let stats = Stats::new(&config.db_path)?;
 
+        let db_config_store = Arc::new(
+            DatabaseConfigStore::load(&config.db_path).context("Could not load database config")?,
+        );
+
         match config.writer_rpc_addr {
             Some(_) => {
-                start_replica(&config, &mut join_set, idle_shutdown_layer, stats.clone()).await?
+                start_replica(
+                    &config,
+                    &mut join_set,
+                    idle_shutdown_layer,
+                    stats.clone(),
+                    db_config_store,
+                )
+                .await?
             }
             None => {
                 start_primary(
@@ -625,6 +641,7 @@ pub async fn run_server(config: Config) -> anyhow::Result<()> {
                     &mut join_set,
                     idle_shutdown_layer,
                     stats.clone(),
+                    db_config_store,
                     db_is_dirty,
                 )
                 .await?
