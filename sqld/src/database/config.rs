@@ -13,7 +13,7 @@ pub struct DatabaseConfigStore {
     config: Mutex<Arc<DatabaseConfig>>,
 }
 
-#[derive(Debug, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct DatabaseConfig {
     #[serde(default)]
     pub block_level: BlockLevel,
@@ -57,7 +57,11 @@ impl DatabaseConfigStore {
         }
     }
 
-    pub fn set(&self, config: DatabaseConfig) -> Result<()> {
+    pub fn get(&self) -> Arc<DatabaseConfig> {
+        self.config.lock().clone()
+    }
+
+    pub fn store(&self, config: DatabaseConfig) -> Result<()> {
         let data = serde_json::to_vec_pretty(&config)?;
         fs::write(&self.tmp_config_path, data)?;
         fs::rename(&self.tmp_config_path, &self.config_path)?;

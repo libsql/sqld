@@ -31,6 +31,7 @@ use sha256::try_digest;
 
 pub use sqld_libsql_bindings as libsql;
 
+mod admin_api;
 mod auth;
 pub mod database;
 mod error;
@@ -74,6 +75,7 @@ pub struct Config {
     pub http_auth: Option<String>,
     pub http_self_url: Option<String>,
     pub hrana_addr: Option<SocketAddr>,
+    pub admin_addr: Option<SocketAddr>,
     pub auth_jwt_key: Option<String>,
     pub backend: Backend,
     pub writer_rpc_addr: Option<String>,
@@ -110,6 +112,7 @@ impl Default for Config {
             http_auth: None,
             http_self_url: None,
             hrana_addr: None,
+            admin_addr: None,
             auth_jwt_key: None,
             backend: Backend::Libsql,
             writer_rpc_addr: None,
@@ -144,6 +147,7 @@ async fn run_service<D: Database>(
     join_set: &mut JoinSet<anyhow::Result<()>>,
     idle_shutdown_layer: Option<IdleShutdownLayer>,
     stats: Stats,
+    db_config_store: Arc<DatabaseConfigStore>,
 ) -> anyhow::Result<()> {
     let auth = get_auth(config)?;
 
@@ -194,6 +198,10 @@ async fn run_service<D: Database>(
                 .await
                 .context("Hrana listener failed")
         });
+    }
+
+    if let Some(addr) = config.admin_addr {
+        join_set.spawn(admin_api::run_admin_api(addr, db_config_store));
     }
 
     match &config.heartbeat_url {
@@ -315,7 +323,7 @@ async fn start_replica(
         channel,
         uri,
         stats.clone(),
-        db_config_store,
+        db_config_store.clone(),
         applied_frame_no_receiver,
         config.max_response_size,
     )
@@ -327,6 +335,7 @@ async fn start_replica(
         join_set,
         idle_shutdown_layer,
         stats,
+        db_config_store,
     )
     .await?;
 
@@ -473,7 +482,7 @@ async fn start_primary(
             }
         },
         stats.clone(),
-        db_config_store,
+        db_config_store.clone(),
         valid_extensions,
         config.max_response_size,
     )
@@ -494,7 +503,15 @@ async fn start_primary(
         ));
     }
 
-    run_service(db_factory, config, join_set, idle_shutdown_layer, stats).await?;
+    run_service(
+        db_factory,
+        config,
+        join_set,
+        idle_shutdown_layer,
+        stats,
+        db_config_store,
+    )
+    .await?;
 
     Ok(())
 }
