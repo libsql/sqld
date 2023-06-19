@@ -9,10 +9,13 @@ use aws_sdk_s3::operation::list_objects::builders::ListObjectsFluentBuilder;
 use aws_sdk_s3::primitives::ByteStream;
 use aws_sdk_s3::Client;
 use bytes::{Bytes, BytesMut};
+use std::collections::BTreeMap;
+use std::io::SeekFrom;
 use std::ops::{Deref, Range};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::io::AsyncSeekExt;
 use tokio::sync::watch::{channel, Receiver, Sender};
 use tokio::time::{timeout_at, Instant};
 use uuid::Uuid;
@@ -365,7 +368,7 @@ impl Replicator {
 
     // Tries to read the local change counter from the given database file
     async fn read_change_counter(reader: &mut tokio::fs::File) -> Result<[u8; 4]> {
-        use tokio::io::{AsyncReadExt, AsyncSeekExt};
+        use tokio::io::AsyncReadExt;
         let mut counter = [0u8; 4];
         reader.seek(std::io::SeekFrom::Start(24)).await?;
         reader.read_exact(&mut counter).await?;
@@ -374,8 +377,8 @@ impl Replicator {
 
     // Tries to read the local page size from the given database file
     async fn read_page_size(reader: &mut tokio::fs::File) -> Result<usize> {
-        use tokio::io::{AsyncReadExt, AsyncSeekExt};
-        reader.seek(std::io::SeekFrom::Start(16)).await?;
+        use tokio::io::AsyncReadExt;
+        reader.seek(SeekFrom::Start(16)).await?;
         let page_size = reader.read_u16().await?;
         if page_size == 1 {
             Ok(65536)
@@ -593,7 +596,7 @@ impl Replicator {
     }
 
     // Restores the database state from given remote generation
-    pub async fn restore_from(&mut self, generation: uuid::Uuid) -> Result<RestoreAction> {
+    pub async fn restore_from(&mut self, generation: Uuid) -> Result<RestoreAction> {
         use tokio::io::AsyncWriteExt;
 
         // Check if the database needs to be restored by inspecting the database
@@ -706,6 +709,7 @@ impl Replicator {
                 }
             };
             let mut prev_crc = 0;
+            let mut pending_pages = BTreeMap::new();
             for obj in objs {
                 let key = obj
                     .key()
@@ -736,25 +740,37 @@ impl Replicator {
                 } else {
                     None
                 };
-                let mut reader = BatchReader::new(
-                    frameno,
-                    frame.body,
-                    self.page_size,
-                    self.use_compression,
-                    crc,
-                );
+                let page_size = self.page_size;
+                let mut reader =
+                    BatchReader::new(frameno, frame.body, page_size, self.use_compression, crc);
                 while let Some(frame) = reader.next_frame_header().await? {
                     tracing::debug!(
-                        "Restoring next frame {} as main db page {}, crc: {}",
+                        "Restoring next frame {} as main db page {}",
                         frameno,
-                        frame.pgno,
-                        frame.crc
+                        frame.pgno
                     );
-                    reader.restore_page(frame.pgno, &mut main_db_writer).await?;
-                    tracing::debug!("Written frame {} as main db page {}", frameno, frame.pgno);
+                    let buf = pending_pages.entry(frame.pgno).or_insert_with(|| {
+                        let mut v = Vec::with_capacity(page_size);
+                        unsafe { v.set_len(page_size) };
+                        v
+                    });
+                    reader.next_page(buf.as_mut()).await?;
+                    if frame.is_committed() {
+                        let pending_pages = std::mem::replace(&mut pending_pages, BTreeMap::new());
+                        let page_count = pending_pages.len();
+                        for (pgno, data) in pending_pages {
+                            let offset = (pgno - 1) as u64 * (page_size as u64);
+                            main_db_writer.seek(SeekFrom::Start(offset)).await?;
+                            main_db_writer.write_all(&data).await?;
+                            // should we flush here? In theory if we don't recover fully we scrap
+                            // anyway
+                        }
+                        tracing::debug!("Restored {} pages into main DB file.", page_count);
+                    }
                     prev_crc = frame.crc;
                     frameno += 1;
                 }
+                main_db_writer.flush().await?;
                 applied_wal_frame = true;
             }
             next_marker = response
