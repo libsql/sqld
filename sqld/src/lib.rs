@@ -402,7 +402,7 @@ pub async fn init_bottomless_replicator(
         .to_str()
         .ok_or_else(|| anyhow::anyhow!("Invalid db path"))?
         .to_owned();
-    let mut replicator = bottomless::replicator::Replicator::create(path, options).await?;
+    let mut replicator = bottomless::replicator::Replicator::with_options(path, options).await?;
 
     match replicator.restore().await? {
         bottomless::replicator::RestoreAction::None => (),

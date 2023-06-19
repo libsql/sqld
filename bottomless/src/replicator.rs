@@ -8,7 +8,7 @@ use aws_sdk_s3::operation::get_object::builders::GetObjectFluentBuilder;
 use aws_sdk_s3::operation::list_objects::builders::ListObjectsFluentBuilder;
 use aws_sdk_s3::operation::list_objects::ListObjectsOutput;
 use aws_sdk_s3::primitives::ByteStream;
-use aws_sdk_s3::Client;
+use aws_sdk_s3::{Client, Config};
 use bytes::{Buf, Bytes, BytesMut};
 use std::collections::BTreeMap;
 use std::io::SeekFrom;
@@ -74,6 +74,19 @@ pub struct Options {
     pub max_batch_interval: Duration,
 }
 
+impl Options {
+    pub async fn client_config(&self) -> Config {
+        let mut loader = aws_config::from_env();
+        if let Some(endpoint) = self.aws_endpoint.as_deref() {
+            loader = loader.endpoint_url(endpoint);
+        }
+        let config = aws_sdk_s3::config::Builder::from(&loader.load().await)
+            .force_path_style(true)
+            .build();
+        config
+    }
+}
+
 impl Default for Options {
     fn default() -> Self {
         let aws_endpoint = std::env::var("LIBSQL_BOTTOMLESS_ENDPOINT").ok();
@@ -97,19 +110,13 @@ impl Replicator {
     pub const UNSET_PAGE_SIZE: usize = usize::MAX;
 
     pub async fn new<S: Into<String>>(db_path: S) -> Result<Self> {
-        Self::create(db_path, Options::default()).await
+        Self::with_options(db_path, Options::default()).await
     }
 
-    pub async fn create<S: Into<String>>(db_path: S, options: Options) -> Result<Self> {
-        let mut loader = aws_config::from_env();
-        if let Some(endpoint) = options.aws_endpoint.as_deref() {
-            loader = loader.endpoint_url(endpoint);
-        }
+    pub async fn with_options<S: Into<String>>(db_path: S, options: Options) -> Result<Self> {
+        let config = options.client_config().await;
+        let client = Client::from_conf(config);
         let bucket = options.bucket_name.clone();
-        let conf = aws_sdk_s3::config::Builder::from(&loader.load().await)
-            .force_path_style(true)
-            .build();
-        let client = Client::from_conf(conf);
         let generation = Arc::new(ArcSwap::new(Arc::new(Self::generate_generation())));
         tracing::debug!("Generation {}", generation.load());
 
@@ -762,7 +769,7 @@ impl Replicator {
         self.restore_from(newest_generation).await
     }
 
-    async fn get_last_consistent_frame(&self, generation: &Uuid) -> Result<u32> {
+    pub async fn get_last_consistent_frame(&self, generation: &Uuid) -> Result<u32> {
         let prefix = format!("{}-{}/", self.db_name, generation);
         let mut marker: Option<String> = None;
         let mut last_frame = 0;
@@ -788,7 +795,7 @@ impl Replicator {
         Some(key.to_string())
     }
 
-    async fn store_metadata(&self, page_size: u32, crc: u64) -> Result<()> {
+    pub async fn store_metadata(&self, page_size: u32, crc: u64) -> Result<()> {
         let key = format!("{}-{}/.meta", self.db_name, self.generation.load());
         tracing::debug!(
             "Storing metadata at '{}': page size - {}, crc - {}",
@@ -810,7 +817,7 @@ impl Replicator {
         Ok(())
     }
 
-    async fn get_metadata(&self, generation: &Uuid) -> Result<Option<(u32, u64)>> {
+    pub async fn get_metadata(&self, generation: &Uuid) -> Result<Option<(u32, u64)>> {
         let key = format!("{}-{}/.meta", self.db_name, generation);
         if let Ok(obj) = self
             .client
