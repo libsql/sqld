@@ -1,5 +1,5 @@
 use anyhow::{anyhow, Result};
-use std::io::{ErrorKind, SeekFrom};
+use std::io::SeekFrom;
 use std::path::Path;
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
 
@@ -154,24 +154,6 @@ impl WalFileReader {
         Ok(WalFrameHeader::from(buf))
     }
 
-    /// Reads a header of a WAL frame, filling the frame page data into provided slice buffer.
-    /// Slice size must be equal to WAL frame size.
-    ///
-    /// For reading specific frame use [WalFileReader::seek_frame] before calling this method.
-    pub async fn read_frame(&mut self, frame: &mut [u8]) -> Result<WalFrameHeader> {
-        if frame.len() != self.frame_size() as usize {
-            return Err(anyhow!(
-                "Cannot read WAL frame page. Expected buffer size is {} bytes, provided buffer has {}",
-                self.frame_size(),
-                frame.len()
-            ));
-        }
-        self.file.read_exact(frame).await?;
-        let frame_header: [u8; WalFrameHeader::SIZE as usize] =
-            frame[0..WalFrameHeader::SIZE as usize].try_into().unwrap();
-        Ok(WalFrameHeader::from(frame_header))
-    }
-
     /// Reads a range of next consecutive frames, including headers, into given buffer.
     /// Returns a number of frames read this way.
     ///
@@ -191,34 +173,6 @@ impl WalFileReader {
             Err(anyhow!("Some of the read frames where not complete"))
         } else {
             Ok(read / frame_size)
-        }
-    }
-
-    /// Verifies entire WAL file with regards to frame headers checksums.
-    pub async fn checksum_verification(&mut self) -> Result<()> {
-        self.seek_frame(1).await?;
-        let mut page = vec![0u8; self.page_size() as usize];
-        let mut header = [0u8; WalFrameHeader::SIZE as usize];
-        let last_crc = self.header.crc;
-        let mut frame_no = 1;
-        loop {
-            if let Err(e) = self.file.read_exact(&mut header).await {
-                if e.kind() == ErrorKind::UnexpectedEof {
-                    return Ok(());
-                }
-            }
-            self.file.read_exact(page.as_mut_slice()).await?;
-            let h = WalFrameHeader::from(header.clone());
-            let computed_crc = checksum_be(last_crc, &page);
-            if computed_crc != h.crc {
-                return Err(anyhow!(
-                    "Failed checksum verification for frame no {}. Expected: {}. Got: {}",
-                    frame_no,
-                    h.crc,
-                    computed_crc
-                ));
-            }
-            frame_no += 1;
         }
     }
 }

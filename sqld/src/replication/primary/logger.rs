@@ -79,7 +79,7 @@ unsafe impl WalHook for ReplicationLoggerHook {
         #[cfg(feature = "bottomless")]
         let last_valid_frame = wal.hdr.mxFrame;
         #[cfg(feature = "bottomless")]
-        let frame_checksum = wal.hdr.aFrameCksum;
+        let _frame_checksum = wal.hdr.aFrameCksum;
         let ctx = Self::wal_extract_ctx(wal);
 
         for (page_no, data) in PageHdrIter::new(page_headers, page_size as _) {
@@ -120,10 +120,10 @@ unsafe impl WalHook for ReplicationLoggerHook {
                     replicator.set_page_size(page_size as usize)?;
                     let frame_count = PageHdrIter::new(page_headers, page_size as usize).count();
                     replicator.submit_frames(frame_count as u32);
-                    let mut last_consistent_frame = last_valid_frame as u32 + frame_count as u32;
+                    let last_consistent_frame = last_valid_frame as u32 + frame_count as u32;
                     if is_commit != 0 {
                         replicator.request_flush();
-                        last_consistent_frame = replicator
+                        replicator
                             .wait_until_committed(last_consistent_frame)
                             .await?;
                     }
@@ -727,7 +727,7 @@ pub struct ReplicationLogger {
 }
 
 impl ReplicationLogger {
-    pub fn open(db_path: &Path, max_log_size: u64) -> anyhow::Result<Self> {
+    pub fn open(db_path: &Path, max_log_size: u64, dirty: bool) -> anyhow::Result<Self> {
         let log_path = db_path.join("wallog");
         let data_path = db_path.join("data");
 
@@ -743,7 +743,10 @@ impl ReplicationLogger {
         let log_file = LogFile::new(file, max_log_frame_count)?;
         let header = log_file.header();
 
-        let should_recover = if header.version < 2 || header.sqld_version() != Version::current() {
+        let should_recover = if dirty {
+            tracing::info!("Replication log is dirty, recovering from database file.");
+            true
+        } else if header.version < 2 || header.sqld_version() != Version::current() {
             tracing::info!("replication log version not compatible with current sqld version, recovering from database file.");
             true
         } else if fresh && data_path.exists() {
@@ -898,7 +901,7 @@ mod test {
     #[test]
     fn write_and_read_from_frame_log() {
         let dir = tempfile::tempdir().unwrap();
-        let logger = ReplicationLogger::open(dir.path(), 0).unwrap();
+        let logger = ReplicationLogger::open(dir.path(), 0, false).unwrap();
 
         let frames = (0..10)
             .map(|i| WalPage {
@@ -926,7 +929,7 @@ mod test {
     #[test]
     fn index_out_of_bounds() {
         let dir = tempfile::tempdir().unwrap();
-        let logger = ReplicationLogger::open(dir.path(), 0).unwrap();
+        let logger = ReplicationLogger::open(dir.path(), 0, false).unwrap();
         let log_file = logger.log_file.write();
         assert!(matches!(log_file.frame(1), Err(LogReadError::Ahead)));
     }
@@ -935,7 +938,7 @@ mod test {
     #[should_panic]
     fn incorrect_frame_size() {
         let dir = tempfile::tempdir().unwrap();
-        let logger = ReplicationLogger::open(dir.path(), 0).unwrap();
+        let logger = ReplicationLogger::open(dir.path(), 0, false).unwrap();
         let entry = WalPage {
             page_no: 0,
             size_after: 0,

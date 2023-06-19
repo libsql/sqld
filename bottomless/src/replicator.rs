@@ -1,5 +1,5 @@
 use crate::read::BatchReader;
-use crate::wal::{WalFileReader, WalHeader};
+use crate::wal::WalFileReader;
 use crate::write::BatchWriter;
 use anyhow::anyhow;
 use arc_swap::ArcSwap;
@@ -504,7 +504,6 @@ impl Replicator {
 
     // Tries to fetch the remote database change counter from given generation
     pub async fn get_remote_change_counter(&self, generation: &uuid::Uuid) -> Result<[u8; 4]> {
-        use bytes::Buf;
         let mut remote_change_counter = [0u8; 4];
         if let Ok(response) = self
             .get_object(format!("{}-{}/.changecounter", self.db_name, generation))

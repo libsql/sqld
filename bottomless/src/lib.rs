@@ -295,7 +295,7 @@ pub extern "C" fn xFrames(
 
     let ctx = get_replicator_context(wal);
     if is_commit != 0 {
-        let frame_checksum: [u8; 8] = unsafe { std::mem::transmute((*wal).hdr.aFrameCksum) };
+        let _frame_checksum: [u8; 8] = unsafe { std::mem::transmute((*wal).hdr.aFrameCksum) };
         ctx.replicator.request_flush();
 
         if let Err(e) = block_on!(

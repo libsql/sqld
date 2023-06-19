@@ -14,6 +14,7 @@ use tokio::task::JoinSet;
 use tonic::transport::Channel;
 use utils::services::idle_shutdown::IdleShutdownLayer;
 
+use self::database::config::DatabaseConfigStore;
 use self::database::dump::loader::DumpLoader;
 use self::database::factory::DbFactory;
 use self::database::libsql::{open_db, LibSqlDbFactory};
@@ -30,6 +31,7 @@ use sha256::try_digest;
 
 pub use sqld_libsql_bindings as libsql;
 
+mod admin_api;
 mod auth;
 pub mod database;
 mod error;
@@ -45,6 +47,7 @@ mod stats;
 #[cfg(test)]
 mod test;
 mod utils;
+pub mod version;
 
 const MAX_CONCCURENT_DBS: usize = 128;
 const DB_CREATE_TIMEOUT: Duration = Duration::from_secs(1);
@@ -72,6 +75,7 @@ pub struct Config {
     pub http_auth: Option<String>,
     pub http_self_url: Option<String>,
     pub hrana_addr: Option<SocketAddr>,
+    pub admin_addr: Option<SocketAddr>,
     pub auth_jwt_key: Option<String>,
     pub backend: Backend,
     pub writer_rpc_addr: Option<String>,
@@ -108,6 +112,7 @@ impl Default for Config {
             http_auth: None,
             http_self_url: None,
             hrana_addr: None,
+            admin_addr: None,
             auth_jwt_key: None,
             backend: Backend::Libsql,
             writer_rpc_addr: None,
@@ -142,6 +147,7 @@ async fn run_service<D: Database>(
     join_set: &mut JoinSet<anyhow::Result<()>>,
     idle_shutdown_layer: Option<IdleShutdownLayer>,
     stats: Stats,
+    db_config_store: Arc<DatabaseConfigStore>,
 ) -> anyhow::Result<()> {
     let auth = get_auth(config)?;
 
@@ -192,6 +198,10 @@ async fn run_service<D: Database>(
                 .await
                 .context("Hrana listener failed")
         });
+    }
+
+    if let Some(addr) = config.admin_addr {
+        join_set.spawn(admin_api::run_admin_api(addr, db_config_store));
     }
 
     match &config.heartbeat_url {
@@ -292,6 +302,7 @@ async fn start_replica(
     join_set: &mut JoinSet<anyhow::Result<()>>,
     idle_shutdown_layer: Option<IdleShutdownLayer>,
     stats: Stats,
+    db_config_store: Arc<DatabaseConfigStore>,
 ) -> anyhow::Result<()> {
     let (channel, uri) = configure_rpc(config)?;
     let replicator = Replicator::new(
@@ -312,6 +323,7 @@ async fn start_replica(
         channel,
         uri,
         stats.clone(),
+        db_config_store.clone(),
         applied_frame_no_receiver,
         config.max_response_size,
     )
@@ -323,6 +335,7 @@ async fn start_replica(
         join_set,
         idle_shutdown_layer,
         stats,
+        db_config_store,
     )
     .await?;
 
@@ -413,11 +426,14 @@ async fn start_primary(
     join_set: &mut JoinSet<anyhow::Result<()>>,
     idle_shutdown_layer: Option<IdleShutdownLayer>,
     stats: Stats,
+    db_config_store: Arc<DatabaseConfigStore>,
+    db_is_dirty: bool,
 ) -> anyhow::Result<()> {
     let is_fresh_db = check_fresh_db(&config.db_path);
     let logger = Arc::new(ReplicationLogger::open(
         &config.db_path,
         config.max_log_size,
+        db_is_dirty,
     )?);
 
     #[cfg(feature = "bottomless")]
@@ -462,6 +478,7 @@ async fn start_primary(
             }
         },
         stats.clone(),
+        db_config_store.clone(),
         valid_extensions,
         config.max_response_size,
     )
@@ -482,7 +499,15 @@ async fn start_primary(
         ));
     }
 
-    run_service(db_factory, config, join_set, idle_shutdown_layer, stats).await?;
+    run_service(
+        db_factory,
+        config,
+        join_set,
+        idle_shutdown_layer,
+        stats,
+        db_config_store,
+    )
+    .await?;
 
     Ok(())
 }
@@ -535,6 +560,24 @@ async fn run_storage_monitor(db_path: PathBuf, stats: Stats) -> anyhow::Result<(
     Ok(())
 }
 
+fn sentinel_file_path(path: &Path) -> PathBuf {
+    path.join(".sentinel")
+}
+/// initialize the sentinel file. This file is created at the beginning of the process, and is
+/// deleted at the end, on a clean exit. If the file is present when we start the process, this
+/// means that the database was not shutdown properly, and might need repair. This function return
+/// `true` if the database is dirty and needs repair.
+fn init_sentinel_file(path: &Path) -> anyhow::Result<bool> {
+    let path = sentinel_file_path(path);
+    if path.try_exists()? {
+        return Ok(true);
+    }
+
+    std::fs::File::create(path)?;
+
+    Ok(false)
+}
+
 pub async fn run_server(config: Config) -> anyhow::Result<()> {
     tracing::trace!("Backend: {:?}", config.backend);
 
@@ -562,19 +605,59 @@ pub async fn run_server(config: Config) -> anyhow::Result<()> {
         }
         let mut join_set = JoinSet::new();
 
-        let shutdown_notify: Arc<Notify> = Arc::new(Notify::new());
+        let (shutdown_sender, mut shutdown_receiver) = tokio::sync::mpsc::channel::<()>(1);
+
+        join_set.spawn({
+            let shutdown_sender = shutdown_sender.clone();
+            async move {
+                loop {
+                    tokio::signal::ctrl_c()
+                        .await
+                        .expect("failed to listen to CTRL-C");
+                    tracing::info!(
+                        "received CTRL-C, shutting down gracefully... This may take some time"
+                    );
+                    shutdown_sender
+                        .send(())
+                        .await
+                        .expect("failed to shutdown gracefully");
+                }
+            }
+        });
+
+        let db_is_dirty = init_sentinel_file(&config.db_path)?;
+
         let idle_shutdown_layer = config
             .idle_shutdown_timeout
-            .map(|d| IdleShutdownLayer::new(d, shutdown_notify.clone()));
+            .map(|d| IdleShutdownLayer::new(d, shutdown_sender.clone()));
 
         let stats = Stats::new(&config.db_path)?;
 
+        let db_config_store = Arc::new(
+            DatabaseConfigStore::load(&config.db_path).context("Could not load database config")?,
+        );
+
         match config.writer_rpc_addr {
             Some(_) => {
-                start_replica(&config, &mut join_set, idle_shutdown_layer, stats.clone()).await?
+                start_replica(
+                    &config,
+                    &mut join_set,
+                    idle_shutdown_layer,
+                    stats.clone(),
+                    db_config_store,
+                )
+                .await?
             }
             None => {
-                start_primary(&config, &mut join_set, idle_shutdown_layer, stats.clone()).await?
+                start_primary(
+                    &config,
+                    &mut join_set,
+                    idle_shutdown_layer,
+                    stats.clone(),
+                    db_config_store,
+                    db_is_dirty,
+                )
+                .await?
             }
         }
 
@@ -589,8 +672,10 @@ pub async fn run_server(config: Config) -> anyhow::Result<()> {
                     hard_reset(&config, join_set).await?;
                     break;
                 },
-                _ = shutdown_notify.notified() => {
+                _ = shutdown_receiver.recv() => {
                     join_set.shutdown().await;
+                    // clean shutdown, remove sentinel file
+                    std::fs::remove_file(sentinel_file_path(&config.db_path))?;
                     return Ok(())
                 }
                 Some(res) = join_set.join_next() => {
