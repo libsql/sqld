@@ -24,7 +24,7 @@ impl BatchWriter {
             return Ok(None);
         }
         tracing::trace!(
-            "Flushing frames: {}..{} (total: {} frames)",
+            "Flushing frame range: [{}..{}) (total: {} frames)",
             self.frames.start,
             self.frames.end,
             self.frames.len()

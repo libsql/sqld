@@ -192,7 +192,7 @@ impl Replicator {
                     if trigger {
                         let next_frame = next_frame_no.load(Ordering::Acquire);
                         let last_sent_frame =
-                            last_sent_frame_no.swap(next_frame, Ordering::Acquire);
+                            last_sent_frame_no.swap(next_frame - 1, Ordering::Acquire);
                         let frames = (last_sent_frame + 1)..next_frame;
                         let res = flush_manager.flush(frames).await;
                         if let Err(_) = last_committed_frame_no_sender.send(res) {
@@ -885,6 +885,7 @@ impl FlushManager {
                     .body(body.into())
                     .send()
                     .await?;
+                tracing::trace!("Frame range [{}..{}) has been sent to S3", start, end);
             }
         }
         Ok(frames.end - 1)
