@@ -2,7 +2,7 @@ name: Create and publish sqld binaried and Docker image
 
 on:
   push:
-    branches: ['main']
+    #branches: ['main']
     tags:
       - v*.*.*
 
@@ -161,7 +161,7 @@ jobs:
         if: startsWith(matrix.os, 'macos')
         run: |
           brew install llvm
-          brew install pkg-config<<<<<<< publish-release
+          brew install pkg-config
           brew install protobuf
 
       - name: Build sqld (linux/macos)
