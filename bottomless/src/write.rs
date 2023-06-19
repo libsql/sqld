@@ -19,7 +19,7 @@ impl BatchWriter {
     }
 
     pub async fn read_frames(&mut self, wal: &mut WalFileReader) -> Result<Option<Vec<u8>>> {
-        if self.frames.len() == 0 {
+        if self.frames.is_empty() {
             tracing::trace!("Attempting to flush an empty buffer");
             return Ok(None);
         }
@@ -32,7 +32,8 @@ impl BatchWriter {
         wal.seek_frame(self.frames.start).await?;
         let capacity = self.frames.len() * wal.frame_size() as usize;
         let mut buf = Vec::with_capacity(capacity);
-        unsafe { buf.set_len(capacity) }; // we require to fill entire buffer anyway
+        buf.spare_capacity_mut();
+        unsafe { buf.set_len(capacity) };
         let frames_read = wal.read_frame_range(buf.as_mut()).await?;
         if frames_read != self.frames.len() {
             return Err(anyhow!(

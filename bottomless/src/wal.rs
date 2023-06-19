@@ -37,15 +37,15 @@ impl From<[u8; WalFrameHeader::SIZE as usize]> for WalFrameHeader {
     }
 }
 
-impl Into<[u8; WalFrameHeader::SIZE as usize]> for WalFrameHeader {
-    fn into(self) -> [u8; WalFrameHeader::SIZE as usize] {
+impl From<WalFrameHeader> for [u8; WalFrameHeader::SIZE as usize] {
+    fn from(h: WalFrameHeader) -> [u8; WalFrameHeader::SIZE as usize] {
         let mut result = [0u8; WalFrameHeader::SIZE as usize];
-        let d = result.as_mut_ptr() as *mut u8;
+        let d = result.as_mut_ptr();
         unsafe {
-            std::ptr::copy_nonoverlapping(self.pgno.to_be_bytes().as_ptr(), d, 4);
-            std::ptr::copy_nonoverlapping(self.size_after.to_be_bytes().as_ptr(), d.add(4), 4);
-            std::ptr::copy_nonoverlapping(self.salt.to_be_bytes().as_ptr(), d.add(8), 8);
-            std::ptr::copy_nonoverlapping(self.crc.to_be_bytes().as_ptr(), d.add(16), 8);
+            std::ptr::copy_nonoverlapping(h.pgno.to_be_bytes().as_ptr(), d, 4);
+            std::ptr::copy_nonoverlapping(h.size_after.to_be_bytes().as_ptr(), d.add(4), 4);
+            std::ptr::copy_nonoverlapping(h.salt.to_be_bytes().as_ptr(), d.add(8), 8);
+            std::ptr::copy_nonoverlapping(h.crc.to_be_bytes().as_ptr(), d.add(16), 8);
             result
         }
     }

@@ -38,7 +38,7 @@ pub struct Replicator {
     flush_trigger: Sender<()>,
 
     pub page_size: usize,
-    generation: Arc<ArcSwap<uuid::Uuid>>,
+    generation: Arc<ArcSwap<Uuid>>,
     pub commits_in_current_generation: Arc<AtomicU32>,
     verify_crc: bool,
     pub bucket: String,
@@ -59,7 +59,7 @@ pub struct FetchedResults {
 pub enum RestoreAction {
     None,
     SnapshotMainDbFile,
-    ReuseGeneration(uuid::Uuid),
+    ReuseGeneration(Uuid),
 }
 
 #[derive(Clone, Debug)]
@@ -80,10 +80,9 @@ impl Options {
         if let Some(endpoint) = self.aws_endpoint.as_deref() {
             loader = loader.endpoint_url(endpoint);
         }
-        let config = aws_sdk_s3::config::Builder::from(&loader.load().await)
+        aws_sdk_s3::config::Builder::from(&loader.load().await)
             .force_path_style(true)
-            .build();
-        config
+            .build()
     }
 }
 
@@ -95,8 +94,8 @@ impl Default for Options {
         let db_id = std::env::var("LIBSQL_BOTTOMLESS_DATABASE_ID").ok();
         Options {
             create_bucket_if_not_exists: false,
-            verify_crc: true,
-            use_compression: false,
+            verify_crc: false,
+            use_compression: true,
             max_batch_interval: Duration::from_secs(15),
             max_frames_per_batch: 64,
             db_id,
@@ -155,16 +154,17 @@ impl Replicator {
         let commits_in_current_generation = Arc::new(AtomicU32::new(0));
 
         let _backup_job = {
-            let mut flush_manager = FlushManager::new(
-                client.clone(),
-                generation.clone(),
-                commits_in_current_generation.clone(),
-                format!("{}-wal", &db_path),
-                bucket.clone(),
-                db_name.clone(),
-                options.max_frames_per_batch,
-                options.use_compression,
-            );
+            let mut flush_manager = FlushManager {
+                wal: None,
+                client: client.clone(),
+                use_compression: options.use_compression,
+                max_frames_per_batch: options.max_frames_per_batch,
+                wal_path: format!("{}-wal", &db_path),
+                bucket: bucket.clone(),
+                db_name: db_name.clone(),
+                generation: generation.clone(),
+                commits_in_current_generation: commits_in_current_generation.clone(),
+            };
             let next_frame_no = next_frame_no.clone();
             let last_sent_frame_no = last_sent_frame_no.clone();
             let batch_interval = options.max_batch_interval;
@@ -184,7 +184,7 @@ impl Replicator {
                             last_sent_frame_no.swap(next_frame - 1, Ordering::Acquire);
                         let frames = (last_sent_frame + 1)..next_frame;
                         let res = flush_manager.flush(frames).await;
-                        if let Err(_) = last_committed_frame_no_sender.send(res) {
+                        if last_committed_frame_no_sender.send(res).is_err() {
                             return;
                         }
                     }
@@ -284,11 +284,11 @@ impl Replicator {
     // first in the S3-compatible bucket, under the assumption that fetching newest generations
     // is the most common operation.
     // NOTICE: at the time of writing, uuid v7 is an unstable feature of the uuid crate
-    fn generate_generation() -> uuid::Uuid {
+    fn generate_generation() -> Uuid {
         let (seconds, nanos) = uuid::timestamp::Timestamp::now(uuid::NoContext).to_unix();
         let (seconds, nanos) = (253370761200 - seconds, 999999999 - nanos);
         let synthetic_ts = uuid::Timestamp::from_unix(uuid::NoContext, seconds, nanos);
-        uuid::Uuid::new_v7(synthetic_ts)
+        Uuid::new_v7(synthetic_ts)
     }
 
     // Starts a new generation for this replicator instance
@@ -300,7 +300,7 @@ impl Replicator {
     // Sets a generation for this replicator instance. This function
     // should be called if a generation number from S3-compatible storage
     // is reused in this session.
-    pub fn set_generation(&mut self, generation: uuid::Uuid) {
+    pub fn set_generation(&mut self, generation: Uuid) {
         self.generation.swap(Arc::new(generation));
         self.commits_in_current_generation
             .store(0, Ordering::Release);
@@ -490,7 +490,7 @@ impl Replicator {
     // FIXME: assumes that this bucket stores *only* generations for databases,
     // it should be more robust and continue looking if the first item does not
     // match the <db-name>-<generation-uuid>/ pattern.
-    pub async fn find_newest_generation(&self) -> Option<uuid::Uuid> {
+    pub async fn find_newest_generation(&self) -> Option<Uuid> {
         let prefix = format!("{}-", self.db_name);
         let response = self
             .list_objects()
@@ -506,11 +506,11 @@ impl Replicator {
             None => key,
         };
         tracing::debug!("Generation candidate: {}", key);
-        uuid::Uuid::parse_str(key).ok()
+        Uuid::parse_str(key).ok()
     }
 
     // Tries to fetch the remote database change counter from given generation
-    pub async fn get_remote_change_counter(&self, generation: &uuid::Uuid) -> Result<[u8; 4]> {
+    pub async fn get_remote_change_counter(&self, generation: &Uuid) -> Result<[u8; 4]> {
         let mut remote_change_counter = [0u8; 4];
         if let Ok(response) = self
             .get_object(format!("{}-{}/.changecounter", self.db_name, generation))
@@ -716,12 +716,13 @@ impl Replicator {
                     let page_size = self.page_size;
                     let buf = pending_pages.entry(frame.pgno).or_insert_with(|| {
                         let mut v = Vec::with_capacity(page_size);
+                        v.spare_capacity_mut();
                         unsafe { v.set_len(page_size) };
                         v
                     });
                     reader.next_page(buf.as_mut()).await?;
                     if frame.is_committed() {
-                        let pending_pages = std::mem::replace(&mut pending_pages, BTreeMap::new());
+                        let pending_pages = std::mem::take(&mut pending_pages);
                         let page_count = pending_pages.len();
                         for (pgno, data) in pending_pages {
                             let offset = (pgno - 1) as u64 * (page_size as u64);
@@ -855,29 +856,6 @@ struct FlushManager {
 }
 
 impl FlushManager {
-    fn new(
-        client: Client,
-        generation: Arc<ArcSwap<Uuid>>,
-        commits_in_current_generation: Arc<AtomicU32>,
-        wal_path: String,
-        bucket: String,
-        db_name: String,
-        max_frames_per_batch: usize,
-        use_compression: bool,
-    ) -> Self {
-        FlushManager {
-            wal: None,
-            client,
-            use_compression,
-            max_frames_per_batch,
-            wal_path,
-            bucket,
-            db_name,
-            generation,
-            commits_in_current_generation,
-        }
-    }
-
     async fn flush(&mut self, frames: Range<u32>) -> Result<u32> {
         if frames.is_empty() {
             tracing::trace!("Trying to flush empty frame range");

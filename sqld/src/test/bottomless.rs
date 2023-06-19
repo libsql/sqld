@@ -94,9 +94,9 @@ async fn backup_restore() {
             .unwrap();
         const OPS_CEIL: usize = (OPS + 9) / 10;
         assert_eq!(rs.rows.len(), OPS_CEIL, "unexpected number of rows");
-        let mut i = 0;
         let base = if OPS < 10 { 0 } else { OPS - 10 } as i64;
-        for row in rs.rows.iter() {
+        for (i, row) in rs.rows.iter().enumerate() {
+            let i = i as i64;
             let id = row.cells["id"].clone();
             let name = row.cells["name"].clone();
             assert_eq!(
@@ -105,7 +105,6 @@ async fn backup_restore() {
                 "unexpected values for row {}",
                 i
             );
-            i += 1;
         }
 
         db_job.abort();
