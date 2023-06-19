@@ -126,10 +126,6 @@ unsafe impl WalHook for ReplicationLoggerHook {
                         last_consistent_frame = replicator
                             .wait_until_committed(last_consistent_frame)
                             .await?;
-                        let checksum = unsafe { std::mem::transmute(frame_checksum) };
-                        replicator
-                            .finalize_commit(last_consistent_frame, u64::from_be_bytes(checksum))
-                            .await?;
                     }
                     Ok::<(), anyhow::Error>(())
                 }) {

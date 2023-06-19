@@ -55,19 +55,19 @@ impl Into<[u8; WalFrameHeader::SIZE as usize]> for WalFrameHeader {
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub(crate) struct WalHeader {
     /// Magic number. 0x377f0682 or 0x377f0683
-    magic_no: u32,
+    pub magic_no: u32,
     /// File format version. Currently 3007000
-    version: u32,
+    pub version: u32,
     /// Database page size.
-    page_size: u32,
+    pub page_size: u32,
     /// Checkpoint sequence number
-    checkpoint_seq_no: u32,
+    pub checkpoint_seq_no: u32,
     /// Random integer incremented with each checkpoint
-    salt_1: u32,
+    pub salt_1: u32,
     /// A different random integer changing with each checkpoint
-    salt_2: u32,
+    pub salt_2: u32,
     /// Checksum for first 24 bytes of header
-    crc: u64,
+    pub crc: u64,
 }
 
 impl WalHeader {
@@ -114,13 +114,12 @@ impl WalFileReader {
         self.header.page_size
     }
 
-    pub fn frame_size(&self) -> u64 {
-        WalFrameHeader::SIZE + (self.page_size() as u64)
-    }
-
-    /// Returns checksum stored in WAL file header.
     pub fn checksum(&self) -> u64 {
         self.header.crc
+    }
+
+    pub fn frame_size(&self) -> u64 {
+        WalFrameHeader::SIZE + (self.page_size() as u64)
     }
 
     /// Returns an offset in a WAL file, where the data of a frame with given number starts.
@@ -200,7 +199,7 @@ impl WalFileReader {
         self.seek_frame(1).await?;
         let mut page = vec![0u8; self.page_size() as usize];
         let mut header = [0u8; WalFrameHeader::SIZE as usize];
-        let last_crc = self.checksum();
+        let last_crc = self.header.crc;
         let mut frame_no = 1;
         loop {
             if let Err(e) = self.file.read_exact(&mut header).await {

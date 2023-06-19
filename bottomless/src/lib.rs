@@ -296,11 +296,11 @@ pub extern "C" fn xFrames(
     let ctx = get_replicator_context(wal);
     if is_commit != 0 {
         let frame_checksum: [u8; 8] = unsafe { std::mem::transmute((*wal).hdr.aFrameCksum) };
+        ctx.replicator.request_flush();
 
         if let Err(e) = block_on!(
             ctx.runtime,
-            ctx.replicator
-                .finalize_commit(last_consistent_frame, u64::from_be_bytes(frame_checksum))
+            ctx.replicator.wait_until_committed(last_consistent_frame)
         ) {
             tracing::error!("Failed to finalize replication: {}", e);
             return ffi::SQLITE_IOERR_WRITE;

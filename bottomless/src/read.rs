@@ -3,11 +3,9 @@ use crate::wal::WalFrameHeader;
 use anyhow::{anyhow, Result};
 use async_compression::tokio::bufread::GzipDecoder;
 use aws_sdk_s3::primitives::ByteStream;
-use std::io::{ErrorKind, SeekFrom};
+use std::io::ErrorKind;
 use std::pin::Pin;
-use tokio::io::{
-    AsyncRead, AsyncReadExt, AsyncSeek, AsyncSeekExt, AsyncWrite, AsyncWriteExt, BufReader,
-};
+use tokio::io::{AsyncRead, AsyncReadExt, BufReader};
 use tokio_util::io::StreamReader;
 
 type AsyncByteReader = dyn AsyncRead + Send + Sync;
