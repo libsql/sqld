@@ -17,7 +17,7 @@ use crate::query_result_builder::{QueryBuilderConfig, QueryResultBuilder};
 use crate::stats::Stats;
 use crate::Result;
 
-use super::config::{BlockLevel, DatabaseConfigStore};
+use super::config::DatabaseConfigStore;
 use super::factory::DbFactory;
 use super::{
     Cond, Database, DescribeCol, DescribeParam, DescribeResponse, DescribeResult, Program, Step,
@@ -340,12 +340,15 @@ impl<'a> Connection<'a> {
     ) -> Result<(u64, Option<i64>)> {
         tracing::trace!("executing query: {}", query.stmt.stmt);
 
-        let max_block_level = match query.stmt.kind {
-            StmtKind::Read | StmtKind::TxnBegin | StmtKind::Other => BlockLevel::BlockReads,
-            StmtKind::Write => BlockLevel::BlockWrites,
-            StmtKind::TxnEnd => BlockLevel::BlockEverything,
+        let config = self.config_store.get();
+        let blocked = match query.stmt.kind {
+            StmtKind::Read | StmtKind::TxnBegin | StmtKind::Other => config.block_reads,
+            StmtKind::Write => config.block_reads || config.block_writes,
+            StmtKind::TxnEnd => false,
         };
-        self.config_store.check_block_level(max_block_level)?;
+        if blocked {
+            return Err(Error::Blocked(config.block_reason.clone()));
+        }
 
         let mut stmt = self.conn.prepare(&query.stmt.stmt)?;
 

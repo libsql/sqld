@@ -4,7 +4,7 @@ use serde::Deserialize;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use crate::database::config::{BlockLevel, DatabaseConfig, DatabaseConfigStore};
+use crate::database::config::{DatabaseConfig, DatabaseConfigStore};
 
 struct AppState {
     db_config_store: Arc<DatabaseConfigStore>,
@@ -43,7 +43,8 @@ async fn handle_get_config(State(app_state): State<Arc<AppState>>) -> Json<Arc<D
 
 #[derive(Debug, Deserialize)]
 struct BlockReq {
-    block_level: BlockLevel,
+    block_reads: bool,
+    block_writes: bool,
     #[serde(default)]
     block_reason: Option<String>,
 }
@@ -53,7 +54,8 @@ async fn handle_post_block(
     Json(req): Json<BlockReq>,
 ) -> (axum::http::StatusCode, &'static str) {
     let mut config = (*app_state.db_config_store.get()).clone();
-    config.block_level = req.block_level;
+    config.block_reads = req.block_reads;
+    config.block_writes = req.block_writes;
     config.block_reason = req.block_reason;
 
     match app_state.db_config_store.store(config) {

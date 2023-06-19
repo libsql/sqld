@@ -16,25 +16,12 @@ pub struct DatabaseConfigStore {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct DatabaseConfig {
     #[serde(default)]
-    pub block_level: BlockLevel,
+    pub block_reads: bool,
+    #[serde(default)]
+    pub block_writes: bool,
     /// The reason why operations are blocked. This will be included in [`Error::Blocked`].
     #[serde(default)]
     pub block_reason: Option<String>,
-}
-
-/// Determines which operations to block.
-#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, Default)]
-#[serde(rename_all = "snake_case")]
-pub enum BlockLevel {
-    /// Don't block any operations.
-    #[default]
-    BlockNothing,
-    /// Block write SQL statements.
-    BlockWrites,
-    /// Block both read and write SQL statements.
-    BlockReads,
-    /// Block all SQL statements.
-    BlockEverything,
 }
 
 impl DatabaseConfigStore {
@@ -73,14 +60,6 @@ impl DatabaseConfigStore {
         fs::write(&self.tmp_config_path, data)?;
         fs::rename(&self.tmp_config_path, &self.config_path)?;
         *self.config.lock() = Arc::new(config);
-        Ok(())
-    }
-
-    pub fn check_block_level(&self, max_block_level: BlockLevel) -> Result<()> {
-        let config = self.config.lock();
-        if config.block_level >= max_block_level {
-            return Err(Error::Blocked(config.block_reason.clone()));
-        }
         Ok(())
     }
 }
