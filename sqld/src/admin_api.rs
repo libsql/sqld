@@ -1,11 +1,14 @@
 use anyhow::Context as _;
-use axum::Json;
-use enclose::enclose;
+use axum::{extract::State, Json};
 use serde::Deserialize;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
 use crate::database::config::{BlockLevel, DatabaseConfig, DatabaseConfigStore};
+
+struct AppState {
+    db_config_store: Arc<DatabaseConfigStore>,
+}
 
 pub async fn run_admin_api(
     addr: SocketAddr,
@@ -14,18 +17,9 @@ pub async fn run_admin_api(
     use axum::routing::{get, post};
     let router = axum::Router::new()
         .route("/", get(handle_get_index))
-        .route(
-            "/v1/config",
-            get(enclose! {(db_config_store) move || async move {
-                handle_get_config(&db_config_store).await
-            }}),
-        )
-        .route(
-            "/v1/block",
-            post(enclose! {(db_config_store) move |req| async move{
-                handle_post_block(&db_config_store, req).await
-            }}),
-        );
+        .route("/v1/config", get(handle_get_config))
+        .route("/v1/block", post(handle_post_block))
+        .with_state(Arc::new(AppState { db_config_store }));
 
     let server = hyper::Server::try_bind(&addr)
         .context("Could not bind admin HTTP API server")?
@@ -39,12 +33,12 @@ pub async fn run_admin_api(
     Ok(())
 }
 
-async fn handle_get_index() -> String {
-    "Welcome to the sqld admin API".into()
+async fn handle_get_index() -> &'static str {
+    "Welcome to the sqld admin API"
 }
 
-async fn handle_get_config(db_config_store: &DatabaseConfigStore) -> Json<Arc<DatabaseConfig>> {
-    Json(db_config_store.get())
+async fn handle_get_config(State(app_state): State<Arc<AppState>>) -> Json<Arc<DatabaseConfig>> {
+    Json(app_state.db_config_store.get())
 }
 
 #[derive(Debug, Deserialize)]
@@ -55,21 +49,18 @@ struct BlockReq {
 }
 
 async fn handle_post_block(
-    db_config_store: &DatabaseConfigStore,
+    State(app_state): State<Arc<AppState>>,
     Json(req): Json<BlockReq>,
-) -> (axum::http::StatusCode, String) {
-    let mut config = (*db_config_store.get()).clone();
+) -> (axum::http::StatusCode, &'static str) {
+    let mut config = (*app_state.db_config_store.get()).clone();
     config.block_level = req.block_level;
     config.block_reason = req.block_reason;
 
-    match db_config_store.store(config) {
-        Ok(()) => (axum::http::StatusCode::OK, "OK".into()),
+    match app_state.db_config_store.store(config) {
+        Ok(()) => (axum::http::StatusCode::OK, "OK"),
         Err(err) => {
             tracing::warn!("Could not store database config: {err}");
-            (
-                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                "Failed".into(),
-            )
+            (axum::http::StatusCode::INTERNAL_SERVER_ERROR, "Failed")
         }
     }
 }
