@@ -2,7 +2,7 @@ name: Create and publish sqld binaried and Docker image
 
 on:
   push:
-    #branches: ['main']
+    branches: ['main']
     tags:
       - v*.*.*
 
@@ -82,6 +82,11 @@ jobs:
           if [[ "$VER" != "$CARGOVER" ]]; then 
             echo "FAILED_TAG=1" >> $GITHUB_OUTPUT
           else
+            echo "FAILED_TAG=0" >> $GITHUB_OUTPUT
+          fi
+
+          #Special case when we've pushed to main
+          if [[ "${{ github.ref_name }}" == "main" ]]; then
             echo "FAILED_TAG=0" >> $GITHUB_OUTPUT
           fi
 
