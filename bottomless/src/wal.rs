@@ -1,16 +1,7 @@
-use crate::replicator::crc;
 use anyhow::{anyhow, Result};
 use std::io::{ErrorKind, SeekFrom};
 use std::path::Path;
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
-
-const CRC_64: crc::Crc<u64> = crc::Crc::<u64>::new(&crc::CRC_64_ECMA_182);
-
-pub(crate) fn crc64(prev_crc: u64, data: &[u8]) -> u64 {
-    let mut crc = CRC_64.digest_with_initial(prev_crc);
-    crc.update(data);
-    crc.finalize()
-}
 
 #[repr(C)]
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -209,7 +200,7 @@ impl WalFileReader {
         self.seek_frame(1).await?;
         let mut page = vec![0u8; self.page_size() as usize];
         let mut header = [0u8; WalFrameHeader::SIZE as usize];
-        let mut last_crc = self.checksum();
+        let last_crc = self.checksum();
         let mut frame_no = 1;
         loop {
             if let Err(e) = self.file.read_exact(&mut header).await {
@@ -219,7 +210,7 @@ impl WalFileReader {
             }
             self.file.read_exact(page.as_mut_slice()).await?;
             let h = WalFrameHeader::from(header.clone());
-            let computed_crc = crc(last_crc, &page);
+            let computed_crc = checksum_be(last_crc, &page);
             if computed_crc != h.crc {
                 return Err(anyhow!(
                     "Failed checksum verification for frame no {}. Expected: {}. Got: {}",
@@ -231,6 +222,22 @@ impl WalFileReader {
             frame_no += 1;
         }
     }
+}
+
+/// Generate or extend an 8 byte checksum based on the data in
+///the `page` and the `init` value. `page` size must be multiple of 8.
+pub fn checksum_be(init: u64, page: &[u8]) -> u64 {
+    debug_assert_eq!(page.len() % 8, 0);
+    let mut s1 = (init >> 32) as u32;
+    let mut s2 = (init & u32::MAX as u64) as u32;
+    let page = unsafe { std::slice::from_raw_parts(page.as_ptr() as *const u32, page.len() / 4) };
+    let mut i = 0;
+    while i < page.len() {
+        s1 = s1.wrapping_add(page[i].to_be()).wrapping_add(s2);
+        s2 = s2.wrapping_add(page[i + 1].to_be()).wrapping_add(s1);
+        i += 2;
+    }
+    ((s1 as u64) << 32) | (s2 as u64)
 }
 
 #[cfg(test)]

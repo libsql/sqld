@@ -1,4 +1,4 @@
-use crate::replicator::crc;
+use crate::wal::checksum_be;
 use crate::wal::WalFrameHeader;
 use anyhow::{anyhow, Result};
 use async_compression::tokio::bufread::GzipDecoder;
@@ -80,7 +80,7 @@ impl BatchReader {
     {
         self.reader.read_exact(&mut self.page_buf).await?;
         if self.verify_crc {
-            let crc = crc(self.prev_crc, &self.page_buf);
+            let crc = checksum_be(self.prev_crc, &self.page_buf);
             if self.curr_crc == crc {
                 self.prev_crc = crc;
             } else {

@@ -1,45 +1,23 @@
 use crate::read::BatchReader;
-use crate::wal::{WalFileReader, WalHeader};
+use crate::wal::WalFileReader;
 use crate::write::BatchWriter;
 use anyhow::anyhow;
 use arc_swap::ArcSwap;
 use aws_sdk_s3::error::SdkError;
 use aws_sdk_s3::operation::get_object::builders::GetObjectFluentBuilder;
 use aws_sdk_s3::operation::list_objects::builders::ListObjectsFluentBuilder;
-use aws_sdk_s3::operation::put_object::{PutObjectError, PutObjectOutput};
 use aws_sdk_s3::primitives::ByteStream;
 use aws_sdk_s3::Client;
 use bytes::{Bytes, BytesMut};
-use futures::future::try_join_all;
-use std::collections::BTreeMap;
 use std::ops::{Deref, Range};
-use std::path::Path;
-use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::watch::error::RecvError;
 use tokio::sync::watch::{channel, Receiver, Sender};
-use tokio::time::error::Elapsed;
 use tokio::time::{timeout_at, Instant};
 use uuid::Uuid;
 
 pub type Result<T> = anyhow::Result<T>;
-
-const CRC_64: crc::Crc<u64> = crc::Crc::<u64>::new(&crc::CRC_64_ECMA_182);
-
-/// Calculates checksum for SQLite page data.
-pub(crate) fn crc(prev_crc: u64, page: &[u8]) -> u64 {
-    let mut digest = CRC_64.digest_with_initial(prev_crc);
-    digest.update(page);
-    digest.finalize()
-}
-
-#[derive(Debug)]
-struct Frame {
-    pgno: u32,
-    bytes: BytesMut,
-    crc: u64,
-}
 
 #[derive(Debug)]
 pub struct Replicator {
@@ -150,7 +128,7 @@ impl Replicator {
 
         let db_path = db_path.into();
         let db_name = {
-            let mut db_id = options.db_id.unwrap_or_default();
+            let db_id = options.db_id.unwrap_or_default();
             let name = match db_path.rfind('/') {
                 Some(index) => &db_path[index + 1..],
                 None => &db_path,
@@ -165,7 +143,7 @@ impl Replicator {
         let last_sent_frame_no = Arc::new(AtomicU32::new(0));
         let commits_in_current_generation = Arc::new(AtomicU32::new(0));
 
-        let backup_job = {
+        let _backup_job = {
             let mut flush_manager = FlushManager::new(
                 client.clone(),
                 generation.clone(),
@@ -181,7 +159,7 @@ impl Replicator {
             let batch_interval = options.max_batch_interval;
             tokio::spawn(async move {
                 loop {
-                    let mut timeout = Instant::now() + batch_interval;
+                    let timeout = Instant::now() + batch_interval;
                     let trigger = match timeout_at(timeout, flush_trigger_rx.changed()).await {
                         Ok(Ok(())) => true,
                         Ok(Err(_)) => {
@@ -426,7 +404,6 @@ impl Replicator {
     // file is present, it was already detected to be newer than its
     // remote counterpart.
     pub async fn maybe_replicate_wal(&mut self) -> Result<()> {
-        use tokio::io::{AsyncReadExt, AsyncSeekExt};
         let mut wal_file = match WalFileReader::open(&format!("{}-wal", &self.db_path)).await {
             Ok(Some(file)) => file,
             _ => {
@@ -596,7 +573,7 @@ impl Replicator {
     async fn get_local_wal_page_count(&mut self) -> u32 {
         match WalFileReader::open(&format!("{}-wal", &self.db_path)).await {
             Ok(None) => 0,
-            Ok(Some(mut wal)) => {
+            Ok(Some(wal)) => {
                 let page_size = wal.page_size();
                 if self.set_page_size(page_size as usize).is_err() {
                     return 0;
