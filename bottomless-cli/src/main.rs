@@ -91,7 +91,7 @@ async fn run() -> Result<()> {
     let database = match options.database.clone() {
         Some(db) => db,
         None => {
-            let mut client = Client::from_conf({
+            let client = Client::from_conf({
                 let mut loader = aws_config::from_env();
                 if let Some(endpoint) = options.endpoint.clone() {
                     loader = loader.endpoint_url(endpoint);
