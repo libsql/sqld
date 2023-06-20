@@ -97,7 +97,7 @@ jobs:
           MINIO_ACCESS_KEY: minioadmin
           MINIO_SECRET_KEY: minioadmin
         volumes:
-          - ${{ github.workspace }}/data:/data
+          - /data
         options: --name=minio --health-cmd "curl http://localhost:9000/minio/health/live"
     steps:
     - name: Make some room available
