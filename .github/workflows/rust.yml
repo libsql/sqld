@@ -90,7 +90,7 @@ jobs:
     name: Run Tests
     services:
       minio:
-        image: minio/minio
+        image: lazybit/minio
         ports:
           - 9000:9000
         env:
