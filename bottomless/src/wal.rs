@@ -28,6 +28,7 @@ impl WalFrameHeader {
         u32::from_be_bytes([self.0[4], self.0[5], self.0[6], self.0[7]])
     }
 
+    #[allow(dead_code)]
     pub fn salt(&self) -> u64 {
         u64::from_be_bytes([
             self.0[8], self.0[9], self.0[10], self.0[11], self.0[12], self.0[13], self.0[14],
