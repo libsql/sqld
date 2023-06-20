@@ -646,7 +646,7 @@ impl Replicator {
             .ok();
 
         let mut applied_wal_frame = false;
-        if let Some((page_size, mut prev_crc)) = self.get_metadata(&generation).await? {
+        if let Some((page_size, mut checksum)) = self.get_metadata(&generation).await? {
             self.set_page_size(page_size as usize)?;
             loop {
                 let mut list_request = self.list_objects().prefix(&prefix);
@@ -687,19 +687,9 @@ impl Replicator {
                                 last_frame_no, last_consistent_frame);
                         break;
                     }
-                    let crc = if self.verify_crc {
-                        Some(prev_crc)
-                    } else {
-                        None
-                    };
                     let mut frameno = first_frame_no;
-                    let mut reader = BatchReader::new(
-                        frameno,
-                        frame.body,
-                        self.page_size,
-                        self.use_compression,
-                        crc,
-                    );
+                    let mut reader =
+                        BatchReader::new(frameno, frame.body, self.page_size, self.use_compression);
                     while let Some(frame) = reader.next_frame_header().await? {
                         let pgno = frame.pgno();
                         tracing::debug!(
@@ -715,6 +705,9 @@ impl Replicator {
                             v
                         });
                         reader.next_page(buf.as_mut()).await?;
+                        if self.verify_crc {
+                            checksum = frame.verify(checksum, buf)?;
+                        }
                         if frame.is_committed() {
                             let pending_pages = std::mem::take(&mut pending_pages);
                             let page_count = pending_pages.len();
@@ -727,7 +720,6 @@ impl Replicator {
                             }
                             tracing::debug!("Restored {} pages into main DB file.", page_count);
                         }
-                        prev_crc = frame.crc();
                         frameno += 1;
                     }
                     main_db_writer.flush().await?;

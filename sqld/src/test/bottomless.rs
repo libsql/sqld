@@ -30,7 +30,7 @@ async fn backup_restore() {
     let db_config = Config {
         bottomless_replication: Some(bottomless::replicator::Options {
             create_bucket_if_not_exists: true,
-            verify_crc: false,
+            verify_crc: true,
             use_compression: true,
             bucket_name: BUCKET.to_string(),
             ..Default::default()

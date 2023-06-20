@@ -42,6 +42,23 @@ impl WalFrameHeader {
             self.0[23],
         ])
     }
+
+    pub fn verify(&self, init_crc: u64, page_data: &[u8]) -> Result<u64> {
+        let mut crc = init_crc;
+        crc = checksum_be(crc, &self.0[0..8]);
+        crc = checksum_be(crc, page_data);
+        let frame_crc = self.crc();
+        if crc == frame_crc {
+            Ok(crc)
+        } else {
+            Err(anyhow!(
+                "Frame checksum verification failed for page no. {}. Expected: {:X}. Got: {:X}",
+                self.pgno(),
+                frame_crc,
+                crc
+            ))
+        }
+    }
 }
 
 impl From<[u8; WalFrameHeader::SIZE]> for WalFrameHeader {
