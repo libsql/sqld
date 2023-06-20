@@ -122,13 +122,22 @@ where
 
 /// Verify that MinIO (S3 local stub) is up.
 async fn assert_minio_ready() {
-    const MINIO_URL: &str = "http://localhost:9000/";
+    const MINIO_URL: &str = "http://localhost:9090/";
 
-    let status = reqwest::get(format!("{}/minio/health/live", MINIO_URL))
-        .await
-        .expect("couldn't reach minio health check")
-        .status();
-    assert_eq!(status, StatusCode::OK);
+    let mut success = false;
+    for _ in 0..3 {
+        let status = reqwest::get(format!("{}/minio/health/ready", MINIO_URL))
+            .await
+            .ok()
+            .map(|resp| resp.status());
+        if status == Some(StatusCode::OK) {
+            success = true;
+            break;
+        } else {
+            sleep(Duration::from_secs(1)).await;
+        }
+    }
+    assert!(success, "failed to reach minio ready health check")
 }
 
 /// Checks if the corresponding bucket is empty (has any elements) or not.
