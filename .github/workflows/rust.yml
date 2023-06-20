@@ -90,9 +90,15 @@ jobs:
     name: Run Tests
     services:
       minio:
-        image: fclairamb/minio-github-actions
+        image: minio/minio
         ports:
           - 9000:9000
+        env:
+          MINIO_ACCESS_KEY: minioadmin
+          MINIO_SECRET_KEY: minioadmin
+        volumes:
+          - ${{ github.workspace }}/data:/data
+        options: --name=minio --health-cmd "curl http://localhost:9000/minio/health/live"
     steps:
     - name: Make some room available
       run: "sudo rm -rf /usr/local/lib/android && sudo rm -rf /usr/share/dotnet"
