@@ -545,11 +545,10 @@ impl Replicator {
     // Format: <db-name>-<generation>/<first-frame-no>-<last-frame-no>
     fn parse_frame_range(key: &str) -> Option<(u32, u32)> {
         let frame_delim = key.rfind('/')?;
-        let last_frame_delim = key.rfind('-')?;
-        let first_frame_no = key[(frame_delim + 1)..last_frame_delim]
-            .parse::<u32>()
-            .ok()?;
-        let last_frame_no = key[(last_frame_delim + 1)..].parse::<u32>().ok()?;
+        let frame_suffix = &key[(frame_delim + 1)..];
+        let last_frame_delim = frame_suffix.rfind('-')?;
+        let first_frame_no = frame_suffix[..last_frame_delim].parse::<u32>().ok()?;
+        let last_frame_no = frame_suffix[(last_frame_delim + 1)..].parse::<u32>().ok()?;
         Some((first_frame_no, last_frame_no))
     }
 
@@ -647,106 +646,103 @@ impl Replicator {
             .ok();
 
         let mut applied_wal_frame = false;
-
-        let (page_size, mut prev_crc) = if let Some(res) = self.get_metadata(&generation).await? {
-            res
-        } else {
-            (4096, 0)
-        };
-        self.set_page_size(page_size as usize)?;
-
-        loop {
-            let mut list_request = self.list_objects().prefix(&prefix);
-            if let Some(marker) = next_marker {
-                list_request = list_request.marker(marker);
-            }
-            let response = list_request.send().await?;
-            let objs = match response.contents() {
-                Some(objs) => objs,
-                None => {
-                    tracing::debug!("No objects found in generation {}", generation);
-                    break;
+        if let Some((page_size, mut prev_crc)) = self.get_metadata(&generation).await? {
+            self.set_page_size(page_size as usize)?;
+            loop {
+                let mut list_request = self.list_objects().prefix(&prefix);
+                if let Some(marker) = next_marker {
+                    list_request = list_request.marker(marker);
                 }
-            };
-            let mut pending_pages = BTreeMap::new();
-            for obj in objs {
-                let key = obj
-                    .key()
-                    .ok_or_else(|| anyhow::anyhow!("Failed to get key for an object"))?;
-                tracing::debug!("Loading {}", key);
-                let frame = self.get_object(key.into()).send().await?;
-
-                let (first_frame_no, last_frame_no) = match Self::parse_frame_range(key) {
-                    Some(result) => result,
+                let response = list_request.send().await?;
+                let objs = match response.contents() {
+                    Some(objs) => objs,
                     None => {
-                        if !key.ends_with(".gz")
-                            && !key.ends_with(".db")
-                            && !key.ends_with(".meta")
-                            && !key.ends_with(".changecounter")
-                        {
-                            tracing::warn!("Failed to parse frame/page from key {}", key);
-                        }
-                        continue;
+                        tracing::debug!("No objects found in generation {}", generation);
+                        break;
                     }
                 };
-                if last_frame_no > last_consistent_frame {
-                    tracing::warn!("Remote log contains frame {} larger than last consistent frame ({}), stopping the restoration process",
+                let mut pending_pages = BTreeMap::new();
+                for obj in objs {
+                    let key = obj
+                        .key()
+                        .ok_or_else(|| anyhow::anyhow!("Failed to get key for an object"))?;
+                    tracing::debug!("Loading {}", key);
+                    let frame = self.get_object(key.into()).send().await?;
+
+                    let (first_frame_no, last_frame_no) = match Self::parse_frame_range(key) {
+                        Some(result) => result,
+                        None => {
+                            if !key.ends_with(".gz")
+                                && !key.ends_with(".db")
+                                && !key.ends_with(".meta")
+                                && !key.ends_with(".changecounter")
+                            {
+                                tracing::warn!("Failed to parse frame/page from key {}", key);
+                            }
+                            continue;
+                        }
+                    };
+                    if last_frame_no > last_consistent_frame {
+                        tracing::warn!("Remote log contains frame {} larger than last consistent frame ({}), stopping the restoration process",
                                 last_frame_no, last_consistent_frame);
+                        break;
+                    }
+                    let crc = if self.verify_crc {
+                        Some(prev_crc)
+                    } else {
+                        None
+                    };
+                    let mut frameno = first_frame_no;
+                    let mut reader = BatchReader::new(
+                        frameno,
+                        frame.body,
+                        self.page_size,
+                        self.use_compression,
+                        crc,
+                    );
+                    while let Some(frame) = reader.next_frame_header().await? {
+                        tracing::debug!(
+                            "Restoring next frame {} as main db page {}",
+                            frameno,
+                            frame.pgno
+                        );
+                        let page_size = self.page_size;
+                        let buf = pending_pages.entry(frame.pgno).or_insert_with(|| {
+                            let mut v = Vec::with_capacity(page_size);
+                            v.spare_capacity_mut();
+                            unsafe { v.set_len(page_size) };
+                            v
+                        });
+                        reader.next_page(buf.as_mut()).await?;
+                        if frame.is_committed() {
+                            let pending_pages = std::mem::take(&mut pending_pages);
+                            let page_count = pending_pages.len();
+                            for (pgno, data) in pending_pages {
+                                let offset = (pgno - 1) as u64 * (page_size as u64);
+                                main_db_writer.seek(SeekFrom::Start(offset)).await?;
+                                main_db_writer.write_all(&data).await?;
+                                // should we flush here? In theory if we don't recover fully we scrap
+                                // anyway
+                            }
+                            tracing::debug!("Restored {} pages into main DB file.", page_count);
+                        }
+                        prev_crc = frame.crc;
+                        frameno += 1;
+                    }
+                    main_db_writer.flush().await?;
+                    applied_wal_frame = true;
+                }
+                next_marker = response
+                    .is_truncated()
+                    .then(|| objs.last().map(|elem| elem.key().unwrap().to_string()))
+                    .flatten();
+                if next_marker.is_none() {
+                    tracing::trace!("Restored DB from S3 backup using generation {}", generation);
                     break;
                 }
-                let crc = if self.verify_crc {
-                    Some(prev_crc)
-                } else {
-                    None
-                };
-                let mut frameno = first_frame_no;
-                let mut reader = BatchReader::new(
-                    frameno,
-                    frame.body,
-                    self.page_size,
-                    self.use_compression,
-                    crc,
-                );
-                while let Some(frame) = reader.next_frame_header().await? {
-                    tracing::debug!(
-                        "Restoring next frame {} as main db page {}",
-                        frameno,
-                        frame.pgno
-                    );
-                    let page_size = self.page_size;
-                    let buf = pending_pages.entry(frame.pgno).or_insert_with(|| {
-                        let mut v = Vec::with_capacity(page_size);
-                        v.spare_capacity_mut();
-                        unsafe { v.set_len(page_size) };
-                        v
-                    });
-                    reader.next_page(buf.as_mut()).await?;
-                    if frame.is_committed() {
-                        let pending_pages = std::mem::take(&mut pending_pages);
-                        let page_count = pending_pages.len();
-                        for (pgno, data) in pending_pages {
-                            let offset = (pgno - 1) as u64 * (page_size as u64);
-                            main_db_writer.seek(SeekFrom::Start(offset)).await?;
-                            main_db_writer.write_all(&data).await?;
-                            // should we flush here? In theory if we don't recover fully we scrap
-                            // anyway
-                        }
-                        tracing::debug!("Restored {} pages into main DB file.", page_count);
-                    }
-                    prev_crc = frame.crc;
-                    frameno += 1;
-                }
-                main_db_writer.flush().await?;
-                applied_wal_frame = true;
             }
-            next_marker = response
-                .is_truncated()
-                .then(|| objs.last().map(|elem| elem.key().unwrap().to_string()))
-                .flatten();
-            if next_marker.is_none() {
-                tracing::trace!("Restored DB from S3 backup using generation {}", generation);
-                break;
-            }
+        } else {
+            tracing::info!(".meta object not found, skipping WAL restore.");
         }
 
         if applied_wal_frame {
@@ -798,24 +794,7 @@ impl Replicator {
 
     pub async fn store_metadata(&self, page_size: u32, crc: u64) -> Result<()> {
         let key = format!("{}-{}/.meta", self.db_name, self.generation.load());
-        tracing::debug!(
-            "Storing metadata at '{}': page size - {}, crc - {}",
-            key,
-            page_size,
-            crc
-        );
-        let mut body = BytesMut::with_capacity(12);
-        body.extend_from_slice(page_size.to_be_bytes().as_slice());
-        body.extend_from_slice(crc.to_be_bytes().as_slice());
-        let _ = self
-            .client
-            .put_object()
-            .bucket(&self.bucket)
-            .key(key)
-            .body(ByteStream::from(body.freeze()))
-            .send()
-            .await?;
-        Ok(())
+        put_metadata_obj(&self.client, &self.bucket, key, page_size, crc).await
     }
 
     pub async fn get_metadata(&self, generation: &Uuid) -> Result<Option<(u32, u64)>> {
@@ -836,6 +815,32 @@ impl Replicator {
             Ok(None)
         }
     }
+}
+
+async fn put_metadata_obj(
+    client: &Client,
+    bucket: &str,
+    key: String,
+    page_size: u32,
+    crc: u64,
+) -> Result<()> {
+    tracing::debug!(
+        "Storing metadata at '{}': page size - {}, crc - {}",
+        key,
+        page_size,
+        crc
+    );
+    let mut body = BytesMut::with_capacity(12);
+    body.extend_from_slice(page_size.to_be_bytes().as_slice());
+    body.extend_from_slice(crc.to_be_bytes().as_slice());
+    let _ = client
+        .put_object()
+        .bucket(bucket)
+        .key(key)
+        .body(ByteStream::from(body.freeze()))
+        .send()
+        .await?;
+    Ok(())
 }
 
 pub struct Context {
@@ -871,6 +876,14 @@ impl FlushManager {
                 return Err(anyhow!("WAL file not found: {}", self.wal_path));
             }
         };
+        let generation = self.generation.load().clone();
+        if frames.start == 1 {
+            // before writing the first batch of frames - store .meta object with basic info
+            let key = format!("{}-{}/.meta", self.db_name, &generation);
+            let page_size = wal_file.page_size();
+            let crc = wal_file.checksum();
+            put_metadata_obj(&self.client, &self.bucket, key, page_size, crc).await?;
+        }
         tracing::trace!("Flushing {} frames", frames.len());
         self.commits_in_current_generation
             .fetch_add(1, Ordering::SeqCst);
@@ -879,7 +892,6 @@ impl FlushManager {
             let end = (start + self.max_frames_per_batch as u32).min(frames.end);
             let mut writer = BatchWriter::new(self.use_compression, start..end);
             if let Some(body) = writer.read_frames(wal_file).await? {
-                let generation = self.generation.load();
                 let key = format!(
                     "{}-{}/{:012}-{:012}",
                     self.db_name,
