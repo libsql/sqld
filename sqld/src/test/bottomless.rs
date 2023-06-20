@@ -122,9 +122,9 @@ where
 
 /// Verify that MinIO (S3 local stub) is up.
 async fn assert_minio_ready() {
-    const MINIO_URL: &str = "http://127.0.0.1:9090/";
+    const MINIO_URL: &str = "http://localhost:9000/";
 
-    let status = reqwest::get(format!("{}/minio/health/ready", MINIO_URL))
+    let status = reqwest::get(format!("{}/minio/health/live", MINIO_URL))
         .await
         .expect("couldn't reach minio health check")
         .status();
