@@ -3,51 +3,61 @@ use std::io::SeekFrom;
 use std::path::Path;
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
 
-#[repr(C)]
+#[repr(transparent)]
 #[derive(Debug, Clone, Eq, PartialEq)]
-pub(crate) struct WalFrameHeader {
-    /// Page number
-    pub pgno: u32,
-    /// For commit records, the size of the database image in pages
-    /// after the commit. For all other records, zero.
-    pub size_after: u32,
-    pub salt: u64,
-    pub crc: u64,
-}
+pub(crate) struct WalFrameHeader([u8; WalFrameHeader::SIZE]);
 
 impl WalFrameHeader {
-    pub const SIZE: u64 = 24;
+    pub const SIZE: usize = 24;
 
     /// In multi-page transactions, only the last page in the transaction contains
     /// the size_after_transaction field. If it's zero, it means it's an uncommited
     /// page.
     pub fn is_committed(&self) -> bool {
-        self.size_after != 0
+        self.size_after() != 0
+    }
+
+    /// Page number
+    pub fn pgno(&self) -> u32 {
+        u32::from_be_bytes([self.0[0], self.0[1], self.0[2], self.0[3]])
+    }
+
+    /// For commit records, the size of the database image in pages
+    /// after the commit. For all other records, zero.
+    pub fn size_after(&self) -> u32 {
+        u32::from_be_bytes([self.0[4], self.0[5], self.0[6], self.0[7]])
+    }
+
+    pub fn salt(&self) -> u64 {
+        u64::from_be_bytes([
+            self.0[8], self.0[9], self.0[10], self.0[11], self.0[12], self.0[13], self.0[14],
+            self.0[15],
+        ])
+    }
+
+    pub fn crc(&self) -> u64 {
+        u64::from_be_bytes([
+            self.0[16], self.0[17], self.0[18], self.0[19], self.0[20], self.0[21], self.0[22],
+            self.0[23],
+        ])
     }
 }
 
-impl From<[u8; WalFrameHeader::SIZE as usize]> for WalFrameHeader {
-    fn from(v: [u8; WalFrameHeader::SIZE as usize]) -> Self {
-        WalFrameHeader {
-            pgno: u32::from_be_bytes([v[0], v[1], v[2], v[3]]),
-            size_after: u32::from_be_bytes([v[4], v[5], v[6], v[7]]),
-            salt: u64::from_be_bytes([v[8], v[9], v[10], v[11], v[12], v[13], v[14], v[15]]),
-            crc: u64::from_be_bytes([v[16], v[17], v[18], v[19], v[20], v[21], v[22], v[23]]),
-        }
+impl From<[u8; WalFrameHeader::SIZE]> for WalFrameHeader {
+    fn from(value: [u8; WalFrameHeader::SIZE]) -> Self {
+        WalFrameHeader(value)
     }
 }
 
-impl From<WalFrameHeader> for [u8; WalFrameHeader::SIZE as usize] {
-    fn from(h: WalFrameHeader) -> [u8; WalFrameHeader::SIZE as usize] {
-        let mut result = [0u8; WalFrameHeader::SIZE as usize];
-        let d = result.as_mut_ptr();
-        unsafe {
-            std::ptr::copy_nonoverlapping(h.pgno.to_be_bytes().as_ptr(), d, 4);
-            std::ptr::copy_nonoverlapping(h.size_after.to_be_bytes().as_ptr(), d.add(4), 4);
-            std::ptr::copy_nonoverlapping(h.salt.to_be_bytes().as_ptr(), d.add(8), 8);
-            std::ptr::copy_nonoverlapping(h.crc.to_be_bytes().as_ptr(), d.add(16), 8);
-            result
-        }
+impl From<WalFrameHeader> for [u8; WalFrameHeader::SIZE] {
+    fn from(h: WalFrameHeader) -> [u8; WalFrameHeader::SIZE] {
+        h.0
+    }
+}
+
+impl AsRef<[u8]> for WalFrameHeader {
+    fn as_ref(&self) -> &[u8] {
+        self.0.as_ref()
     }
 }
 
@@ -119,7 +129,7 @@ impl WalFileReader {
     }
 
     pub fn frame_size(&self) -> u64 {
-        WalFrameHeader::SIZE + (self.page_size() as u64)
+        (WalFrameHeader::SIZE as u64) + (self.page_size() as u64)
     }
 
     /// Returns an offset in a WAL file, where the data of a frame with given number starts.
@@ -149,7 +159,7 @@ impl WalFileReader {
     ///
     /// For reading specific frame use [WalFileReader::seek_frame] before calling this method.
     pub async fn read_frame_header(&mut self) -> Result<WalFrameHeader> {
-        let mut buf = [0u8; WalFrameHeader::SIZE as usize];
+        let mut buf = [0u8; WalFrameHeader::SIZE];
         self.file.read_exact(buf.as_mut()).await?;
         Ok(WalFrameHeader::from(buf))
     }
@@ -175,6 +185,19 @@ impl WalFileReader {
             Ok(read / frame_size)
         }
     }
+
+    #[allow(dead_code)]
+    pub async fn next_frame(&mut self, page: &mut [u8]) -> Result<Option<WalFrameHeader>> {
+        debug_assert_eq!(page.len(), self.page_size() as usize);
+        let mut header = [0u8; WalFrameHeader::SIZE];
+        let header = match self.file.read_exact(header.as_mut()).await {
+            Ok(_) => WalFrameHeader::from(header),
+            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(None),
+            Err(e) => return Err(e.into()),
+        };
+        self.file.read_exact(page).await?;
+        Ok(Some(header))
+    }
 }
 
 /// Generate or extend an 8 byte checksum based on the data in
@@ -186,8 +209,8 @@ pub fn checksum_be(init: u64, page: &[u8]) -> u64 {
     let page = unsafe { std::slice::from_raw_parts(page.as_ptr() as *const u32, page.len() / 4) };
     let mut i = 0;
     while i < page.len() {
-        s1 = s1.wrapping_add(page[i].to_be()).wrapping_add(s2);
-        s2 = s2.wrapping_add(page[i + 1].to_be()).wrapping_add(s1);
+        s1 = s1.wrapping_add(page[i]).wrapping_add(s2);
+        s2 = s2.wrapping_add(page[i + 1]).wrapping_add(s1);
         i += 2;
     }
     ((s1 as u64) << 32) | (s2 as u64)
@@ -195,20 +218,7 @@ pub fn checksum_be(init: u64, page: &[u8]) -> u64 {
 
 #[cfg(test)]
 mod test {
-    use crate::wal::{WalFrameHeader, WalHeader};
-
-    #[test]
-    fn wal_frame_header_mem_mapping() {
-        let fh = WalFrameHeader {
-            pgno: 10020,
-            size_after: 20481,
-            salt: 0xdeadbeaf,
-            crc: 935793,
-        };
-        let bin: [u8; WalFrameHeader::SIZE as usize] = fh.clone().into();
-        let fh2 = WalFrameHeader::from(bin);
-        assert_eq!(fh, fh2);
-    }
+    use crate::wal::WalHeader;
 
     #[test]
     fn wal_header_mem_mapping() {

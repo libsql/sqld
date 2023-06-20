@@ -701,13 +701,14 @@ impl Replicator {
                         crc,
                     );
                     while let Some(frame) = reader.next_frame_header().await? {
+                        let pgno = frame.pgno();
                         tracing::debug!(
                             "Restoring next frame {} as main db page {}",
                             frameno,
-                            frame.pgno
+                            pgno
                         );
                         let page_size = self.page_size;
-                        let buf = pending_pages.entry(frame.pgno).or_insert_with(|| {
+                        let buf = pending_pages.entry(pgno).or_insert_with(|| {
                             let mut v = Vec::with_capacity(page_size);
                             v.spare_capacity_mut();
                             unsafe { v.set_len(page_size) };
@@ -726,7 +727,7 @@ impl Replicator {
                             }
                             tracing::debug!("Restored {} pages into main DB file.", page_count);
                         }
-                        prev_crc = frame.crc;
+                        prev_crc = frame.crc();
                         frameno += 1;
                     }
                     main_db_writer.flush().await?;
@@ -887,7 +888,7 @@ impl FlushManager {
         tracing::trace!("Flushing {} frames", frames.len());
         self.commits_in_current_generation
             .fetch_add(1, Ordering::SeqCst);
-        //wal_file.checksum_verification().await?;
+        //wal_file.verify().await?;
         for start in frames.clone().step_by(self.max_frames_per_batch) {
             let end = (start + self.max_frames_per_batch as u32).min(frames.end);
             let mut writer = BatchWriter::new(self.use_compression, start..end);

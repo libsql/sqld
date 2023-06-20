@@ -44,11 +44,11 @@ impl BatchWriter {
         }
         self.last_frame_crc = {
             let last_frame_offset = (frames_read - 1) * wal.frame_size() as usize;
-            let header: [u8; WalFrameHeader::SIZE as usize] = (&buf
-                [last_frame_offset..(last_frame_offset + WalFrameHeader::SIZE as usize)])
+            let header: [u8; WalFrameHeader::SIZE] = (&buf
+                [last_frame_offset..(last_frame_offset + WalFrameHeader::SIZE)])
                 .try_into()
                 .unwrap();
-            WalFrameHeader::from(header).crc
+            WalFrameHeader::from(header).crc()
         };
         let data = if self.use_compression {
             let mut gzip = GzipEncoder::new(&buf[..]);

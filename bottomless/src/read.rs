@@ -34,13 +34,13 @@ impl BatchReader {
             curr_crc: 0,
             reader: if use_compression {
                 let gzip = GzipDecoder::new(BufReader::with_capacity(
-                    page_size + WalFrameHeader::SIZE as usize,
+                    page_size + WalFrameHeader::SIZE,
                     StreamReader::new(content),
                 ));
                 Box::pin(gzip)
             } else {
                 Box::pin(BufReader::with_capacity(
-                    page_size + WalFrameHeader::SIZE as usize,
+                    page_size + WalFrameHeader::SIZE,
                     StreamReader::new(content),
                 ))
             },
@@ -49,12 +49,12 @@ impl BatchReader {
 
     /// Reads next frame header without frame body (WAL page).
     pub(crate) async fn next_frame_header(&mut self) -> Result<Option<WalFrameHeader>> {
-        let mut buf = [0u8; WalFrameHeader::SIZE as usize];
+        let mut buf = [0u8; WalFrameHeader::SIZE];
         let res = self.reader.read_exact(&mut buf).await;
         match res {
             Ok(_) => {
                 let header = WalFrameHeader::from(buf);
-                self.curr_crc = header.crc;
+                self.curr_crc = header.crc();
                 Ok(Some(header))
             }
             Err(e) if e.kind() == ErrorKind::UnexpectedEof => Ok(None),
