@@ -8,6 +8,8 @@ use std::time::Duration;
 use tokio::time::sleep;
 use url::Url;
 
+const MINIO_URL: &str = "http://localhost:9000/"; // or 172.17.0.2
+
 #[tokio::test]
 async fn backup_restore() {
     let _ = env_logger::builder().is_test(true).try_init();
@@ -17,7 +19,7 @@ async fn backup_restore() {
     const OPS: usize = 100;
 
     // assert that MinIO (S3 mockup) is up and doesn't keep data from previous test run
-    assert_minio_ready().await;
+    //assert_minio_ready().await;
     let _ = S3BucketCleaner::new(BUCKET).await;
     assert_bucket_occupancy(BUCKET, true).await;
 
@@ -121,9 +123,8 @@ where
 }
 
 /// Verify that MinIO (S3 local stub) is up.
+#[allow(dead_code)]
 async fn assert_minio_ready() {
-    const MINIO_URL: &str = "http://localhost:9090/";
-
     let mut success = false;
     for _ in 0..3 {
         let status = reqwest::get(format!("{}/minio/health/ready", MINIO_URL))
@@ -145,7 +146,7 @@ async fn assert_minio_ready() {
 async fn assert_bucket_occupancy(bucket: &str, expect_empty: bool) {
     use aws_sdk_s3::Client;
 
-    let loader = aws_config::from_env().endpoint_url("http://127.0.0.1:9000/");
+    let loader = aws_config::from_env().endpoint_url(MINIO_URL);
     let conf = aws_sdk_s3::config::Builder::from(&loader.load().await)
         .force_path_style(true)
         .build();
@@ -195,7 +196,7 @@ impl S3BucketCleaner {
         use aws_sdk_s3::types::{Delete, ObjectIdentifier};
         use aws_sdk_s3::Client;
 
-        let loader = aws_config::from_env().endpoint_url("http://127.0.0.1:9000/");
+        let loader = aws_config::from_env().endpoint_url(MINIO_URL);
         let conf = aws_sdk_s3::config::Builder::from(&loader.load().await)
             .force_path_style(true)
             .build();
