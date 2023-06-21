@@ -7,7 +7,7 @@ use std::time::Duration;
 use tokio::time::sleep;
 use url::Url;
 
-const MINIO_URL: &str = "http://localhost:9000/";
+const S3_URL: &str = "http://localhost:9000/";
 
 #[tokio::test]
 async fn backup_restore() {
@@ -17,8 +17,6 @@ async fn backup_restore() {
     const PORT: u16 = 15001;
     const OPS: usize = 100;
 
-    // assert that MinIO (S3 mockup) is up and doesn't keep data from previous test run
-    //assert_minio_ready().await;
     let _ = S3BucketCleaner::new(BUCKET).await;
     assert_bucket_occupancy(BUCKET, true).await;
 
@@ -126,7 +124,7 @@ where
 async fn assert_bucket_occupancy(bucket: &str, expect_empty: bool) {
     use aws_sdk_s3::Client;
 
-    let loader = aws_config::from_env().endpoint_url(MINIO_URL);
+    let loader = aws_config::from_env().endpoint_url(S3_URL);
     let conf = aws_sdk_s3::config::Builder::from(&loader.load().await)
         .force_path_style(true)
         .build();
@@ -176,7 +174,7 @@ impl S3BucketCleaner {
         use aws_sdk_s3::types::{Delete, ObjectIdentifier};
         use aws_sdk_s3::Client;
 
-        let loader = aws_config::from_env().endpoint_url(MINIO_URL);
+        let loader = aws_config::from_env().endpoint_url(S3_URL);
         let conf = aws_sdk_s3::config::Builder::from(&loader.load().await)
             .force_path_style(true)
             .build();
