@@ -1,14 +1,13 @@
 use crate::{run_server, Config};
 use anyhow::Result;
 use libsql_client::{Connection, QueryResult, Statement, Value};
-use reqwest::StatusCode;
 use std::net::ToSocketAddrs;
 use std::path::PathBuf;
 use std::time::Duration;
 use tokio::time::sleep;
 use url::Url;
 
-const MINIO_URL: &str = "http://localhost:9000/"; // or 172.17.0.2
+const MINIO_URL: &str = "http://localhost:9000/";
 
 #[tokio::test]
 async fn backup_restore() {
@@ -120,25 +119,6 @@ where
 {
     let db = libsql_client::reqwest::Connection::connect_from_url(url)?;
     db.batch(stmts).await
-}
-
-/// Verify that MinIO (S3 local stub) is up.
-#[allow(dead_code)]
-async fn assert_minio_ready() {
-    let mut success = false;
-    for _ in 0..3 {
-        let status = reqwest::get(format!("{}/minio/health/ready", MINIO_URL))
-            .await
-            .ok()
-            .map(|resp| resp.status());
-        if status == Some(StatusCode::OK) {
-            success = true;
-            break;
-        } else {
-            sleep(Duration::from_secs(1)).await;
-        }
-    }
-    assert!(success, "failed to reach minio ready health check")
 }
 
 /// Checks if the corresponding bucket is empty (has any elements) or not.
