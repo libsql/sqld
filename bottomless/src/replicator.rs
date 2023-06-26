@@ -45,7 +45,7 @@ pub struct Replicator {
     pub db_path: String,
     pub db_name: String,
 
-    use_compression: bool,
+    use_compression: CompressionKind,
     max_frames_per_batch: usize,
 }
 
@@ -68,8 +68,8 @@ pub struct Options {
     /// If `true` when restoring, frames checksums will be verified prior their pages being flushed
     /// into the main database file.
     pub verify_crc: bool,
-    /// If `true`, WAL frames will be zipped before being send to S3.
-    pub use_compression: bool,
+    /// Kind of compression algorithm used on the WAL frames to be sent to S3.
+    pub use_compression: CompressionKind,
     pub aws_endpoint: Option<String>,
     pub db_id: Option<String>,
     /// Bucket directory name where all S3 objects are backed up. General schema is:
@@ -107,7 +107,7 @@ impl Default for Options {
         Options {
             create_bucket_if_not_exists: false,
             verify_crc: false,
-            use_compression: true,
+            use_compression: CompressionKind::Gzip,
             max_batch_interval: Duration::from_secs(15),
             max_frames_per_batch: 1024, // with 4KiB pages => 4MiB batches (uncompressed)
             db_id,
@@ -192,23 +192,17 @@ impl Replicator {
                         }
                     };
                     if trigger {
-                        loop {
-                            let next_frame = next_frame_no.load(Ordering::Acquire);
-                            let last_sent_frame =
-                                last_sent_frame_no.swap(next_frame - 1, Ordering::Acquire);
-                            let frames = (last_sent_frame + 1)..next_frame;
+                        let next_frame = next_frame_no.load(Ordering::Acquire);
+                        let last_sent_frame =
+                            last_sent_frame_no.swap(next_frame - 1, Ordering::Acquire);
+                        let frames = (last_sent_frame + 1)..next_frame;
 
-                            if !frames.is_empty() {
-                                let res = copier.flush(frames).await;
-                                if last_committed_frame_no_sender.send(res).is_err() {
-                                    // Replicator was probably dropped and therefore corresponding
-                                    // receiver has been closed
-                                    return;
-                                }
-                                // while flush was pending, next batch of frames may have arrived
-                                // so try to drain them up in the next loop iteration
-                            } else {
-                                break;
+                        if !frames.is_empty() {
+                            let res = copier.flush(frames).await;
+                            if last_committed_frame_no_sender.send(res).is_err() {
+                                // Replicator was probably dropped and therefore corresponding
+                                // receiver has been closed
+                                return;
                             }
                         }
                     }
@@ -496,30 +490,32 @@ impl Replicator {
             return Ok(());
         }
         tracing::debug!("Snapshotting {}", self.db_path);
-
-        let change_counter = if self.use_compression {
-            // TODO: find a way to compress ByteStream on the fly instead of creating
-            // an intermediary file.
-            let (compressed_db_path, change_counter) = self.compress_main_db_file().await?;
-            let key = format!("{}-{}/db.gz", self.db_name, self.generation);
-            self.client
-                .put_object()
-                .bucket(&self.bucket)
-                .key(key)
-                .body(ByteStream::from_path(compressed_db_path).await?)
-                .send()
-                .await?;
-            change_counter
-        } else {
-            self.client
-                .put_object()
-                .bucket(&self.bucket)
-                .key(format!("{}-{}/db.db", self.db_name, self.generation))
-                .body(ByteStream::from_path(&self.db_path).await?)
-                .send()
-                .await?;
-            let mut reader = tokio::fs::File::open(&self.db_path).await?;
-            Self::read_change_counter(&mut reader).await?
+        let change_counter = match self.use_compression {
+            CompressionKind::None => {
+                self.client
+                    .put_object()
+                    .bucket(&self.bucket)
+                    .key(format!("{}-{}/db.db", self.db_name, self.generation))
+                    .body(ByteStream::from_path(&self.db_path).await?)
+                    .send()
+                    .await?;
+                let mut reader = tokio::fs::File::open(&self.db_path).await?;
+                Self::read_change_counter(&mut reader).await?
+            }
+            CompressionKind::Gzip => {
+                // TODO: find a way to compress ByteStream on the fly instead of creating
+                // an intermediary file.
+                let (compressed_db_path, change_counter) = self.compress_main_db_file().await?;
+                let key = format!("{}-{}/db.gz", self.db_name, self.generation);
+                self.client
+                    .put_object()
+                    .bucket(&self.bucket)
+                    .key(key)
+                    .body(ByteStream::from_path(compressed_db_path).await?)
+                    .send()
+                    .await?;
+                change_counter
+            }
         };
 
         /* FIXME: we can't rely on the change counter in WAL mode:
@@ -596,14 +592,22 @@ impl Replicator {
     }
 
     // Parses the frame and page number from given key.
-    // Format: <db-name>-<generation>/<first-frame-no>-<last-frame-no>
-    fn parse_frame_range(key: &str) -> Option<(u32, u32)> {
+    // Format: <db-name>-<generation>/<first-frame-no>-<last-frame-no>.<compression-kind>
+    fn parse_frame_range(key: &str) -> Option<(u32, u32, CompressionKind)> {
         let frame_delim = key.rfind('/')?;
         let frame_suffix = &key[(frame_delim + 1)..];
         let last_frame_delim = frame_suffix.rfind('-')?;
+        let compression_delim = frame_suffix.rfind('.')?;
         let first_frame_no = frame_suffix[..last_frame_delim].parse::<u32>().ok()?;
-        let last_frame_no = frame_suffix[(last_frame_delim + 1)..].parse::<u32>().ok()?;
-        Some((first_frame_no, last_frame_no))
+        let last_frame_no = frame_suffix[(last_frame_delim + 1)..compression_delim]
+            .parse::<u32>()
+            .ok()?;
+        let compression_kind = match &frame_suffix[(compression_delim + 1)..] {
+            "gz" => CompressionKind::Gzip,
+            "raw" => CompressionKind::None,
+            _ => return None,
+        };
+        Some((first_frame_no, last_frame_no, compression_kind))
     }
 
     // Restores the database state from given remote generation
@@ -666,21 +670,23 @@ impl Replicator {
         let mut main_db_writer = tokio::fs::File::create(&self.db_path).await?;
         // If the db file is not present, the database could have been empty
 
-        let main_db_path = if self.use_compression {
-            format!("{}-{}/db.gz", self.db_name, generation)
-        } else {
-            format!("{}-{}/db.db", self.db_name, generation)
+        let main_db_path = match self.use_compression {
+            CompressionKind::None => format!("{}-{}/db.db", self.db_name, generation),
+            CompressionKind::Gzip => format!("{}-{}/db.gz", self.db_name, generation),
         };
 
         if let Ok(db_file) = self.get_object(main_db_path).send().await {
             let mut body_reader = db_file.body.into_async_read();
-            if self.use_compression {
-                let mut decompress_reader = async_compression::tokio::bufread::GzipDecoder::new(
-                    tokio::io::BufReader::new(body_reader),
-                );
-                tokio::io::copy(&mut decompress_reader, &mut main_db_writer).await?;
-            } else {
-                tokio::io::copy(&mut body_reader, &mut main_db_writer).await?;
+            match self.use_compression {
+                CompressionKind::None => {
+                    tokio::io::copy(&mut body_reader, &mut main_db_writer).await?;
+                }
+                CompressionKind::Gzip => {
+                    let mut decompress_reader = async_compression::tokio::bufread::GzipDecoder::new(
+                        tokio::io::BufReader::new(body_reader),
+                    );
+                    tokio::io::copy(&mut decompress_reader, &mut main_db_writer).await?;
+                }
             }
             main_db_writer.flush().await?;
 
@@ -723,19 +729,20 @@ impl Replicator {
                     tracing::debug!("Loading {}", key);
                     let frame = self.get_object(key.into()).send().await?;
 
-                    let (first_frame_no, last_frame_no) = match Self::parse_frame_range(key) {
-                        Some(result) => result,
-                        None => {
-                            if !key.ends_with(".gz")
-                                && !key.ends_with(".db")
-                                && !key.ends_with(".meta")
-                                && !key.ends_with(".changecounter")
-                            {
-                                tracing::warn!("Failed to parse frame/page from key {}", key);
+                    let (first_frame_no, last_frame_no, compression_kind) =
+                        match Self::parse_frame_range(key) {
+                            Some(result) => result,
+                            None => {
+                                if !key.ends_with(".gz")
+                                    && !key.ends_with(".db")
+                                    && !key.ends_with(".meta")
+                                    && !key.ends_with(".changecounter")
+                                {
+                                    tracing::warn!("Failed to parse frame/page from key {}", key);
+                                }
+                                continue;
                             }
-                            continue;
-                        }
-                    };
+                        };
                     if last_frame_no > last_consistent_frame {
                         tracing::warn!("Remote log contains frame {} larger than last consistent frame ({}), stopping the restoration process",
                                 last_frame_no, last_consistent_frame);
@@ -743,7 +750,7 @@ impl Replicator {
                     }
                     let mut frameno = first_frame_no;
                     let mut reader =
-                        BatchReader::new(frameno, frame.body, self.page_size, self.use_compression);
+                        BatchReader::new(frameno, frame.body, self.page_size, compression_kind);
                     while let Some(frame) = reader.next_frame_header().await? {
                         let pgno = frame.pgno();
                         tracing::debug!(
@@ -833,7 +840,7 @@ impl Replicator {
         let objs = response.contents()?;
         let last = objs.last()?;
         let key = last.key()?;
-        if let Some((_, last_frame_no)) = Self::parse_frame_range(key) {
+        if let Some((_, last_frame_no, _)) = Self::parse_frame_range(key) {
             *frame_no = last_frame_no;
         }
         Some(key.to_string())
@@ -893,4 +900,25 @@ async fn put_metadata_obj(
 pub struct Context {
     pub replicator: Replicator,
     pub runtime: tokio::runtime::Runtime,
+}
+
+#[derive(Debug, Clone, Copy, Ord, PartialOrd, Eq, PartialEq)]
+pub enum CompressionKind {
+    None,
+    Gzip,
+}
+
+impl Default for CompressionKind {
+    fn default() -> Self {
+        CompressionKind::None
+    }
+}
+
+impl std::fmt::Display for CompressionKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            CompressionKind::None => write!(f, "raw"),
+            CompressionKind::Gzip => write!(f, "gz"),
+        }
+    }
 }

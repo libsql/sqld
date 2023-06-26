@@ -1,3 +1,4 @@
+use crate::replicator::CompressionKind;
 use crate::wal::WalFileReader;
 use anyhow::{anyhow, Result};
 use arc_swap::ArcSwap;
@@ -11,7 +12,7 @@ use uuid::Uuid;
 pub(crate) struct WalCopier {
     wal: Option<WalFileReader>,
     outbox: Sender<String>,
-    use_compression: bool,
+    use_compression: CompressionKind,
     max_frames_per_batch: usize,
     wal_path: String,
     bucket: String,
@@ -26,7 +27,7 @@ impl WalCopier {
         generation: Arc<ArcSwap<Uuid>>,
         db_path: &str,
         max_frames_per_batch: usize,
-        use_compression: bool,
+        use_compression: CompressionKind,
         outbox: Sender<String>,
     ) -> Self {
         WalCopier {
@@ -87,31 +88,30 @@ impl WalCopier {
             let end = (start + self.max_frames_per_batch as u32).min(frames.end);
             let len = (end - start) as usize;
             let fdesc = format!(
-                "{}-{}/{:012}-{:012}",
+                "{}-{}/{:012}-{:012}.{}",
                 self.db_name,
                 generation,
                 start,
-                end - 1
+                end - 1,
+                self.use_compression
             );
             let mut out = tokio::fs::File::create(&format!("{}/{}", self.bucket, fdesc)).await?;
 
             wal.seek_frame(start).await?;
-            if self.use_compression {
-                let mut gzip = async_compression::tokio::write::GzipEncoder::new(&mut out);
-                wal.copy_frames(&mut gzip, len).await?;
-                gzip.shutdown().await?;
-            } else {
-                wal.copy_frames(&mut out, len).await?;
-                out.shutdown().await?;
+            match self.use_compression {
+                CompressionKind::None => {
+                    wal.copy_frames(&mut out, len).await?;
+                    out.shutdown().await?;
+                }
+                CompressionKind::Gzip => {
+                    let mut gzip = async_compression::tokio::write::GzipEncoder::new(&mut out);
+                    wal.copy_frames(&mut gzip, len).await?;
+                    gzip.shutdown().await?;
+                }
             }
             if tracing::enabled!(tracing::Level::DEBUG) {
                 let file_len = out.metadata().await?.len();
-                tracing::debug!(
-                    "written frames {:012}-{:012} into local file using {} bytes",
-                    start,
-                    end - 1,
-                    file_len
-                );
+                tracing::debug!("written {} bytes to {}", file_len, fdesc);
             }
             drop(out);
             if self.outbox.send(fdesc).await.is_err() {
