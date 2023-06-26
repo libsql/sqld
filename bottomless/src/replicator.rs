@@ -1,6 +1,6 @@
+use crate::backup::WalCopier;
 use crate::read::BatchReader;
 use crate::wal::WalFileReader;
-use crate::write::BatchWriter;
 use anyhow::anyhow;
 use arc_swap::ArcSwap;
 use aws_sdk_s3::error::SdkError;
@@ -12,7 +12,7 @@ use aws_sdk_s3::{Client, Config};
 use bytes::{Buf, Bytes, BytesMut};
 use std::collections::BTreeMap;
 use std::io::SeekFrom;
-use std::ops::{Deref, Range};
+use std::ops::Deref;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -65,12 +65,24 @@ pub enum RestoreAction {
 #[derive(Clone, Debug)]
 pub struct Options {
     pub create_bucket_if_not_exists: bool,
+    /// If `true` when restoring, frames checksums will be verified prior their pages being flushed
+    /// into the main database file.
     pub verify_crc: bool,
+    /// If `true`, WAL frames will be zipped before being send to S3.
     pub use_compression: bool,
     pub aws_endpoint: Option<String>,
     pub db_id: Option<String>,
+    /// Bucket directory name where all S3 objects are backed up. General schema is:
+    /// - `{db-name}-{uuid-v7}` subdirectories:
+    ///   - `.meta` file with database page size and initial WAL checksum.
+    ///   - Series of files `{first-frame-no}-{last-frame-no}` containing the batches of frames
+    ///     from which the restore will be made.
     pub bucket_name: String,
+    /// Max number of WAL frames per S3 object.
     pub max_frames_per_batch: usize,
+    /// Max time before next frame of batched frames should be synced. This works in the case
+    /// when we don't explicitly run into `max_frames_per_batch` threshold and the corresponding
+    /// checkpoint never commits.
     pub max_batch_interval: Duration,
 }
 
@@ -97,7 +109,7 @@ impl Default for Options {
             verify_crc: false,
             use_compression: true,
             max_batch_interval: Duration::from_secs(15),
-            max_frames_per_batch: 64,
+            max_frames_per_batch: 1024, // with 4KiB pages => 4MiB batches (uncompressed)
             db_id,
             aws_endpoint,
             bucket_name,
@@ -153,18 +165,17 @@ impl Replicator {
         let last_sent_frame_no = Arc::new(AtomicU32::new(0));
         let commits_in_current_generation = Arc::new(AtomicU32::new(0));
 
-        let _backup_job = {
-            let mut flush_manager = FlushManager {
-                wal: None,
-                client: client.clone(),
-                use_compression: options.use_compression,
-                max_frames_per_batch: options.max_frames_per_batch,
-                wal_path: format!("{}-wal", &db_path),
-                bucket: bucket.clone(),
-                db_name: db_name.clone(),
-                generation: generation.clone(),
-                commits_in_current_generation: commits_in_current_generation.clone(),
-            };
+        let (frames_outbox, mut frames_inbox) = tokio::sync::mpsc::channel(64);
+        let _local_backup = {
+            let mut copier = WalCopier::new(
+                bucket.clone(),
+                db_name.clone().into(),
+                generation.clone(),
+                &db_path,
+                options.max_frames_per_batch,
+                options.use_compression,
+                frames_outbox,
+            );
             let next_frame_no = next_frame_no.clone();
             let last_sent_frame_no = last_sent_frame_no.clone();
             let batch_interval = options.max_batch_interval;
@@ -176,7 +187,9 @@ impl Replicator {
                         Ok(Err(_)) => {
                             return;
                         }
-                        Err(_) => true, // timeout reached
+                        Err(_) => {
+                            true // timeout reached
+                        }
                     };
                     if trigger {
                         loop {
@@ -186,7 +199,7 @@ impl Replicator {
                             let frames = (last_sent_frame + 1)..next_frame;
 
                             if !frames.is_empty() {
-                                let res = flush_manager.flush(frames).await;
+                                let res = copier.flush(frames).await;
                                 if last_committed_frame_no_sender.send(res).is_err() {
                                     // Replicator was probably dropped and therefore corresponding
                                     // receiver has been closed
@@ -203,6 +216,34 @@ impl Replicator {
             })
         };
 
+        let _s3_upload = {
+            let client = client.clone();
+            let bucket = options.bucket_name.clone();
+            tokio::spawn(async move {
+                let sem = Arc::new(tokio::sync::Semaphore::new(32));
+                while let Some(fdesc) = frames_inbox.recv().await {
+                    tracing::trace!("received S3 upload request: {}", fdesc);
+                    let sem = sem.clone();
+                    let permit = sem.acquire_owned().await.unwrap();
+                    let client = client.clone();
+                    let bucket = bucket.clone();
+                    tokio::spawn(async move {
+                        let fpath = format!("{}/{}", bucket, fdesc);
+                        let body = ByteStream::from_path(&fpath).await.unwrap();
+                        let _ = client
+                            .put_object()
+                            .bucket(bucket)
+                            .key(fdesc)
+                            .body(body)
+                            .send()
+                            .await;
+                        tokio::fs::remove_file(&fpath).await.unwrap();
+                        drop(permit);
+                        tracing::trace!("Uploaded to S3: {}", fpath);
+                    });
+                }
+            })
+        };
         Ok(Self {
             client,
             bucket,
@@ -223,6 +264,10 @@ impl Replicator {
 
     pub fn next_frame_no(&self) -> u32 {
         self.next_frame_no.load(Ordering::Acquire)
+    }
+
+    pub fn last_known_frame(&self) -> u32 {
+        self.next_frame_no() - 1
     }
 
     pub fn last_sent_frame_no(&self) -> u32 {
@@ -266,7 +311,6 @@ impl Replicator {
     // so verifying that it hasn't changed is a panic check. Perhaps in the future
     // it will be useful, if WAL ever allows changing the page size.
     pub fn set_page_size(&mut self, page_size: usize) -> Result<()> {
-        tracing::trace!("Setting page size from {} to {}", self.page_size, page_size);
         if self.page_size != Self::UNSET_PAGE_SIZE && self.page_size != page_size {
             return Err(anyhow::anyhow!(
                 "Cannot set page size to {}, it was already set to {}",
@@ -350,12 +394,12 @@ impl Replicator {
         let last_sent = self.last_sent_frame_no();
         let most_recent = prev + frame_count - 1;
         if most_recent - last_sent >= self.max_frames_per_batch as u32 {
-            tracing::trace!("Triggering flush for frames {}..{}", last_sent, most_recent);
             self.request_flush();
         }
     }
 
     pub fn request_flush(&self) {
+        tracing::trace!("Requesting flush");
         let _ = self.flush_trigger.send(());
     }
 
@@ -849,69 +893,4 @@ async fn put_metadata_obj(
 pub struct Context {
     pub replicator: Replicator,
     pub runtime: tokio::runtime::Runtime,
-}
-
-struct FlushManager {
-    wal: Option<WalFileReader>,
-    client: Client,
-    use_compression: bool,
-    max_frames_per_batch: usize,
-    wal_path: String,
-    bucket: String,
-    db_name: String,
-    generation: Arc<ArcSwap<Uuid>>,
-    commits_in_current_generation: Arc<AtomicU32>,
-}
-
-impl FlushManager {
-    async fn flush(&mut self, frames: Range<u32>) -> Result<u32> {
-        if frames.is_empty() {
-            tracing::trace!("Trying to flush empty frame range");
-            return Ok(frames.start - 1);
-        }
-        let wal_file = {
-            if self.wal.is_none() {
-                self.wal = WalFileReader::open(&self.wal_path).await?;
-            }
-            if let Some(wal) = self.wal.as_mut() {
-                wal
-            } else {
-                return Err(anyhow!("WAL file not found: {}", self.wal_path));
-            }
-        };
-        let generation = self.generation.load().clone();
-        if frames.start == 1 {
-            // before writing the first batch of frames - store .meta object with basic info
-            let key = format!("{}-{}/.meta", self.db_name, &generation);
-            let page_size = wal_file.page_size();
-            let crc = wal_file.checksum();
-            put_metadata_obj(&self.client, &self.bucket, key, page_size, crc).await?;
-        }
-        tracing::trace!("Flushing {} frames", frames.len());
-        self.commits_in_current_generation
-            .fetch_add(1, Ordering::SeqCst);
-        //wal_file.verify().await?;
-        for start in frames.clone().step_by(self.max_frames_per_batch) {
-            let end = (start + self.max_frames_per_batch as u32).min(frames.end);
-            let mut writer = BatchWriter::new(self.use_compression, start..end);
-            if let Some(body) = writer.read_frames(wal_file).await? {
-                let key = format!(
-                    "{}-{}/{:012}-{:012}",
-                    self.db_name,
-                    &generation,
-                    start,
-                    end - 1
-                );
-                self.client
-                    .put_object()
-                    .bucket(&self.bucket)
-                    .key(key)
-                    .body(body.into())
-                    .send()
-                    .await?;
-                tracing::trace!("Frame range [{}..{}) has been sent to S3", start, end);
-            }
-        }
-        Ok(frames.end - 1)
-    }
 }

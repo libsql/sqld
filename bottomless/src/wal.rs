@@ -1,7 +1,8 @@
 use anyhow::{anyhow, Result};
 use std::io::SeekFrom;
 use std::path::Path;
-use tokio::io::{AsyncReadExt, AsyncSeekExt};
+use tokio::fs::File;
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncSeekExt, AsyncWrite, AsyncWriteExt};
 
 #[repr(transparent)]
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -118,7 +119,7 @@ impl From<[u8; WalHeader::SIZE as usize]> for WalHeader {
 
 #[derive(Debug)]
 pub(crate) struct WalFileReader {
-    file: tokio::fs::File,
+    file: File,
     header: WalHeader,
 }
 
@@ -151,7 +152,7 @@ impl WalFileReader {
     }
 
     /// Returns an offset in a WAL file, where the data of a frame with given number starts.
-    pub fn offset_in_wal(&self, frame_no: u32) -> u64 {
+    pub fn offset(&self, frame_no: u32) -> u64 {
         WalHeader::SIZE + ((frame_no - 1) as u64) * self.frame_size()
     }
 
@@ -167,7 +168,7 @@ impl WalFileReader {
 
     /// Sets a file cursor at the beginning of a frame with given number.
     pub async fn seek_frame(&mut self, frame_no: u32) -> Result<()> {
-        let offset = self.offset_in_wal(frame_no);
+        let offset = self.offset(frame_no);
         self.file.seek(SeekFrom::Start(offset)).await?;
         Ok(())
     }
@@ -194,6 +195,7 @@ impl WalFileReader {
     /// It will return an error if provided `buf` length is not multiplication of an underlying
     /// WAL frame size.
     /// It will return an error if at least one frame was not fully read.
+    #[allow(dead_code)]
     pub async fn read_frame_range(&mut self, buf: &mut [u8]) -> Result<usize> {
         let frame_size = self.frame_size() as usize;
         if buf.len() % frame_size != 0 {
@@ -207,6 +209,17 @@ impl WalFileReader {
         }
     }
 
+    pub async fn copy_frames<W>(&mut self, w: &mut W, frame_count: usize) -> Result<()>
+    where
+        W: AsyncWrite + Unpin,
+    {
+        //TODO - specialize non-compressed file cloning:
+        //   libc::copy_file_range(wal.as_mut(), wal.offset(frame), out, 0, len)
+        let len = (frame_count as u64) * self.frame_size();
+        copy_range(&mut self.file, w, len).await?;
+        Ok(())
+    }
+
     #[allow(dead_code)]
     pub async fn next_frame(&mut self, page: &mut [u8]) -> Result<Option<WalFrameHeader>> {
         debug_assert_eq!(page.len(), self.page_size() as usize);
@@ -215,6 +228,12 @@ impl WalFileReader {
             self.file.read_exact(page).await?;
         }
         Ok(header)
+    }
+}
+
+impl AsMut<File> for WalFileReader {
+    fn as_mut(&mut self) -> &mut File {
+        &mut self.file
     }
 }
 
@@ -232,6 +251,47 @@ pub fn checksum_be(init: u64, page: &[u8]) -> u64 {
         i += 2;
     }
     ((s1 as u64) << 32) | (s2 as u64)
+}
+
+// 128KiB since many OSes already prefetch 128KiB and that's also unit of pricing in S3
+const COPY_BUF_SIZE: u64 = 128 * 1024;
+
+/// Copies up to `len` bytes from `src` to `dst`. Returns number of written bytes,
+/// which can differ from bytes read eg. when compression is used.
+async fn copy_range<R, W>(src: &mut R, dst: &mut W, len: u64) -> Result<u64>
+where
+    R: AsyncRead + Unpin,
+    W: AsyncWrite + Unpin,
+{
+    let capacity = COPY_BUF_SIZE.min(len) as usize;
+    let mut buf = Vec::with_capacity(capacity);
+    buf.spare_capacity_mut();
+    unsafe { buf.set_len(capacity) };
+
+    let mut remaining = len;
+    let mut total_written = 0;
+    while remaining > 0 {
+        let to_read = remaining.min(buf.len() as u64);
+        let slice = &mut buf[0..to_read as usize];
+        let read = src.read(slice).await?;
+        if read == 0 {
+            break;
+        }
+        remaining -= read as u64;
+        let mut slice = &slice[0..read];
+        while !slice.is_empty() {
+            // try to write everything to dst, it's not guaranteed to finish in one try
+            let written = dst.write(slice).await?;
+            if written == 0 {
+                break;
+            }
+            dst.flush().await?;
+            total_written += written as u64;
+            slice = &slice[written..];
+        }
+    }
+
+    Ok(total_written)
 }
 
 #[cfg(test)]

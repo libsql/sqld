@@ -4,10 +4,10 @@
 
 mod ffi;
 
+mod backup;
 mod read;
 pub mod replicator;
 mod wal;
-mod write;
 
 use crate::ffi::{
     bottomless_methods, libsql_wal_methods, sqlite3, sqlite3_file, sqlite3_vfs, PgHdr, Wal,
@@ -342,7 +342,7 @@ pub extern "C" fn xCheckpoint(
         return ffi::SQLITE_OK;
     }
 
-    let last_known_frame = ctx.replicator.next_frame_no() - 1;
+    let last_known_frame = ctx.replicator.last_known_frame();
     ctx.replicator.request_flush();
     if let Err(e) = block_on!(
         ctx.runtime,
