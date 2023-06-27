@@ -1,6 +1,5 @@
 use crate::{run_server, Config};
 use anyhow::Result;
-use bottomless::replicator::CompressionKind;
 use libsql_client::{Connection, QueryResult, Statement, Value};
 use std::net::ToSocketAddrs;
 use std::path::PathBuf;
@@ -31,7 +30,7 @@ async fn backup_restore() {
         bottomless_replication: Some(bottomless::replicator::Options {
             create_bucket_if_not_exists: true,
             verify_crc: true,
-            use_compression: CompressionKind::Gzip,
+            use_compression: bottomless::replicator::CompressionKind::Gzip,
             bucket_name: BUCKET.to_string(),
             max_batch_interval: Duration::from_millis(250),
             ..Default::default()
