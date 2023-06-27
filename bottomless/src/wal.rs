@@ -125,7 +125,7 @@ pub(crate) struct WalFileReader {
 
 impl WalFileReader {
     pub async fn open<P: AsRef<Path>>(fpath: P) -> Result<Option<Self>> {
-        let mut file = tokio::fs::File::open(fpath).await?;
+        let mut file = File::open(fpath).await?;
         let len = file.metadata().await.map(|m| m.len()).unwrap_or(0);
         if len < WalHeader::SIZE {
             return Ok(None);
@@ -186,6 +186,17 @@ impl WalFileReader {
         }
     }
 
+    pub async fn copy_frames<W>(&mut self, w: &mut W, frame_count: usize) -> Result<()>
+    where
+        W: AsyncWrite + Unpin,
+    {
+        //TODO - specialize non-compressed file cloning:
+        //   libc::copy_file_range(wal.as_mut(), wal.offset(frame), out, 0, len)
+        let len = (frame_count as u64) * self.frame_size();
+        copy_range(&mut self.file, w, len).await?;
+        Ok(())
+    }
+
     /// Reads a range of next consecutive frames, including headers, into given buffer.
     /// Returns a number of frames read this way.
     ///
@@ -207,17 +218,6 @@ impl WalFileReader {
         } else {
             Ok(read / frame_size)
         }
-    }
-
-    pub async fn copy_frames<W>(&mut self, w: &mut W, frame_count: usize) -> Result<()>
-    where
-        W: AsyncWrite + Unpin,
-    {
-        //TODO - specialize non-compressed file cloning:
-        //   libc::copy_file_range(wal.as_mut(), wal.offset(frame), out, 0, len)
-        let len = (frame_count as u64) * self.frame_size();
-        copy_range(&mut self.file, w, len).await?;
-        Ok(())
     }
 
     #[allow(dead_code)]

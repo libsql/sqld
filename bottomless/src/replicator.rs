@@ -32,7 +32,7 @@ pub struct Replicator {
     /// Last frame which has been requested to be sent to S3.
     /// Always: [last_sent_frame_no] <= [next_frame_no].
     last_sent_frame_no: Arc<AtomicU32>,
-    /// Last frame which has been confirmed as sent to S3.
+    /// Last frame which has been confirmed as stored locally outside of WAL file.
     /// Always: [last_committed_frame_no] <= [last_sent_frame_no].
     last_committed_frame_no: Receiver<Result<u32>>,
     flush_trigger: Sender<()>,
@@ -75,8 +75,8 @@ pub struct Options {
     /// Bucket directory name where all S3 objects are backed up. General schema is:
     /// - `{db-name}-{uuid-v7}` subdirectories:
     ///   - `.meta` file with database page size and initial WAL checksum.
-    ///   - Series of files `{first-frame-no}-{last-frame-no}` containing the batches of frames
-    ///     from which the restore will be made.
+    ///   - Series of files `{first-frame-no}-{last-frame-no}.{compression-kind}` containing
+    ///     the batches of frames from which the restore will be made.
     pub bucket_name: String,
     /// Max number of WAL frames per S3 object.
     pub max_frames_per_batch: usize,
@@ -216,7 +216,7 @@ impl Replicator {
             tokio::spawn(async move {
                 let sem = Arc::new(tokio::sync::Semaphore::new(32));
                 while let Some(fdesc) = frames_inbox.recv().await {
-                    tracing::trace!("received S3 upload request: {}", fdesc);
+                    tracing::trace!("Received S3 upload request: {}", fdesc);
                     let sem = sem.clone();
                     let permit = sem.acquire_owned().await.unwrap();
                     let client = client.clone();
@@ -275,7 +275,7 @@ impl Replicator {
                 let last_committed = self.last_committed_frame_no.borrow();
                 match last_committed.deref() {
                     Ok(last_committed) if *last_committed >= frame_no => {
-                        tracing::debug!(
+                        tracing::trace!(
                             "Confirmed commit of frame no. {} (waited for >= {})",
                             last_committed,
                             frame_no
@@ -455,15 +455,16 @@ impl Replicator {
             .await?;
         let frame_count = wal_file.frame_count().await;
         tracing::trace!("Local WAL pages: {}", frame_count);
-        let checksum = wal_file.checksum();
-        tracing::trace!("Local WAL checksum: {}", checksum);
         self.submit_frames(frame_count);
         self.request_flush();
         let last_written_frame = self.wait_until_committed(frame_count - 1).await?;
         tracing::info!("Backed up WAL frames up to {}", last_written_frame);
         let pending_frames = self.pending_frames();
         if pending_frames != 0 {
-            tracing::warn!("Uncommited WAL entries: {}", pending_frames);
+            tracing::warn!(
+                "Uncommitted WAL entries: {} frames in total",
+                pending_frames
+            );
         }
         tracing::info!("Local WAL replicated");
         Ok(())
@@ -722,6 +723,7 @@ impl Replicator {
                     }
                 };
                 let mut pending_pages = BTreeMap::new();
+                let mut last_received_frame_no = 0;
                 for obj in objs {
                     let key = obj
                         .key()
@@ -743,6 +745,11 @@ impl Replicator {
                                 continue;
                             }
                         };
+                    if first_frame_no != last_received_frame_no + 1 {
+                        tracing::warn!("Missing series of consecutive frames. Last applied frame: {}, next found: {}. Stopping the restoration process", 
+                            last_received_frame_no, first_frame_no);
+                        break;
+                    }
                     if last_frame_no > last_consistent_frame {
                         tracing::warn!("Remote log contains frame {} larger than last consistent frame ({}), stopping the restoration process",
                                 last_frame_no, last_consistent_frame);
@@ -753,7 +760,7 @@ impl Replicator {
                         BatchReader::new(frameno, frame.body, self.page_size, compression_kind);
                     while let Some(frame) = reader.next_frame_header().await? {
                         let pgno = frame.pgno();
-                        tracing::debug!(
+                        tracing::trace!(
                             "Restoring next frame {} as main db page {}",
                             frameno,
                             pgno
@@ -779,9 +786,10 @@ impl Replicator {
                                 // should we flush here? In theory if we don't recover fully we scrap
                                 // anyway
                             }
-                            tracing::debug!("Restored {} pages into main DB file.", page_count);
+                            tracing::trace!("Restored {} pages into main DB file.", page_count);
                         }
                         frameno += 1;
+                        last_received_frame_no += 1;
                     }
                     main_db_writer.flush().await?;
                     applied_wal_frame = true;
@@ -797,6 +805,11 @@ impl Replicator {
             }
         } else {
             tracing::info!(".meta object not found, skipping WAL restore.");
+        }
+
+        let dir = format!("{}/{}-{}/", self.bucket, self.db_name, generation);
+        if tokio::fs::remove_dir_all(&dir).await.is_ok() {
+            tracing::info!("Removed remaining contents of a backup directory: {}", dir);
         }
 
         if applied_wal_frame {
@@ -902,16 +915,11 @@ pub struct Context {
     pub runtime: tokio::runtime::Runtime,
 }
 
-#[derive(Debug, Clone, Copy, Ord, PartialOrd, Eq, PartialEq)]
+#[derive(Debug, Clone, Copy, Default, Ord, PartialOrd, Eq, PartialEq)]
 pub enum CompressionKind {
+    #[default]
     None,
     Gzip,
-}
-
-impl Default for CompressionKind {
-    fn default() -> Self {
-        CompressionKind::None
-    }
 }
 
 impl std::fmt::Display for CompressionKind {

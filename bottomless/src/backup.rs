@@ -63,7 +63,7 @@ impl WalCopier {
         if frames.start == 1 {
             // before writing the first batch of frames - init directory
             // and store .meta object with basic info
-            tracing::trace!("initializing local backup directory: {:?}", dir);
+            tracing::info!("initializing local backup directory: {:?}", dir);
             tokio::fs::create_dir_all(&dir).await?;
             let meta_path = format!("{}/.meta", dir);
             let mut meta_file = tokio::fs::File::create(&meta_path).await?;
