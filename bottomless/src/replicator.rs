@@ -13,6 +13,7 @@ use bytes::{Buf, Bytes, BytesMut};
 use std::collections::BTreeMap;
 use std::io::SeekFrom;
 use std::ops::Deref;
+use std::path::Path;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -47,6 +48,7 @@ pub struct Replicator {
 
     use_compression: CompressionKind,
     max_frames_per_batch: usize,
+    s3_upload_max_parallelism: usize,
 }
 
 #[derive(Debug)]
@@ -84,6 +86,8 @@ pub struct Options {
     /// when we don't explicitly run into `max_frames_per_batch` threshold and the corresponding
     /// checkpoint never commits.
     pub max_batch_interval: Duration,
+    /// Maximum number of S3 file upload requests that may happen in parallel.
+    pub s3_upload_max_parallelism: usize,
 }
 
 impl Options {
@@ -110,6 +114,7 @@ impl Default for Options {
             use_compression: CompressionKind::Gzip,
             max_batch_interval: Duration::from_secs(15),
             max_frames_per_batch: 1024, // with 4KiB pages => 4MiB batches (uncompressed)
+            s3_upload_max_parallelism: 32,
             db_id,
             aws_endpoint,
             bucket_name,
@@ -213,8 +218,9 @@ impl Replicator {
         let _s3_upload = {
             let client = client.clone();
             let bucket = options.bucket_name.clone();
+            let max_parallelism = options.s3_upload_max_parallelism;
             tokio::spawn(async move {
-                let sem = Arc::new(tokio::sync::Semaphore::new(32));
+                let sem = Arc::new(tokio::sync::Semaphore::new(max_parallelism));
                 while let Some(fdesc) = frames_inbox.recv().await {
                     tracing::trace!("Received S3 upload request: {}", fdesc);
                     let sem = sem.clone();
@@ -224,16 +230,20 @@ impl Replicator {
                     tokio::spawn(async move {
                         let fpath = format!("{}/{}", bucket, fdesc);
                         let body = ByteStream::from_path(&fpath).await.unwrap();
-                        let _ = client
+                        if let Err(e) = client
                             .put_object()
                             .bucket(bucket)
                             .key(fdesc)
                             .body(body)
                             .send()
-                            .await;
-                        tokio::fs::remove_file(&fpath).await.unwrap();
+                            .await
+                        {
+                            tracing::error!("Failed to send {} to S3: {}", fpath, e);
+                        } else {
+                            tokio::fs::remove_file(&fpath).await.unwrap();
+                            tracing::trace!("Uploaded to S3: {}", fpath);
+                        }
                         drop(permit);
-                        tracing::trace!("Uploaded to S3: {}", fpath);
                     });
                 }
             })
@@ -253,6 +263,7 @@ impl Replicator {
             db_name,
             use_compression: options.use_compression,
             max_frames_per_batch: options.max_frames_per_batch,
+            s3_upload_max_parallelism: options.s3_upload_max_parallelism,
         })
     }
 
@@ -270,23 +281,24 @@ impl Replicator {
 
     /// Waits until the commit for a given frame_no or higher was given.
     pub async fn wait_until_committed(&mut self, frame_no: u32) -> Result<u32> {
-        loop {
-            {
-                let last_committed = self.last_committed_frame_no.borrow();
-                match last_committed.deref() {
-                    Ok(last_committed) if *last_committed >= frame_no => {
-                        tracing::trace!(
-                            "Confirmed commit of frame no. {} (waited for >= {})",
-                            last_committed,
-                            frame_no
-                        );
-                        return Ok(*last_committed);
-                    }
-                    Ok(_) => {}
-                    Err(e) => return Err(anyhow!("Failed to flush frames: {}", e)),
-                }
+        let res = self
+            .last_committed_frame_no
+            .wait_for(|result| match result {
+                Ok(last_committed) => *last_committed >= frame_no,
+                Err(_) => true,
+            })
+            .await?;
+
+        match res.deref() {
+            Ok(last_committed) => {
+                tracing::trace!(
+                    "Confirmed commit of frame no. {} (waited for >= {})",
+                    last_committed,
+                    frame_no
+                );
+                Ok(*last_committed)
             }
-            self.last_committed_frame_no.changed().await?;
+            Err(e) => Err(anyhow!("Failed to flush frames: {}", e)),
         }
     }
 
@@ -615,6 +627,10 @@ impl Replicator {
     pub async fn restore_from(&mut self, generation: Uuid) -> Result<RestoreAction> {
         use tokio::io::AsyncWriteExt;
 
+        // first check if there are any remaining files that we didn't manage to upload
+        // on time in the last run
+        self.upload_remaining_files(&generation).await?;
+
         // Check if the database needs to be restored by inspecting the database
         // change counter and the WAL size.
         let local_counter = match tokio::fs::File::open(&self.db_path).await {
@@ -807,11 +823,6 @@ impl Replicator {
             tracing::info!(".meta object not found, skipping WAL restore.");
         }
 
-        let dir = format!("{}/{}-{}/", self.bucket, self.db_name, generation);
-        if tokio::fs::remove_dir_all(&dir).await.is_ok() {
-            tracing::info!("Removed remaining contents of a backup directory: {}", dir);
-        }
-
         if applied_wal_frame {
             Ok::<_, anyhow::Error>(RestoreAction::SnapshotMainDbFile)
         } else {
@@ -857,6 +868,59 @@ impl Replicator {
             *frame_no = last_frame_no;
         }
         Some(key.to_string())
+    }
+
+    async fn upload_remaining_files(&self, generation: &Uuid) -> Result<()> {
+        let prefix = format!("{}-{}", self.db_name, generation);
+        let dir = format!("{}/{}-{}", self.bucket, self.db_name, generation);
+        if tokio::fs::try_exists(&dir).await? {
+            let mut files = tokio::fs::read_dir(&dir).await?;
+            let sem = Arc::new(tokio::sync::Semaphore::new(self.s3_upload_max_parallelism));
+            while let Some(file) = files.next_entry().await? {
+                let fpath = file.path();
+                if let Some(key) = Self::fpath_to_key(&fpath, &prefix) {
+                    tracing::trace!("Requesting upload of the remaining backup file: {}", key);
+                    let permit = sem.clone().acquire_owned().await?;
+                    let bucket = self.bucket.clone();
+                    let key = key.to_string();
+                    let client = self.client.clone();
+                    tokio::spawn(async move {
+                        let body = ByteStream::from_path(&fpath).await.unwrap();
+                        if let Err(e) = client
+                            .put_object()
+                            .bucket(bucket)
+                            .key(key.clone())
+                            .body(body)
+                            .send()
+                            .await
+                        {
+                            tracing::error!("Failed to send {} to S3: {}", key, e);
+                        } else {
+                            tokio::fs::remove_file(&fpath).await.unwrap();
+                            tracing::trace!("Uploaded to S3: {}", key);
+                        }
+                        drop(permit);
+                    });
+                }
+            }
+            // wait for all started upload tasks to finish
+            let _ = sem
+                .acquire_many(self.s3_upload_max_parallelism as u32)
+                .await?;
+            if let Err(e) = tokio::fs::remove_dir(&dir).await {
+                tracing::warn!("Couldn't remove backed up directory {}: {}", dir, e);
+            }
+        }
+        Ok(())
+    }
+
+    fn fpath_to_key<'a>(fpath: &'a Path, dir: &str) -> Option<&'a str> {
+        let str = fpath.to_str()?;
+        if str.ends_with(".gz") | str.ends_with(".raw") | str.ends_with(".meta") {
+            let idx = str.rfind(dir)?;
+            return Some(&str[idx..]);
+        }
+        None
     }
 
     pub async fn store_metadata(&self, page_size: u32, crc: u64) -> Result<()> {
