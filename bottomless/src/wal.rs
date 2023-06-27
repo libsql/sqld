@@ -2,7 +2,7 @@ use anyhow::{anyhow, Result};
 use std::io::SeekFrom;
 use std::path::Path;
 use tokio::fs::File;
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncSeekExt, AsyncWrite, AsyncWriteExt};
+use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWrite};
 
 #[repr(transparent)]
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -193,7 +193,9 @@ impl WalFileReader {
         //TODO - specialize non-compressed file cloning:
         //   libc::copy_file_range(wal.as_mut(), wal.offset(frame), out, 0, len)
         let len = (frame_count as u64) * self.frame_size();
-        copy_range(&mut self.file, w, len).await?;
+        let h = self.file.try_clone().await?;
+        let mut range = h.take(len);
+        tokio::io::copy(&mut range, w).await?;
         Ok(())
     }
 
@@ -251,47 +253,6 @@ pub fn checksum_be(init: u64, page: &[u8]) -> u64 {
         i += 2;
     }
     ((s1 as u64) << 32) | (s2 as u64)
-}
-
-// 128KiB since many OSes already prefetch 128KiB and that's also unit of pricing in S3
-const COPY_BUF_SIZE: u64 = 128 * 1024;
-
-/// Copies up to `len` bytes from `src` to `dst`. Returns number of written bytes,
-/// which can differ from bytes read eg. when compression is used.
-async fn copy_range<R, W>(src: &mut R, dst: &mut W, len: u64) -> Result<u64>
-where
-    R: AsyncRead + Unpin,
-    W: AsyncWrite + Unpin,
-{
-    let capacity = COPY_BUF_SIZE.min(len) as usize;
-    let mut buf = Vec::with_capacity(capacity);
-    buf.spare_capacity_mut();
-    unsafe { buf.set_len(capacity) };
-
-    let mut remaining = len;
-    let mut total_written = 0;
-    while remaining > 0 {
-        let to_read = remaining.min(buf.len() as u64);
-        let slice = &mut buf[0..to_read as usize];
-        let read = src.read(slice).await?;
-        if read == 0 {
-            break;
-        }
-        remaining -= read as u64;
-        let mut slice = &slice[0..read];
-        while !slice.is_empty() {
-            // try to write everything to dst, it's not guaranteed to finish in one try
-            let written = dst.write(slice).await?;
-            if written == 0 {
-                break;
-            }
-            dst.flush().await?;
-            total_written += written as u64;
-            slice = &slice[written..];
-        }
-    }
-
-    Ok(total_written)
 }
 
 #[cfg(test)]
