@@ -6,7 +6,6 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::{bail, Context as _, Result};
-use bottomless::replicator::CompressionKind;
 use bytesize::ByteSize;
 use clap::Parser;
 use mimalloc::MiMalloc;
@@ -264,7 +263,7 @@ fn config_from_args(args: Cli) -> Result<Config> {
             Some(bottomless::replicator::Options {
                 create_bucket_if_not_exists: true,
                 verify_crc: false,
-                use_compression: CompressionKind::Gzip,
+                use_compression: bottomless::replicator::CompressionKind::Gzip,
                 aws_endpoint: env::var("LIBSQL_BOTTOMLESS_ENDPOINT").ok(),
                 bucket_name: env::var("LIBSQL_BOTTOMLESS_BUCKET")
                     .unwrap_or_else(|_| "bottomless".to_string()),
