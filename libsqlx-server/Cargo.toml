@@ -6,6 +6,7 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
+async-bincode = { version = "0.7.1", features = ["tokio"] }
 axum = "0.6.18"
 base64 = "0.21.2"
 bincode = "1.3.3"
@@ -15,6 +16,7 @@ color-eyre = "0.6.2"
 futures = "0.3.28"
 hmac = "0.12.1"
 hyper = { version = "0.14.27", features = ["h2", "server"] }
+itertools = "0.11.0"
 libsqlx = { version = "0.1.0", path = "../libsqlx" }
 moka = { version = "0.11.2", features = ["future"] }
 parking_lot = "0.12.1"
@@ -27,6 +29,11 @@ sha2 = "0.10.7"
 sled = "0.34.7"
 thiserror = "1.0.43"
 tokio = { version = "1.29.1", features = ["full"] }
+tokio-stream = "0.1.14"
+tokio-util = "0.7.8"
 tracing = "0.1.37"
 tracing-subscriber = { version = "0.3.17", features = ["env-filter"] }
 uuid = { version = "1.4.0", features = ["v4"] }
+
+[dev-dependencies]
+turmoil = "0.5.5"
