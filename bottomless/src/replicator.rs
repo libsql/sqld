@@ -5,11 +5,13 @@ use anyhow::anyhow;
 use arc_swap::ArcSwap;
 use aws_sdk_s3::error::SdkError;
 use aws_sdk_s3::operation::get_object::builders::GetObjectFluentBuilder;
+use aws_sdk_s3::operation::get_object::GetObjectOutput;
 use aws_sdk_s3::operation::list_objects::builders::ListObjectsFluentBuilder;
 use aws_sdk_s3::operation::list_objects::ListObjectsOutput;
 use aws_sdk_s3::primitives::ByteStream;
 use aws_sdk_s3::{Client, Config};
 use bytes::{Buf, Bytes, BytesMut};
+use chrono::{DateTime, Utc};
 use std::collections::BTreeMap;
 use std::io::SeekFrom;
 use std::ops::Deref;
@@ -20,7 +22,7 @@ use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tokio::sync::watch::{channel, Receiver, Sender};
 use tokio::time::{timeout_at, Instant};
-use uuid::Uuid;
+use uuid::{NoContext, Uuid};
 
 pub type Result<T> = anyhow::Result<T>;
 
@@ -351,7 +353,12 @@ impl Replicator {
     // is the most common operation.
     // NOTICE: at the time of writing, uuid v7 is an unstable feature of the uuid crate
     fn generate_generation() -> Uuid {
-        let (seconds, nanos) = uuid::timestamp::Timestamp::now(uuid::NoContext).to_unix();
+        let ts = uuid::timestamp::Timestamp::now(uuid::NoContext);
+        Self::generation_from_timestamp(ts)
+    }
+
+    fn generation_from_timestamp(ts: uuid::Timestamp) -> Uuid {
+        let (seconds, nanos) = ts.to_unix();
         let (seconds, nanos) = (253370761200 - seconds, 999999999 - nanos);
         let synthetic_ts = uuid::Timestamp::from_unix(uuid::NoContext, seconds, nanos);
         Uuid::new_v7(synthetic_ts)
@@ -553,23 +560,54 @@ impl Replicator {
     // FIXME: assumes that this bucket stores *only* generations for databases,
     // it should be more robust and continue looking if the first item does not
     // match the <db-name>-<generation-uuid>/ pattern.
-    pub async fn find_newest_generation(&self) -> Option<Uuid> {
+    pub async fn latest_generation_before(
+        &self,
+        timestamp: Option<&DateTime<Utc>>,
+    ) -> Option<Uuid> {
+        let mut next_marker: Option<String> = None;
         let prefix = format!("{}-", self.db_name);
-        let response = self
-            .list_objects()
-            .prefix(prefix)
-            .max_keys(1)
-            .send()
-            .await
-            .ok()?;
-        let objs = response.contents()?;
-        let key = objs.first()?.key()?;
-        let key = match key.find('/') {
-            Some(index) => &key[self.db_name.len() + 1..index],
-            None => key,
-        };
-        tracing::debug!("Generation candidate: {}", key);
-        Uuid::parse_str(key).ok()
+        let timestamp = timestamp.map(|ts| {
+            let ts = uuid::Timestamp::from_unix(NoContext, ts.timestamp() as u64, 0);
+            Self::generation_from_timestamp(ts)
+        });
+        loop {
+            let mut request = self.list_objects().prefix(prefix.clone());
+            if timestamp.is_none() {
+                request = request.max_keys(1);
+            }
+            if let Some(marker) = next_marker.take() {
+                request = request.marker(marker);
+            }
+            let response = request.send().await.ok()?;
+            let objs = response.contents()?;
+            if objs.is_empty() {
+                break;
+            }
+            let mut last_key = None;
+            for obj in objs {
+                let key = obj.key();
+                last_key = key;
+                if let Some(key) = last_key {
+                    tracing::trace!("Generation candidate: {}", key);
+                    let key = match key.find('/') {
+                        Some(index) => &key[self.db_name.len() + 1..index],
+                        None => key,
+                    };
+                    if let Ok(generation) = Uuid::parse_str(key) {
+                        match timestamp.as_ref() {
+                            None => return Some(generation),
+                            // since our UUIDs have reverse order, we check for first generation
+                            // higher than provided timestamp in order to get the first one that
+                            // happened before it
+                            Some(ts) if &generation >= ts => return Some(generation),
+                            _ => {}
+                        }
+                    }
+                }
+            }
+            next_marker = last_key.map(String::from);
+        }
+        None
     }
 
     // Tries to fetch the remote database change counter from given generation
@@ -624,7 +662,11 @@ impl Replicator {
     }
 
     // Restores the database state from given remote generation
-    pub async fn restore_from(&mut self, generation: Uuid) -> Result<RestoreAction> {
+    pub async fn restore_from(
+        &mut self,
+        generation: Uuid,
+        utc_time: Option<DateTime<Utc>>,
+    ) -> Result<RestoreAction> {
         use tokio::io::AsyncWriteExt;
 
         // first check if there are any remaining files that we didn't manage to upload
@@ -725,7 +767,8 @@ impl Replicator {
         let mut applied_wal_frame = false;
         if let Some((page_size, mut checksum)) = self.get_metadata(&generation).await? {
             self.set_page_size(page_size as usize)?;
-            loop {
+            let mut cont = true;
+            while cont {
                 let mut list_request = self.list_objects().prefix(&prefix);
                 if let Some(marker) = next_marker {
                     list_request = list_request.marker(marker);
@@ -745,7 +788,6 @@ impl Replicator {
                         .key()
                         .ok_or_else(|| anyhow::anyhow!("Failed to get key for an object"))?;
                     tracing::debug!("Loading {}", key);
-                    let frame = self.get_object(key.into()).send().await?;
 
                     let (first_frame_no, last_frame_no, compression_kind) =
                         match Self::parse_frame_range(key) {
@@ -771,6 +813,15 @@ impl Replicator {
                                 last_frame_no, last_consistent_frame);
                         break;
                     }
+                    let frame = match self.get_frame(key, utc_time.as_ref()).await? {
+                        Some(frame) => frame,
+                        None => {
+                            let ts = utc_time.unwrap_or_default();
+                            tracing::trace!("Requested frame object {} has timestamp more recent than expected {}. Stopping recovery.", key, ts.to_rfc3339());
+                            cont = false;
+                            break;
+                        }
+                    };
                     let mut frameno = first_frame_no;
                     let mut reader =
                         BatchReader::new(frameno, frame.body, self.page_size, compression_kind);
@@ -831,17 +882,24 @@ impl Replicator {
     }
 
     // Restores the database state from newest remote generation
-    pub async fn restore(&mut self) -> Result<RestoreAction> {
-        let newest_generation = match self.find_newest_generation().await {
+    pub async fn restore(
+        &mut self,
+        generation: Option<Uuid>,
+        timestamp: Option<DateTime<Utc>>,
+    ) -> Result<RestoreAction> {
+        let generation = match generation {
             Some(gen) => gen,
-            None => {
-                tracing::debug!("No generation found, nothing to restore");
-                return Ok(RestoreAction::SnapshotMainDbFile);
-            }
+            None => match self.latest_generation_before(timestamp.as_ref()).await {
+                Some(gen) => gen,
+                None => {
+                    tracing::debug!("No generation found, nothing to restore");
+                    return Ok(RestoreAction::SnapshotMainDbFile);
+                }
+            },
         };
 
-        tracing::info!("Restoring from generation {}", newest_generation);
-        self.restore_from(newest_generation).await
+        tracing::info!("Restoring from generation {}", generation);
+        self.restore_from(generation, timestamp).await
     }
 
     pub async fn get_last_consistent_frame(&self, generation: &Uuid) -> Result<u32> {
@@ -912,6 +970,36 @@ impl Replicator {
             }
         }
         Ok(())
+    }
+
+    async fn get_frame(
+        &self,
+        key: &str,
+        timestamp: Option<&DateTime<Utc>>,
+    ) -> Result<Option<GetObjectOutput>> {
+        let mut frame_req = self.get_object(key.into());
+        if let Some(timestamp) =
+            timestamp.map(|t| aws_sdk_s3::primitives::DateTime::from_secs(t.timestamp()))
+        {
+            frame_req = frame_req.if_unmodified_since(timestamp);
+        }
+        match frame_req.send().await {
+            Ok(frame) => Ok(Some(frame)),
+            Err(e) => {
+                // check if request for unmodified since returned HTTP status code
+                // 412: Precondition failed
+                let precondition_failed = match &e {
+                    SdkError::ResponseError(e) => e.raw().http().status().as_u16() == 412,
+                    SdkError::ServiceError(e) => e.raw().http().status().as_u16() == 412,
+                    _ => false,
+                };
+                if precondition_failed {
+                    Ok(None)
+                } else {
+                    Err(e.into())
+                }
+            }
+        }
     }
 
     fn fpath_to_key<'a>(fpath: &'a Path, dir: &str) -> Option<&'a str> {

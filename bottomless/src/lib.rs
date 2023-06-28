@@ -407,7 +407,7 @@ pub extern "C" fn xGetPathname(buf: *mut c_char, orig: *const c_char, orig_len: 
 }
 
 async fn try_restore(replicator: &mut replicator::Replicator) -> i32 {
-    match replicator.restore().await {
+    match replicator.restore(None, None).await {
         Ok(replicator::RestoreAction::None) => (),
         Ok(replicator::RestoreAction::SnapshotMainDbFile) => {
             replicator.new_generation();
