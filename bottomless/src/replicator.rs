@@ -19,7 +19,7 @@ use std::path::Path;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::io::{AsyncReadExt, AsyncSeekExt};
+use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 use tokio::sync::watch::{channel, Receiver, Sender};
 use tokio::time::{timeout_at, Instant};
 use uuid::{NoContext, Uuid};
@@ -319,6 +319,9 @@ impl Replicator {
     // so verifying that it hasn't changed is a panic check. Perhaps in the future
     // it will be useful, if WAL ever allows changing the page size.
     pub fn set_page_size(&mut self, page_size: usize) -> Result<()> {
+        if self.page_size != page_size {
+            tracing::trace!("Setting page size to: {}", page_size);
+        }
         if self.page_size != Self::UNSET_PAGE_SIZE && self.page_size != page_size {
             return Err(anyhow::anyhow!(
                 "Cannot set page size to {}, it was already set to {}",
@@ -445,13 +448,17 @@ impl Replicator {
     // Returns the compressed database file path and its change counter, extracted
     // from the header of page1 at offset 24..27 (as per SQLite documentation).
     pub async fn compress_main_db_file(&self) -> Result<(&'static str, [u8; 4])> {
-        use tokio::io::AsyncWriteExt;
         let compressed_db = "db.gz";
         let mut reader = tokio::fs::File::open(&self.db_path).await?;
         let mut writer = async_compression::tokio::write::GzipEncoder::new(
             tokio::fs::File::create(compressed_db).await?,
         );
-        tokio::io::copy(&mut reader, &mut writer).await?;
+        let size = tokio::io::copy(&mut reader, &mut writer).await?;
+        tracing::trace!(
+            "Compressed database file ({} bytes) into {}",
+            size,
+            compressed_db
+        );
         writer.shutdown().await?;
         let change_counter = Self::read_change_counter(&mut reader).await?;
         Ok((compressed_db, change_counter))
@@ -667,8 +674,6 @@ impl Replicator {
         generation: Uuid,
         utc_time: Option<DateTime<Utc>>,
     ) -> Result<RestoreAction> {
-        use tokio::io::AsyncWriteExt;
-
         // first check if there are any remaining files that we didn't manage to upload
         // on time in the last run
         self.upload_remaining_files(&generation).await?;
@@ -691,7 +696,11 @@ impl Replicator {
         tracing::debug!("Counters: l={:?}, r={:?}", local_counter, remote_counter);
 
         let last_consistent_frame = self.get_last_consistent_frame(&generation).await?;
-        tracing::debug!("Last consistent remote frame: {}.", last_consistent_frame);
+        tracing::debug!(
+            "Last consistent remote frame in generation {}: {}.",
+            generation,
+            last_consistent_frame
+        );
 
         let wal_pages = self.get_local_wal_page_count().await;
         match local_counter.cmp(&remote_counter) {
@@ -726,7 +735,12 @@ impl Replicator {
         tokio::fs::rename(&self.db_path, format!("{}.bottomless.backup", self.db_path))
             .await
             .ok(); // Best effort
-        let mut main_db_writer = tokio::fs::File::create(&self.db_path).await?;
+        let mut main_db_writer = tokio::fs::OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .open(&self.db_path)
+            .await?;
         // If the db file is not present, the database could have been empty
 
         let main_db_path = match self.use_compression {
@@ -736,22 +750,22 @@ impl Replicator {
 
         if let Ok(db_file) = self.get_object(main_db_path).send().await {
             let mut body_reader = db_file.body.into_async_read();
-            match self.use_compression {
+            let db_size = match self.use_compression {
                 CompressionKind::None => {
-                    tokio::io::copy(&mut body_reader, &mut main_db_writer).await?;
+                    tokio::io::copy(&mut body_reader, &mut main_db_writer).await?
                 }
                 CompressionKind::Gzip => {
                     let mut decompress_reader = async_compression::tokio::bufread::GzipDecoder::new(
                         tokio::io::BufReader::new(body_reader),
                     );
-                    tokio::io::copy(&mut decompress_reader, &mut main_db_writer).await?;
+                    tokio::io::copy(&mut decompress_reader, &mut main_db_writer).await?
                 }
-            }
+            };
             main_db_writer.flush().await?;
 
             let page_size = Self::read_page_size(&mut main_db_writer).await?;
             self.set_page_size(page_size)?;
-            tracing::info!("Restored the main database file");
+            tracing::info!("Restored the main database file ({} bytes)", db_size);
         }
 
         let mut next_marker = None;
@@ -767,8 +781,7 @@ impl Replicator {
         let mut applied_wal_frame = false;
         if let Some((page_size, mut checksum)) = self.get_metadata(&generation).await? {
             self.set_page_size(page_size as usize)?;
-            let mut cont = true;
-            while cont {
+            'restore_wal: loop {
                 let mut list_request = self.list_objects().prefix(&prefix);
                 if let Some(marker) = next_marker {
                     list_request = list_request.marker(marker);
@@ -818,8 +831,7 @@ impl Replicator {
                         None => {
                             let ts = utc_time.unwrap_or_default();
                             tracing::trace!("Requested frame object {} has timestamp more recent than expected {}. Stopping recovery.", key, ts.to_rfc3339());
-                            cont = false;
-                            break;
+                            break 'restore_wal;
                         }
                     };
                     let mut frameno = first_frame_no;
@@ -827,11 +839,6 @@ impl Replicator {
                         BatchReader::new(frameno, frame.body, self.page_size, compression_kind);
                     while let Some(frame) = reader.next_frame_header().await? {
                         let pgno = frame.pgno();
-                        tracing::trace!(
-                            "Restoring next frame {} as main db page {}",
-                            frameno,
-                            pgno
-                        );
                         let page_size = self.page_size;
                         let buf = pending_pages.entry(pgno).or_insert_with(|| {
                             let mut v = Vec::with_capacity(page_size);
@@ -845,21 +852,20 @@ impl Replicator {
                         }
                         if frame.is_committed() {
                             let pending_pages = std::mem::take(&mut pending_pages);
-                            let page_count = pending_pages.len();
                             for (pgno, data) in pending_pages {
                                 let offset = (pgno - 1) as u64 * (page_size as u64);
                                 main_db_writer.seek(SeekFrom::Start(offset)).await?;
                                 main_db_writer.write_all(&data).await?;
                                 // should we flush here? In theory if we don't recover fully we scrap
                                 // anyway
+                                applied_wal_frame = true;
+                                tracing::trace!("Restored page no. {}", pgno);
                             }
-                            tracing::trace!("Restored {} pages into main DB file.", page_count);
                         }
                         frameno += 1;
                         last_received_frame_no += 1;
                     }
                     main_db_writer.flush().await?;
-                    applied_wal_frame = true;
                 }
                 next_marker = response
                     .is_truncated()
@@ -874,10 +880,14 @@ impl Replicator {
             tracing::info!(".meta object not found, skipping WAL restore.");
         }
 
+        main_db_writer.shutdown().await?;
+        tracing::info!("Finished database restoration");
+
         if applied_wal_frame {
             Ok::<_, anyhow::Error>(RestoreAction::SnapshotMainDbFile)
         } else {
-            Ok::<_, anyhow::Error>(RestoreAction::None)
+            // since WAL was not applied, we can reuse the latest generation
+            Ok::<_, anyhow::Error>(RestoreAction::ReuseGeneration(generation))
         }
     }
 
@@ -920,12 +930,16 @@ impl Replicator {
 
     fn try_get_last_frame_no(response: ListObjectsOutput, frame_no: &mut u32) -> Option<String> {
         let objs = response.contents()?;
-        let last = objs.last()?;
-        let key = last.key()?;
-        if let Some((_, last_frame_no, _)) = Self::parse_frame_range(key) {
-            *frame_no = last_frame_no;
+        let mut last_key = None;
+        for obj in objs.iter() {
+            last_key = Some(obj.key()?);
+            if let Some(key) = last_key {
+                if let Some((_, last_frame_no, _)) = Self::parse_frame_range(key) {
+                    *frame_no = last_frame_no;
+                }
+            }
         }
-        Some(key.to_string())
+        last_key.map(String::from)
     }
 
     async fn upload_remaining_files(&self, generation: &Uuid) -> Result<()> {
