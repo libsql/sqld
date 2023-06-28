@@ -54,7 +54,7 @@ async fn backup_restore() {
         tracing::info!(
             "---STEP 1: create a local database, fill it with data, wait for WAL backup---"
         );
-        let _ = DbFileCleaner::new(PATH);
+        let cleaner = DbFileCleaner::new(PATH);
         let db_job = start_db(1, &db_config);
 
         sleep(Duration::from_secs(2)).await;
@@ -81,6 +81,7 @@ async fn backup_restore() {
         sleep(Duration::from_secs(2)).await;
 
         db_job.abort();
+        drop(cleaner);
     }
 
     // make sure that db file doesn't exist, and that the bucket contains backup
@@ -91,7 +92,7 @@ async fn backup_restore() {
         tracing::info!(
             "---STEP 2: recreate the database from WAL - create a snapshot at the end---"
         );
-        let _ = DbFileCleaner::new(PATH);
+        let cleaner = DbFileCleaner::new(PATH);
         let db_job = start_db(2, &db_config);
 
         sleep(Duration::from_secs(2)).await;
@@ -121,11 +122,14 @@ async fn backup_restore() {
         }
 
         db_job.abort();
+        drop(cleaner);
     }
+
+    assert!(!std::path::Path::new(PATH).exists());
 
     {
         tracing::info!("---STEP 3: recreate database from snapshot alone---");
-        let _ = DbFileCleaner::new(PATH);
+        let cleaner = DbFileCleaner::new(PATH);
         let db_job = start_db(3, &db_config);
 
         sleep(Duration::from_secs(2)).await;
@@ -146,11 +150,14 @@ async fn backup_restore() {
         // wait for WAL to backup
         sleep(Duration::from_secs(2)).await;
         db_job.abort();
+        drop(cleaner);
     }
+
+    assert!(!std::path::Path::new(PATH).exists());
 
     {
         tracing::info!("---STEP 4: recreate the database from snapshot + WAL---");
-        let _ = DbFileCleaner::new(PATH);
+        let cleaner = DbFileCleaner::new(PATH);
         let db_job = start_db(4, &db_config);
 
         sleep(Duration::from_secs(2)).await;
@@ -180,6 +187,7 @@ async fn backup_restore() {
         }
 
         db_job.abort();
+        drop(cleaner);
     }
 }
 
