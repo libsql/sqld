@@ -7,6 +7,7 @@ members = [
     "sqld",
     "sqld-libsql-bindings",
     "testing/end-to-end",
+    "libsqlx",
 ]
 
 [workspace.dependencies]
