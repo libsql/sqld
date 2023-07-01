@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::ffi::CStr;
 use std::os::unix::prelude::FileExt;
 use std::{cell::RefCell, ffi::c_int, fs::File, rc::Rc};
@@ -7,6 +8,7 @@ use rusqlite::ffi::{PgHdr, SQLITE_ERROR};
 use sqld_libsql_bindings::ffi::Wal;
 use sqld_libsql_bindings::init_static_wal_method;
 use sqld_libsql_bindings::{ffi::types::XWalFrameFn, wal_hook::WalHook};
+use tokio::io::{stdin, AsyncReadExt};
 
 use crate::replication::frame::{Frame, FrameBorrowed};
 use crate::replication::{FrameNo, WAL_PAGE_SIZE};
@@ -51,6 +53,7 @@ impl InjectorHookCtx {
                 result: None,
                 meta_file,
                 meta,
+                seen_frame: HashSet::default(),
             })),
         }
     }
@@ -83,6 +86,7 @@ pub struct InjectorHookInner {
     result: Option<anyhow::Result<FrameNo>>,
     meta_file: File,
     pub meta: WalIndexMeta,
+    seen_frame: HashSet<FrameNo>,
 }
 
 impl InjectorHookInner {
@@ -97,7 +101,7 @@ impl InjectorHookInner {
     ) -> anyhow::Result<()> {
         self.pre_commit(last_frame_no)
             .expect("failed to write pre-commit frame_no");
-        let ret = orig(wal, WAL_PAGE_SIZE, page_headers, size_after, 1, sync_flags);
+        let ret = orig(wal, WAL_PAGE_SIZE, page_headers, size_after, (size_after != 0) as _, sync_flags);
 
         if ret == 0 {
             debug_assert!(all_applied(page_headers));
@@ -150,6 +154,17 @@ unsafe impl WalHook for InjectorHook {
                 .current_frames
                 .take()
                 .expect("should not have been called with no frames");
+
+            match frames {
+                Frames::Vec(ref frames) => {
+                    dbg!(frames.len());
+                    dbg!(this.seen_frame.len());
+                    for frame in frames.iter() {
+                        assert!(this.seen_frame.insert(frame.header().frame_no));
+                    }
+                },
+                Frames::Snapshot(_) => todo!(),
+            }
 
             let (headers, last_frame_no, size_after) = frames.to_headers();
 

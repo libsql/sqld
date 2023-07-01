@@ -143,17 +143,39 @@ impl<'a> FrameInjector<'a> {
             hook_ctx,
         )?;
 
+        conn.pragma_update(None ,"writable_schema", "ON").unwrap();
+
         Ok(Self { conn, ctx })
     }
 
     /// sets the injector's frames to the provided frames, trigger a dummy write, and collect the
     /// injection result.
     fn inject_frames(&mut self, frames: Frames) -> anyhow::Result<FrameNo> {
-        self.ctx.set_frames(frames);
+        let max = match frames {
+            Frames::Vec(ref frames) => {
+                frames.iter().map(|f| f.header().frame_no).max().unwrap()
+            },
+            _ => todo!(),
+        };
 
-        let _ = self
+        self.ctx.set_frames(frames);
+        if dbg!(max) >= 17447 {
+            let mut buf = String::new();
+            std::io::stdin().read_line(&mut buf).unwrap();
+        }
+
+        self.conn.execute("select 1 from sqlite_schema limit 0", ()).unwrap();
+        let ret = dbg!(self
             .conn
-            .execute("create table if not exists __dummy__ (dummy)", ());
+            .execute("create table if not exists __dummy__ (dummy)", ()));
+
+        if let Err(e) = ret {
+            if e.sqlite_error().unwrap().extended_code == 11 {
+                let _ = dbg!(self
+                    .conn
+                    .execute("create table if not exists __dummy__ (dummy)", ()));
+                }
+        }
 
         self.ctx.take_result()
     }
