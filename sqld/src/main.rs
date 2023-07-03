@@ -169,6 +169,10 @@ struct Cli {
     /// Set the maximum size for a response. e.g 5KB, 10MB...
     #[clap(long, env = "SQLD_MAX_RESPONSE_SIZE", default_value = "10MB")]
     max_response_size: ByteSize,
+
+    /// Set a command to execute when a snapshot file is generated.
+    #[clap(long, env = "SQLD_SNAPSHOT_EXEC")]
+    snapshot_exec: Option<String>,
 }
 
 #[derive(clap::Subcommand, Debug)]
@@ -274,6 +278,7 @@ fn config_from_args(args: Cli) -> Result<Config> {
         hard_heap_limit_mb: args.hard_heap_limit_mb,
         allow_replica_overwrite: args.allow_replica_overwrite,
         max_response_size: args.max_response_size.0,
+        snapshot_exec: args.snapshot_exec,
     })
 }
 

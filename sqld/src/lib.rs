@@ -1,5 +1,6 @@
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::sync::mpsc::RecvTimeoutError;
 use std::sync::Arc;
 use std::time::Duration;
@@ -21,7 +22,7 @@ use self::database::libsql::{open_db, LibSqlDbFactory};
 use self::database::write_proxy::WriteProxyDbFactory;
 use self::database::Database;
 use self::replication::primary::logger::{ReplicationLoggerHookCtx, REPLICATION_METHODS};
-use self::replication::ReplicationLogger;
+use self::replication::{ReplicationLogger, SnapshotCallback};
 use crate::auth::Auth;
 use crate::error::Error;
 use crate::replication::replica::Replicator;
@@ -100,6 +101,7 @@ pub struct Config {
     pub hard_heap_limit_mb: Option<usize>,
     pub allow_replica_overwrite: bool,
     pub max_response_size: u64,
+    pub snapshot_exec: Option<String>,
 }
 
 impl Default for Config {
@@ -137,6 +139,7 @@ impl Default for Config {
             hard_heap_limit_mb: None,
             allow_replica_overwrite: false,
             max_response_size: 10 * 1024 * 1024, // 10MiB
+            snapshot_exec: None,
         }
     }
 }
@@ -428,12 +431,14 @@ async fn start_primary(
     stats: Stats,
     db_config_store: Arc<DatabaseConfigStore>,
     db_is_dirty: bool,
+    snapshot_callback: SnapshotCallback,
 ) -> anyhow::Result<()> {
     let is_fresh_db = check_fresh_db(&config.db_path);
     let logger = Arc::new(ReplicationLogger::open(
         &config.db_path,
         config.max_log_size,
         db_is_dirty,
+        snapshot_callback,
     )?);
 
     #[cfg(feature = "bottomless")]
@@ -627,6 +632,18 @@ pub async fn run_server(config: Config) -> anyhow::Result<()> {
 
         let db_is_dirty = init_sentinel_file(&config.db_path)?;
 
+        let snapshot_exec = config.snapshot_exec.clone();
+        let snapshot_callback: SnapshotCallback = Box::new(move |snapshot_file| {
+            if let Some(exec) = snapshot_exec.as_ref() {
+                let status = Command::new(exec).arg(snapshot_file).status()?;
+                anyhow::ensure!(
+                    status.success(),
+                    "Snapshot exec process failed with status {status}"
+                );
+            }
+            Ok(())
+        });
+
         let idle_shutdown_layer = config
             .idle_shutdown_timeout
             .map(|d| IdleShutdownLayer::new(d, shutdown_sender.clone()));
@@ -656,6 +673,7 @@ pub async fn run_server(config: Config) -> anyhow::Result<()> {
                     stats.clone(),
                     db_config_store,
                     db_is_dirty,
+                    snapshot_callback,
                 )
                 .await?
             }

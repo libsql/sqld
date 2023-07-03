@@ -23,7 +23,9 @@ use crate::libsql::ffi::{
 };
 use crate::libsql::wal_hook::WalHook;
 use crate::replication::frame::{Frame, FrameHeader};
-use crate::replication::snapshot::{find_snapshot_file, LogCompactor, SnapshotFile};
+use crate::replication::snapshot::{
+    find_snapshot_file, LogCompactor, SnapshotCallback, SnapshotFile,
+};
 use crate::replication::{FrameNo, CRC_64_GO_ISO, WAL_MAGIC, WAL_PAGE_SIZE};
 
 init_static_wal_method!(REPLICATION_METHODS, ReplicationLoggerHook);
@@ -731,7 +733,12 @@ pub struct ReplicationLogger {
 }
 
 impl ReplicationLogger {
-    pub fn open(db_path: &Path, max_log_size: u64, dirty: bool) -> anyhow::Result<Self> {
+    pub fn open(
+        db_path: &Path,
+        max_log_size: u64,
+        dirty: bool,
+        callback: SnapshotCallback,
+    ) -> anyhow::Result<Self> {
         let log_path = db_path.join("wallog");
         let data_path = db_path.join("data");
 
@@ -761,13 +768,17 @@ impl ReplicationLogger {
         };
 
         if should_recover {
-            Self::recover(log_file, data_path)
+            Self::recover(log_file, data_path, callback)
         } else {
-            Self::from_log_file(db_path.to_path_buf(), log_file)
+            Self::from_log_file(db_path.to_path_buf(), log_file, callback)
         }
     }
 
-    fn from_log_file(db_path: PathBuf, log_file: LogFile) -> anyhow::Result<Self> {
+    fn from_log_file(
+        db_path: PathBuf,
+        log_file: LogFile,
+        callback: SnapshotCallback,
+    ) -> anyhow::Result<Self> {
         let header = log_file.header();
         let generation_start_frame_no = header.start_frame_no + header.frame_count;
 
@@ -775,14 +786,18 @@ impl ReplicationLogger {
 
         Ok(Self {
             generation: Generation::new(generation_start_frame_no),
-            compactor: LogCompactor::new(&db_path, log_file.header.db_id)?,
+            compactor: LogCompactor::new(&db_path, log_file.header.db_id, callback)?,
             log_file: RwLock::new(log_file),
             db_path,
             new_frame_notifier,
         })
     }
 
-    fn recover(log_file: LogFile, mut data_path: PathBuf) -> anyhow::Result<Self> {
+    fn recover(
+        log_file: LogFile,
+        mut data_path: PathBuf,
+        callback: SnapshotCallback,
+    ) -> anyhow::Result<Self> {
         // It is necessary to checkpoint before we restore the replication log, since the WAL may
         // contain pages that are not in the database file.
         checkpoint_db(&data_path)?;
@@ -814,7 +829,7 @@ impl ReplicationLogger {
 
         assert!(data_path.pop());
 
-        Self::from_log_file(data_path, log_file)
+        Self::from_log_file(data_path, log_file, callback)
     }
 
     pub fn database_id(&self) -> anyhow::Result<Uuid> {
@@ -905,7 +920,7 @@ mod test {
     #[test]
     fn write_and_read_from_frame_log() {
         let dir = tempfile::tempdir().unwrap();
-        let logger = ReplicationLogger::open(dir.path(), 0, false).unwrap();
+        let logger = ReplicationLogger::open(dir.path(), 0, false, Box::new(|_| Ok(()))).unwrap();
 
         let frames = (0..10)
             .map(|i| WalPage {
@@ -933,7 +948,7 @@ mod test {
     #[test]
     fn index_out_of_bounds() {
         let dir = tempfile::tempdir().unwrap();
-        let logger = ReplicationLogger::open(dir.path(), 0, false).unwrap();
+        let logger = ReplicationLogger::open(dir.path(), 0, false, Box::new(|_| Ok(()))).unwrap();
         let log_file = logger.log_file.write();
         assert!(matches!(log_file.frame(1), Err(LogReadError::Ahead)));
     }
@@ -942,7 +957,7 @@ mod test {
     #[should_panic]
     fn incorrect_frame_size() {
         let dir = tempfile::tempdir().unwrap();
-        let logger = ReplicationLogger::open(dir.path(), 0, false).unwrap();
+        let logger = ReplicationLogger::open(dir.path(), 0, false, Box::new(|_| Ok(()))).unwrap();
         let entry = WalPage {
             page_no: 0,
             size_after: 0,
