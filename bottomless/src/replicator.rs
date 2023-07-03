@@ -636,6 +636,8 @@ impl Replicator {
         &self,
         timestamp: Option<&DateTime<Utc>>,
     ) -> Option<Uuid> {
+        use chrono::TimeZone;
+
         let mut next_marker: Option<String> = None;
         let prefix = format!("{}-", self.db_name);
         let threshold = timestamp.map(|ts| ts.timestamp() as u64);
@@ -667,6 +669,12 @@ impl Replicator {
                         if let Ok(generation) = Uuid::parse_str(key) {
                             match threshold.as_ref() {
                                 None => return Some(generation),
+<<<<<<< HEAD
+=======
+                                // since our UUIDs have reverse order, we check for first generation
+                                // higher than provided timestamp in order to get the first one that
+                                // happened before it
+>>>>>>> 76012b1 (bottomless: fail if env var parsing fails)
                                 Some(threshold) => match Self::generation_to_timestamp(&generation)
                                 {
                                     None => {
