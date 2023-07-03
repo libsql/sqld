@@ -103,7 +103,7 @@ impl Options {
             .build()
     }
 
-    pub fn from_env() -> Self {
+    pub fn from_env() -> Result<Self> {
         let mut options = Self::default();
         if let Ok(key) = std::env::var("LIBSQL_BOTTOMLESS_ENDPOINT") {
             options.aws_endpoint = Some(key);
@@ -117,28 +117,51 @@ impl Options {
             }
         }
         if let Ok(count) = std::env::var("LIBSQL_BOTTOMLESS_BATCH_MAX_FRAMES") {
-            if let Ok(count) = count.parse::<usize>() {
-                options.max_frames_per_batch = count;
+            match count.parse::<usize>() {
+                Ok(count) => options.max_frames_per_batch = count,
+                Err(e) => {
+                    return Err(anyhow!(
+                        "Invalid LIBSQL_BOTTOMLESS_BATCH_MAX_FRAMES environment variable: {}",
+                        e
+                    ))
+                }
             }
         }
         if let Ok(parallelism) = std::env::var("LIBSQL_BOTTOMLESS_S3_PARALLEL_MAX") {
-            if let Ok(parallelism) = parallelism.parse::<usize>() {
-                options.s3_upload_max_parallelism = parallelism;
+            match parallelism.parse::<usize>() {
+                Ok(parallelism) => options.s3_upload_max_parallelism = parallelism,
+                Err(e) => {
+                    return Err(anyhow!(
+                        "Invalid LIBSQL_BOTTOMLESS_S3_PARALLEL_MAX environment variable: {}",
+                        e
+                    ))
+                }
             }
         }
         if let Ok(compression) = std::env::var("LIBSQL_BOTTOMLESS_COMPRESSION") {
-            if let Ok(compression) = CompressionKind::parse(&compression) {
-                options.use_compression = compression;
+            match CompressionKind::parse(&compression) {
+                Ok(compression) => options.use_compression = compression,
+                Err(e) => {
+                    return Err(anyhow!(
+                        "Invalid LIBSQL_BOTTOMLESS_COMPRESSION environment variable: {}",
+                        e
+                    ))
+                }
             }
         }
         if let Ok(verify) = std::env::var("LIBSQL_BOTTOMLESS_VERIFY_CRC") {
             match verify.to_lowercase().as_ref() {
                 "yes" | "true" | "1" | "y" | "t" => options.verify_crc = true,
                 "no" | "false" | "0" | "n" | "f" => options.verify_crc = false,
-                _ => { /* unknown option */ }
+                other => {
+                    return Err(anyhow!(
+                        "Invalid LIBSQL_BOTTOMLESS_VERIFY_CRC environment variable: {}",
+                        other
+                    ))
+                }
             }
         }
-        options
+        Ok(options)
     }
 }
 
@@ -163,7 +186,7 @@ impl Replicator {
     pub const UNSET_PAGE_SIZE: usize = usize::MAX;
 
     pub async fn new<S: Into<String>>(db_path: S) -> Result<Self> {
-        Self::with_options(db_path, Options::from_env()).await
+        Self::with_options(db_path, Options::from_env()?).await
     }
 
     pub async fn with_options<S: Into<String>>(db_path: S, options: Options) -> Result<Self> {
@@ -402,6 +425,13 @@ impl Replicator {
         Uuid::new_v7(synthetic_ts)
     }
 
+    fn generation_to_timestamp(generation: &Uuid) -> Option<uuid::Timestamp> {
+        let ts = generation.get_timestamp()?;
+        let (seconds, nanos) = ts.to_unix();
+        let (seconds, nanos) = (253370761200 - seconds, 999999999 - nanos);
+        Some(uuid::Timestamp::from_unix(NoContext, seconds, nanos))
+    }
+
     // Starts a new generation for this replicator instance
     pub fn new_generation(&mut self) {
         tracing::debug!("New generation started: {}", self.generation);
@@ -607,15 +637,14 @@ impl Replicator {
         &self,
         timestamp: Option<&DateTime<Utc>>,
     ) -> Option<Uuid> {
+        use chrono::TimeZone;
+
         let mut next_marker: Option<String> = None;
         let prefix = format!("{}-", self.db_name);
-        let timestamp = timestamp.map(|ts| {
-            let ts = uuid::Timestamp::from_unix(NoContext, ts.timestamp() as u64, 0);
-            Self::generation_from_timestamp(ts)
-        });
+        let threshold = timestamp.map(|ts| ts.timestamp() as u64);
         loop {
             let mut request = self.list_objects().prefix(prefix.clone());
-            if timestamp.is_none() {
+            if threshold.is_none() {
                 request = request.max_keys(1);
             }
             if let Some(marker) = next_marker.take() {
@@ -627,23 +656,50 @@ impl Replicator {
                 break;
             }
             let mut last_key = None;
+            let mut last_gen = None;
             for obj in objs {
                 let key = obj.key();
                 last_key = key;
                 if let Some(key) = last_key {
-                    tracing::trace!("Generation candidate: {}", key);
                     let key = match key.find('/') {
                         Some(index) => &key[self.db_name.len() + 1..index],
                         None => key,
                     };
-                    if let Ok(generation) = Uuid::parse_str(key) {
-                        match timestamp.as_ref() {
-                            None => return Some(generation),
-                            // since our UUIDs have reverse order, we check for first generation
-                            // higher than provided timestamp in order to get the first one that
-                            // happened before it
-                            Some(ts) if &generation >= ts => return Some(generation),
-                            _ => {}
+                    if Some(key) != last_gen {
+                        last_gen = Some(key);
+                        if let Ok(generation) = Uuid::parse_str(key) {
+                            match threshold.as_ref() {
+                                None => return Some(generation),
+                                // since our UUIDs have reverse order, we check for first generation
+                                // higher than provided timestamp in order to get the first one that
+                                // happened before it
+                                Some(threshold) => match Self::generation_to_timestamp(&generation)
+                                {
+                                    None => {
+                                        tracing::warn!(
+                                            "Generation {} is not valid UUID v7",
+                                            generation
+                                        );
+                                    }
+                                    Some(ts) => {
+                                        let (unix_seconds, _) = ts.to_unix();
+                                        if tracing::enabled!(tracing::Level::DEBUG) {
+                                            let ts = Utc
+                                                .timestamp_millis_opt((unix_seconds * 1000) as i64)
+                                                .unwrap()
+                                                .to_rfc3339();
+                                            tracing::debug!(
+                                                "Generation candidate: {} - timestamp: {}",
+                                                generation,
+                                                ts
+                                            );
+                                        }
+                                        if &unix_seconds <= threshold {
+                                            return Some(generation);
+                                        }
+                                    }
+                                },
+                            }
                         }
                     }
                 }
