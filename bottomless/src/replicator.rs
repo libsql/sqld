@@ -636,8 +636,6 @@ impl Replicator {
         &self,
         timestamp: Option<&DateTime<Utc>>,
     ) -> Option<Uuid> {
-        use chrono::TimeZone;
-
         let mut next_marker: Option<String> = None;
         let prefix = format!("{}-", self.db_name);
         let threshold = timestamp.map(|ts| ts.timestamp() as u64);
