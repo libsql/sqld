@@ -5,13 +5,12 @@ use anyhow::anyhow;
 use arc_swap::ArcSwap;
 use aws_sdk_s3::error::SdkError;
 use aws_sdk_s3::operation::get_object::builders::GetObjectFluentBuilder;
-use aws_sdk_s3::operation::get_object::GetObjectOutput;
 use aws_sdk_s3::operation::list_objects::builders::ListObjectsFluentBuilder;
 use aws_sdk_s3::operation::list_objects::ListObjectsOutput;
 use aws_sdk_s3::primitives::ByteStream;
 use aws_sdk_s3::{Client, Config};
 use bytes::{Buf, Bytes, BytesMut};
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, LocalResult, TimeZone, Utc};
 use std::collections::BTreeMap;
 use std::io::SeekFrom;
 use std::ops::Deref;
@@ -637,8 +636,6 @@ impl Replicator {
         &self,
         timestamp: Option<&DateTime<Utc>>,
     ) -> Option<Uuid> {
-        use chrono::TimeZone;
-
         let mut next_marker: Option<String> = None;
         let prefix = format!("{}-", self.db_name);
         let threshold = timestamp.map(|ts| ts.timestamp() as u64);
@@ -742,19 +739,23 @@ impl Replicator {
     }
 
     // Parses the frame and page number from given key.
-    // Format: <db-name>-<generation>/<first-frame-no>-<last-frame-no>.<compression-kind>
-    fn parse_frame_range(key: &str) -> Option<(u32, u32, CompressionKind)> {
+    // Format: <db-name>-<generation>/<first-frame-no>-<last-frame-no>-<timestamp>.<compression-kind>
+    fn parse_frame_range(key: &str) -> Option<(u32, u32, u64, CompressionKind)> {
         let frame_delim = key.rfind('/')?;
         let frame_suffix = &key[(frame_delim + 1)..];
-        let last_frame_delim = frame_suffix.rfind('-')?;
+        let timestamp_delim = frame_suffix.rfind('-')?;
+        let last_frame_delim = frame_suffix[..timestamp_delim].rfind('-')?;
         let compression_delim = frame_suffix.rfind('.')?;
-        let first_frame_no = frame_suffix[..last_frame_delim].parse::<u32>().ok()?;
-        let last_frame_no = frame_suffix[(last_frame_delim + 1)..compression_delim]
+        let first_frame_no = frame_suffix[0..last_frame_delim].parse::<u32>().ok()?;
+        let last_frame_no = frame_suffix[(last_frame_delim + 1)..timestamp_delim]
             .parse::<u32>()
+            .ok()?;
+        let timestamp = frame_suffix[(timestamp_delim + 1)..compression_delim]
+            .parse::<u64>()
             .ok()?;
         let compression_kind =
             CompressionKind::parse(&frame_suffix[(compression_delim + 1)..]).ok()?;
-        Some((first_frame_no, last_frame_no, compression_kind))
+        Some((first_frame_no, last_frame_no, timestamp, compression_kind))
     }
 
     // Restores the database state from given remote generation
@@ -891,7 +892,7 @@ impl Replicator {
                         .ok_or_else(|| anyhow::anyhow!("Failed to get key for an object"))?;
                     tracing::debug!("Loading {}", key);
 
-                    let (first_frame_no, last_frame_no, compression_kind) =
+                    let (first_frame_no, last_frame_no, timestamp, compression_kind) =
                         match Self::parse_frame_range(key) {
                             Some(result) => result,
                             None => {
@@ -915,14 +916,21 @@ impl Replicator {
                                 last_frame_no, last_consistent_frame);
                         break;
                     }
-                    let frame = match self.get_frame(key, utc_time.as_ref()).await? {
-                        Some(frame) => frame,
-                        None => {
-                            let ts = utc_time.unwrap_or_default();
-                            tracing::trace!("Requested frame object {} has timestamp more recent than expected {}. Stopping recovery.", key, ts.to_rfc3339());
-                            break 'restore_wal;
+                    if let Some(threshold) = utc_time.as_ref() {
+                        match Utc.timestamp_millis_opt((timestamp * 1000) as i64) {
+                            LocalResult::Single(timestamp) => {
+                                if &timestamp > threshold {
+                                    tracing::info!("Frame batch {} has timestamp more recent than expected {}. Stopping recovery.", key, timestamp.to_rfc3339());
+                                    break 'restore_wal; // reached end of restoration timestamp
+                                }
+                            }
+                            _ => {
+                                tracing::trace!("Couldn't parse requested frame batch {} timestamp. Stopping recovery.", key);
+                                break 'restore_wal;
+                            }
                         }
-                    };
+                    }
+                    let frame = self.get_object(key.into()).send().await?;
                     let mut frameno = first_frame_no;
                     let mut reader =
                         BatchReader::new(frameno, frame.body, self.page_size, compression_kind);
@@ -1023,7 +1031,7 @@ impl Replicator {
         for obj in objs.iter() {
             last_key = Some(obj.key()?);
             if let Some(key) = last_key {
-                if let Some((_, last_frame_no, _)) = Self::parse_frame_range(key) {
+                if let Some((_, last_frame_no, _, _)) = Self::parse_frame_range(key) {
                     *frame_no = last_frame_no;
                 }
             }
@@ -1073,36 +1081,6 @@ impl Replicator {
             }
         }
         Ok(())
-    }
-
-    async fn get_frame(
-        &self,
-        key: &str,
-        timestamp: Option<&DateTime<Utc>>,
-    ) -> Result<Option<GetObjectOutput>> {
-        let mut frame_req = self.get_object(key.into());
-        if let Some(timestamp) =
-            timestamp.map(|t| aws_sdk_s3::primitives::DateTime::from_secs(t.timestamp()))
-        {
-            frame_req = frame_req.if_unmodified_since(timestamp);
-        }
-        match frame_req.send().await {
-            Ok(frame) => Ok(Some(frame)),
-            Err(e) => {
-                // check if request for unmodified since returned HTTP status code
-                // 412: Precondition failed
-                let precondition_failed = match &e {
-                    SdkError::ResponseError(e) => e.raw().http().status().as_u16() == 412,
-                    SdkError::ServiceError(e) => e.raw().http().status().as_u16() == 412,
-                    _ => false,
-                };
-                if precondition_failed {
-                    Ok(None)
-                } else {
-                    Err(e.into())
-                }
-            }
-        }
     }
 
     fn fpath_to_key<'a>(fpath: &'a Path, dir: &str) -> Option<&'a str> {
