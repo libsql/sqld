@@ -667,9 +667,6 @@ impl Replicator {
                         if let Ok(generation) = Uuid::parse_str(key) {
                             match threshold.as_ref() {
                                 None => return Some(generation),
-                                // since our UUIDs have reverse order, we check for first generation
-                                // higher than provided timestamp in order to get the first one that
-                                // happened before it
                                 Some(threshold) => match Self::generation_to_timestamp(&generation)
                                 {
                                     None => {
