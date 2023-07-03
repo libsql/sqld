@@ -43,7 +43,7 @@ async fn backup_restore() {
             use_compression: bottomless::replicator::CompressionKind::Gzip,
             bucket_name: BUCKET.to_string(),
             max_batch_interval: Duration::from_millis(250),
-            ..Default::default()
+            ..bottomless::replicator::Options::from_env()
         }),
         db_path: PATH.into(),
         http_addr: Some(listener_addr),

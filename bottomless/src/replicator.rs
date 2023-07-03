@@ -102,24 +102,59 @@ impl Options {
             .force_path_style(true)
             .build()
     }
+
+    pub fn from_env() -> Self {
+        let mut options = Self::default();
+        if let Ok(key) = std::env::var("LIBSQL_BOTTOMLESS_ENDPOINT") {
+            options.aws_endpoint = Some(key);
+        }
+        if let Ok(bucket_name) = std::env::var("LIBSQL_BOTTOMLESS_BUCKET") {
+            options.bucket_name = bucket_name;
+        }
+        if let Ok(seconds) = std::env::var("LIBSQL_BOTTOMLESS_BATCH_INTERVAL_SECS") {
+            if let Ok(seconds) = seconds.parse::<u64>() {
+                options.max_batch_interval = Duration::from_secs(seconds);
+            }
+        }
+        if let Ok(count) = std::env::var("LIBSQL_BOTTOMLESS_BATCH_MAX_FRAMES") {
+            if let Ok(count) = count.parse::<usize>() {
+                options.max_frames_per_batch = count;
+            }
+        }
+        if let Ok(parallelism) = std::env::var("LIBSQL_BOTTOMLESS_S3_PARALLEL_MAX") {
+            if let Ok(parallelism) = parallelism.parse::<usize>() {
+                options.s3_upload_max_parallelism = parallelism;
+            }
+        }
+        if let Ok(compression) = std::env::var("LIBSQL_BOTTOMLESS_COMPRESSION") {
+            if let Ok(compression) = CompressionKind::parse(&compression) {
+                options.use_compression = compression;
+            }
+        }
+        if let Ok(verify) = std::env::var("LIBSQL_BOTTOMLESS_VERIFY_CRC") {
+            match verify.to_lowercase().as_ref() {
+                "yes" | "true" | "1" | "y" | "t" => options.verify_crc = true,
+                "no" | "false" | "0" | "n" | "f" => options.verify_crc = false,
+                _ => { /* unknown option */ }
+            }
+        }
+        options
+    }
 }
 
 impl Default for Options {
     fn default() -> Self {
-        let aws_endpoint = std::env::var("LIBSQL_BOTTOMLESS_ENDPOINT").ok();
-        let bucket_name =
-            std::env::var("LIBSQL_BOTTOMLESS_BUCKET").unwrap_or_else(|_| "bottomless".to_string());
         let db_id = std::env::var("LIBSQL_BOTTOMLESS_DATABASE_ID").ok();
         Options {
-            create_bucket_if_not_exists: false,
-            verify_crc: false,
-            use_compression: CompressionKind::Gzip,
+            create_bucket_if_not_exists: true,
+            verify_crc: true,
+            use_compression: CompressionKind::None,
             max_batch_interval: Duration::from_secs(15),
-            max_frames_per_batch: 1024, // with 4KiB pages => 4MiB batches (uncompressed)
+            max_frames_per_batch: 500, // basically half of the default SQLite checkpoint size
             s3_upload_max_parallelism: 32,
             db_id,
-            aws_endpoint,
-            bucket_name,
+            aws_endpoint: None,
+            bucket_name: "bottomless".to_string(),
         }
     }
 }
@@ -128,7 +163,7 @@ impl Replicator {
     pub const UNSET_PAGE_SIZE: usize = usize::MAX;
 
     pub async fn new<S: Into<String>>(db_path: S) -> Result<Self> {
-        Self::with_options(db_path, Options::default()).await
+        Self::with_options(db_path, Options::from_env()).await
     }
 
     pub async fn with_options<S: Into<String>>(db_path: S, options: Options) -> Result<Self> {
@@ -541,6 +576,7 @@ impl Replicator {
                     .body(ByteStream::from_path(compressed_db_path).await?)
                     .send()
                     .await?;
+                let _ = tokio::fs::remove_file(compressed_db_path).await;
                 change_counter
             }
         };
@@ -660,11 +696,8 @@ impl Replicator {
         let last_frame_no = frame_suffix[(last_frame_delim + 1)..compression_delim]
             .parse::<u32>()
             .ok()?;
-        let compression_kind = match &frame_suffix[(compression_delim + 1)..] {
-            "gz" => CompressionKind::Gzip,
-            "raw" => CompressionKind::None,
-            _ => return None,
-        };
+        let compression_kind =
+            CompressionKind::parse(&frame_suffix[(compression_delim + 1)..]).ok()?;
         Some((first_frame_no, last_frame_no, compression_kind))
     }
 
@@ -1086,6 +1119,16 @@ pub enum CompressionKind {
     #[default]
     None,
     Gzip,
+}
+
+impl CompressionKind {
+    pub fn parse(kind: &str) -> std::result::Result<Self, &str> {
+        match kind {
+            "gz" | "gzip" => Ok(CompressionKind::Gzip),
+            "raw" | "" => Ok(CompressionKind::None),
+            other => Err(other),
+        }
+    }
 }
 
 impl std::fmt::Display for CompressionKind {

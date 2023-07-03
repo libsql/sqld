@@ -12,7 +12,6 @@ mod wal;
 use crate::ffi::{
     bottomless_methods, libsql_wal_methods, sqlite3, sqlite3_file, sqlite3_vfs, PgHdr, Wal,
 };
-use crate::replicator::{CompressionKind, Options};
 use std::ffi::{c_char, c_void};
 
 // Just heuristics, but should work for ~100% of cases
@@ -467,15 +466,7 @@ pub extern "C" fn xPreMainDbOpen(_methods: *mut libsql_wal_methods, path: *const
 
     let replicator = block_on!(
         runtime,
-        replicator::Replicator::with_options(
-            path,
-            replicator::Options {
-                create_bucket_if_not_exists: true,
-                verify_crc: true,
-                use_compression: CompressionKind::Gzip,
-                ..Options::default()
-            }
-        )
+        replicator::Replicator::with_options(path, replicator::Options::from_env())
     );
     let mut replicator = match replicator {
         Ok(repl) => repl,
