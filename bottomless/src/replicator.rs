@@ -41,6 +41,7 @@ pub struct Replicator {
 
     pub page_size: usize,
     restore_page_swap: u32,
+    restore_fpath: Arc<str>,
     generation: Arc<ArcSwap<Uuid>>,
     pub commits_in_current_generation: Arc<AtomicU32>,
     verify_crc: bool,
@@ -93,6 +94,9 @@ pub struct Options {
     /// When recovering a transaction, if number of affected pages is greater than page swap,
     /// start flushing these pages on disk instead of keeping them in memory.
     pub restore_page_swap: u32,
+    /// When recovering a transaction, when its page cache needs to be swapped onto local file,
+    /// this field contains a path for a file to be used.
+    pub restore_fpath: String,
 }
 
 impl Options {
@@ -175,6 +179,9 @@ impl Options {
                 }
             }
         }
+        if let Ok(fpath) = std::env::var("LIBSQL_BOTTOMLESS_RECOVERY_FILE") {
+            options.restore_fpath = fpath;
+        }
         Ok(options)
     }
 }
@@ -192,6 +199,7 @@ impl Default for Options {
             restore_page_swap: 1000,
             db_id,
             aws_endpoint: None,
+            restore_fpath: ".bottomless.restore".to_string(),
             bucket_name: "bottomless".to_string(),
         }
     }
@@ -337,6 +345,7 @@ impl Replicator {
             db_path,
             db_name,
             restore_page_swap: options.restore_page_swap,
+            restore_fpath: options.restore_fpath.into(),
             use_compression: options.use_compression,
             max_frames_per_batch: options.max_frames_per_batch,
             s3_upload_max_parallelism: options.s3_upload_max_parallelism,
@@ -904,8 +913,11 @@ impl Replicator {
                         break;
                     }
                 };
-                let mut pending_pages =
-                    TransactionPageCache::new(self.restore_page_swap, page_size);
+                let mut pending_pages = TransactionPageCache::new(
+                    self.restore_page_swap,
+                    page_size,
+                    self.restore_fpath.clone(),
+                );
                 let mut last_received_frame_no = 0;
                 for obj in objs {
                     let key = obj
@@ -966,7 +978,11 @@ impl Replicator {
                         if frame.is_committed() {
                             let pending_pages = std::mem::replace(
                                 &mut pending_pages,
-                                TransactionPageCache::new(self.restore_page_swap, page_size as u32),
+                                TransactionPageCache::new(
+                                    self.restore_page_swap,
+                                    page_size as u32,
+                                    self.restore_fpath.clone(),
+                                ),
                             );
                             pending_pages.flush(&mut main_db_writer).await?;
                             applied_wal_frame = true;

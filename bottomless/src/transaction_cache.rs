@@ -2,10 +2,9 @@ use anyhow::Result;
 use std::collections::btree_map::Entry;
 use std::collections::BTreeMap;
 use std::io::SeekFrom;
+use std::sync::Arc;
 use tokio::fs::{File, OpenOptions};
 use tokio::io::{AsyncSeekExt, AsyncWriteExt};
-
-const RECOVERY_FILE_PATH: &str = ".bottomless.restore";
 
 #[derive(Debug)]
 pub(crate) struct TransactionPageCache {
@@ -14,13 +13,15 @@ pub(crate) struct TransactionPageCache {
     page_size: u32,
     /// Recovery file used to flushing pages on disk. Reusable between transactions.
     cache: Cache,
+    recovery_fpath: Arc<str>,
 }
 
 impl TransactionPageCache {
-    pub fn new(restore_page_swap: u32, page_size: u32) -> Self {
+    pub fn new(restore_page_swap: u32, page_size: u32, recovery_fpath: Arc<str>) -> Self {
         TransactionPageCache {
             restore_page_swap,
             page_size,
+            recovery_fpath,
             cache: Cache::Memory(BTreeMap::new()),
         }
     }
@@ -83,14 +84,14 @@ impl TransactionPageCache {
         if let Cache::Disk { .. } = self.cache {
             return Ok(&mut self.cache); // already swapped
         }
-        tracing::trace!("Swapping transaction pages to file {}", RECOVERY_FILE_PATH);
+        tracing::trace!("Swapping transaction pages to file {}", self.recovery_fpath);
         let mut index = BTreeMap::new();
         let mut file = OpenOptions::new()
             .create(true)
             .write(true)
             .read(true)
             .truncate(true)
-            .open(RECOVERY_FILE_PATH)
+            .open(&*self.recovery_fpath)
             .await?;
         if let Cache::Memory(old) = &self.cache {
             let mut end = 0u64;
@@ -125,7 +126,7 @@ impl TransactionPageCache {
                 }
                 file.shutdown().await?;
                 db_file.flush().await?;
-                tokio::fs::remove_file(RECOVERY_FILE_PATH).await?;
+                tokio::fs::remove_file(&*self.recovery_fpath).await?;
             }
         }
         Ok(())
