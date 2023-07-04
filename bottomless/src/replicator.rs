@@ -40,8 +40,8 @@ pub struct Replicator {
     flush_trigger: Sender<()>,
 
     pub page_size: usize,
-    restore_page_swap: u32,
-    restore_fpath: Arc<str>,
+    restore_transaction_page_swap_after: u32,
+    restore_transaction_cache_fpath: Arc<str>,
     generation: Arc<ArcSwap<Uuid>>,
     pub commits_in_current_generation: Arc<AtomicU32>,
     verify_crc: bool,
@@ -93,10 +93,10 @@ pub struct Options {
     pub s3_upload_max_parallelism: usize,
     /// When recovering a transaction, if number of affected pages is greater than page swap,
     /// start flushing these pages on disk instead of keeping them in memory.
-    pub restore_page_swap: u32,
+    pub restore_transaction_page_swap_after: u32,
     /// When recovering a transaction, when its page cache needs to be swapped onto local file,
     /// this field contains a path for a file to be used.
-    pub restore_fpath: String,
+    pub restore_transaction_cache_fpath: String,
 }
 
 impl Options {
@@ -145,16 +145,19 @@ impl Options {
                 }
             }
         }
-        if let Ok(swap_after) = std::env::var("LIBSQL_BOTTOMLESS_RESTORE_TXN_SWAP") {
+        if let Ok(swap_after) = std::env::var("LIBSQL_BOTTOMLESS_RESTORE_TXN_SWAP_THRESHOLD") {
             match swap_after.parse::<u32>() {
-                Ok(swap_after) => options.restore_page_swap = swap_after,
+                Ok(swap_after) => options.restore_transaction_page_swap_after = swap_after,
                 Err(e) => {
                     return Err(anyhow!(
-                        "Invalid LIBSQL_BOTTOMLESS_RESTORE_TXN_SWAP environment variable: {}",
-                        e
-                    ))
+                    "Invalid LIBSQL_BOTTOMLESS_RESTORE_TXN_SWAP_THRESHOLD environment variable: {}",
+                    e
+                ))
                 }
             }
+        }
+        if let Ok(fpath) = std::env::var("LIBSQL_BOTTOMLESS_RESTORE_TXN_FILE") {
+            options.restore_transaction_cache_fpath = fpath;
         }
         if let Ok(compression) = std::env::var("LIBSQL_BOTTOMLESS_COMPRESSION") {
             match CompressionKind::parse(&compression) {
@@ -179,9 +182,6 @@ impl Options {
                 }
             }
         }
-        if let Ok(fpath) = std::env::var("LIBSQL_BOTTOMLESS_RECOVERY_FILE") {
-            options.restore_fpath = fpath;
-        }
         Ok(options)
     }
 }
@@ -196,10 +196,10 @@ impl Default for Options {
             max_batch_interval: Duration::from_secs(15),
             max_frames_per_batch: 500, // basically half of the default SQLite checkpoint size
             s3_upload_max_parallelism: 32,
-            restore_page_swap: 1000,
+            restore_transaction_page_swap_after: 1000,
             db_id,
             aws_endpoint: None,
-            restore_fpath: ".bottomless.restore".to_string(),
+            restore_transaction_cache_fpath: ".bottomless.restore".to_string(),
             bucket_name: "bottomless".to_string(),
         }
     }
@@ -344,8 +344,8 @@ impl Replicator {
             verify_crc: options.verify_crc,
             db_path,
             db_name,
-            restore_page_swap: options.restore_page_swap,
-            restore_fpath: options.restore_fpath.into(),
+            restore_transaction_page_swap_after: options.restore_transaction_page_swap_after,
+            restore_transaction_cache_fpath: options.restore_transaction_cache_fpath.into(),
             use_compression: options.use_compression,
             max_frames_per_batch: options.max_frames_per_batch,
             s3_upload_max_parallelism: options.s3_upload_max_parallelism,
@@ -914,9 +914,9 @@ impl Replicator {
                     }
                 };
                 let mut pending_pages = TransactionPageCache::new(
-                    self.restore_page_swap,
+                    self.restore_transaction_page_swap_after,
                     page_size,
-                    self.restore_fpath.clone(),
+                    self.restore_transaction_cache_fpath.clone(),
                 );
                 let mut last_received_frame_no = 0;
                 for obj in objs {
@@ -979,9 +979,9 @@ impl Replicator {
                             let pending_pages = std::mem::replace(
                                 &mut pending_pages,
                                 TransactionPageCache::new(
-                                    self.restore_page_swap,
+                                    self.restore_transaction_page_swap_after,
                                     page_size as u32,
-                                    self.restore_fpath.clone(),
+                                    self.restore_transaction_cache_fpath.clone(),
                                 ),
                             );
                             pending_pages.flush(&mut main_db_writer).await?;

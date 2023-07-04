@@ -9,7 +9,7 @@ use tokio::io::{AsyncSeekExt, AsyncWriteExt};
 #[derive(Debug)]
 pub(crate) struct TransactionPageCache {
     /// Threshold (in pages) after which, the cache will start flushing pages on disk.
-    restore_page_swap: u32,
+    swap_after_pages: u32,
     page_size: u32,
     /// Recovery file used to flushing pages on disk. Reusable between transactions.
     cache: Cache,
@@ -17,9 +17,9 @@ pub(crate) struct TransactionPageCache {
 }
 
 impl TransactionPageCache {
-    pub fn new(restore_page_swap: u32, page_size: u32, recovery_fpath: Arc<str>) -> Self {
+    pub fn new(swap_after_pages: u32, page_size: u32, recovery_fpath: Arc<str>) -> Self {
         TransactionPageCache {
-            restore_page_swap,
+            swap_after_pages,
             page_size,
             recovery_fpath,
             cache: Cache::Memory(BTreeMap::new()),
@@ -31,12 +31,13 @@ impl TransactionPageCache {
             Cache::Memory(map) => {
                 let len = map.len();
                 match map.entry(pgno) {
-                    Entry::Vacant(_) if len > self.restore_page_swap as usize => {
+                    Entry::Vacant(_) if len > self.swap_after_pages as usize => {
                         let page_size = self.page_size;
                         if let Cache::Disk { index, file } = self.swap().await? {
                             Self::persist(index, file, pgno, page_size, page).await
                         } else {
-                            Ok(())
+                            // swap should never return Memory cache variant
+                            unreachable!()
                         }
                     }
                     Entry::Vacant(e) => {
@@ -82,6 +83,7 @@ impl TransactionPageCache {
     /// Swaps current memory cache onto disk.
     async fn swap(&mut self) -> Result<&mut Cache> {
         if let Cache::Disk { .. } = self.cache {
+            tracing::trace!("Swap called on cache already using disk space.");
             return Ok(&mut self.cache); // already swapped
         }
         tracing::trace!("Swapping transaction pages to file {}", self.recovery_fpath);
