@@ -33,28 +33,29 @@ impl TransactionPageCache {
                 match map.entry(pgno) {
                     Entry::Vacant(_) if len > self.swap_after_pages as usize => {
                         let page_size = self.page_size;
-                        if let Cache::Disk { index, file } = self.swap().await? {
-                            Self::persist(index, file, pgno, page_size, page).await
-                        } else {
-                            // swap should never return Memory cache variant
-                            unreachable!()
+                        match self.swap().await? {
+                            Cache::Disk { index, file } => {
+                                Self::persist(index, file, pgno, page_size, page).await?;
+                            }
+                            Cache::Memory(map) => {
+                                map.insert(pgno, page.into());
+                            }
                         }
                     }
                     Entry::Vacant(e) => {
                         e.insert(page.into());
-                        Ok(())
                     }
                     Entry::Occupied(mut e) => {
                         let buf = e.get_mut();
                         buf.copy_from_slice(page);
-                        Ok(())
                     }
                 }
             }
             Cache::Disk { index, file } => {
-                Self::persist(index, file, pgno, self.page_size, page).await
+                Self::persist(index, file, pgno, self.page_size, page).await?;
             }
         }
+        Ok(())
     }
 
     async fn persist(
@@ -88,22 +89,33 @@ impl TransactionPageCache {
         }
         tracing::trace!("Swapping transaction pages to file {}", self.recovery_fpath);
         let mut index = BTreeMap::new();
-        let mut file = OpenOptions::new()
+        let result = OpenOptions::new()
             .create(true)
             .write(true)
             .read(true)
             .truncate(true)
             .open(&*self.recovery_fpath)
-            .await?;
-        if let Cache::Memory(old) = &self.cache {
-            let mut end = 0u64;
-            for (&pgno, page) in old {
-                file.write_all(page).await?;
-                index.insert(pgno, end);
-                end += page.len() as u64;
+            .await;
+        match result {
+            Ok(mut file) => {
+                if let Cache::Memory(old) = &self.cache {
+                    let mut end = 0u64;
+                    for (&pgno, page) in old {
+                        file.write_all(page).await?;
+                        index.insert(pgno, end);
+                        end += page.len() as u64;
+                    }
+                }
+                self.cache = Cache::Disk { index, file };
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "Failed to create transaction page cache file '{}': {}",
+                    self.recovery_fpath,
+                    e
+                );
             }
         }
-        self.cache = Cache::Disk { index, file };
         Ok(&mut self.cache)
     }
 
