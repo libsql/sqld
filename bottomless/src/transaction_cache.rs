@@ -33,7 +33,7 @@ impl TransactionPageCache {
                 match map.entry(pgno) {
                     Entry::Vacant(_) if len > self.swap_after_pages as usize => {
                         let page_size = self.page_size;
-                        match self.swap().await? {
+                        match self.swap().await {
                             Cache::Disk { index, file } => {
                                 Self::persist(index, file, pgno, page_size, page).await?;
                             }
@@ -82,10 +82,10 @@ impl TransactionPageCache {
     }
 
     /// Swaps current memory cache onto disk.
-    async fn swap(&mut self) -> Result<&mut Cache> {
+    async fn swap(&mut self) -> &mut Cache {
         if let Cache::Disk { .. } = self.cache {
             tracing::trace!("Swap called on cache already using disk space.");
-            return Ok(&mut self.cache); // already swapped
+            return &mut self.cache; // already swapped
         }
         tracing::trace!("Swapping transaction pages to file {}", self.recovery_fpath);
         let mut index = BTreeMap::new();
@@ -101,7 +101,14 @@ impl TransactionPageCache {
                 if let Cache::Memory(old) = &self.cache {
                     let mut end = 0u64;
                     for (&pgno, page) in old {
-                        file.write_all(page).await?;
+                        if let Err(e) = file.write_all(page).await {
+                            tracing::warn!(
+                                "Failed to swap transaction page cache to disk due to: {}",
+                                e
+                            );
+                            // fallback to use memory cache
+                            return &mut self.cache;
+                        }
                         index.insert(pgno, end);
                         end += page.len() as u64;
                     }
@@ -116,7 +123,7 @@ impl TransactionPageCache {
                 );
             }
         }
-        Ok(&mut self.cache)
+        &mut self.cache
     }
 
     pub async fn flush(mut self, db_file: &mut File) -> Result<()> {
