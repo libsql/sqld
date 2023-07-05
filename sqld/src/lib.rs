@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use anyhow::Context as AnyhowContext;
 use futures::never::Never;
-use libsql::wal_hook::TRANSPARENT_METHODS;
+use libsql_sys::wal_hook::TRANSPARENT_METHODS;
 use once_cell::sync::Lazy;
 use rpc::run_rpc_server;
 use tokio::sync::{mpsc, Notify};
@@ -28,8 +28,6 @@ use crate::replication::replica::Replicator;
 use crate::stats::Stats;
 
 use sha256::try_digest;
-
-pub use sqld_libsql_bindings as libsql;
 
 mod admin_api;
 mod auth;
@@ -524,10 +522,10 @@ async fn run_storage_monitor(db_path: PathBuf, stats: Stats) -> anyhow::Result<(
             // initialize a connection here, and keep it alive for the entirety of the program. If we
             // fail to open it, we wait for `duration` and try again later.
             let ctx = &mut ();
-            let maybe_conn = match open_db(&db_path, &TRANSPARENT_METHODS, ctx, Some(rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)) {
-                Ok(conn) => Some(conn),
+            let maybe_conn = match open_db(&db_path, &TRANSPARENT_METHODS, ctx, Some(rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY.bits())) {
+                Ok(conn) => unsafe { rusqlite::Connection::from_handle(conn.conn as *mut _).ok() },
                 Err(e) => {
-                    tracing::warn!("failed to open connection for storager monitor: {e}, trying again in {duration:?}");
+                    tracing::warn!("failed to open connection for storage monitor: {e}, trying again in {duration:?}");
                     None
                 },
             };
@@ -588,15 +586,11 @@ pub async fn run_server(config: Config) -> anyhow::Result<()> {
 
     if let Some(soft_limit_mb) = config.soft_heap_limit_mb {
         tracing::warn!("Setting soft heap limit to {soft_limit_mb}MiB");
-        unsafe {
-            sqld_libsql_bindings::ffi::sqlite3_soft_heap_limit64(soft_limit_mb as i64 * 1024 * 1024)
-        };
+        unsafe { libsql_sys::ffi::sqlite3_soft_heap_limit64(soft_limit_mb as i64 * 1024 * 1024) };
     }
     if let Some(hard_limit_mb) = config.hard_heap_limit_mb {
         tracing::warn!("Setting hard heap limit to {hard_limit_mb}MiB");
-        unsafe {
-            sqld_libsql_bindings::ffi::sqlite3_hard_heap_limit64(hard_limit_mb as i64 * 1024 * 1024)
-        };
+        unsafe { libsql_sys::ffi::sqlite3_hard_heap_limit64(hard_limit_mb as i64 * 1024 * 1024) };
     }
 
     loop {

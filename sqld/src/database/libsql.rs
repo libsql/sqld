@@ -3,14 +3,12 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crossbeam::channel::RecvTimeoutError;
-use rusqlite::{ErrorCode, OpenFlags, StatementStatus};
-use sqld_libsql_bindings::wal_hook::WalMethodsHook;
+use libsql_sys::{WalHook, WalMethodsHook};
 use tokio::sync::oneshot;
 use tracing::warn;
 
 use crate::auth::{Authenticated, Authorized};
 use crate::error::Error;
-use crate::libsql::wal_hook::WalHook;
 use crate::query::Query;
 use crate::query_analysis::{State, StmtKind};
 use crate::query_result_builder::{QueryBuilderConfig, QueryResultBuilder};
@@ -78,18 +76,11 @@ where
     async fn try_create_db(&self) -> Result<LibSqlDb> {
         // try 100 times to acquire initial db connection.
         let mut retries = 0;
+        const SQLITE_BUSY: std::ffi::c_int = libsql_sys::ffi::SQLITE_BUSY as std::ffi::c_int;
         loop {
             match self.create_database().await {
                 Ok(conn) => return Ok(conn),
-                Err(
-                    err @ Error::RusqliteError(rusqlite::Error::SqliteFailure(
-                        rusqlite::ffi::Error {
-                            code: ErrorCode::DatabaseBusy,
-                            ..
-                        },
-                        _,
-                    )),
-                ) => {
+                Err(err @ Error::LibSqlSysError(libsql_sys::Error::LibError(SQLITE_BUSY))) => {
                     if retries < 100 {
                         tracing::warn!("Database file is busy, retrying...");
                         retries += 1;
@@ -141,19 +132,19 @@ pub fn open_db<'a, W>(
     path: &Path,
     wal_methods: &'static WalMethodsHook<W>,
     hook_ctx: &'a mut W::Context,
-    flags: Option<OpenFlags>,
-) -> Result<sqld_libsql_bindings::Connection<'a>, rusqlite::Error>
+    flags: Option<std::ffi::c_int>,
+) -> Result<libsql_sys::Connection<'a>, libsql_sys::Error>
 where
     W: WalHook,
 {
     let flags = flags.unwrap_or(
-        OpenFlags::SQLITE_OPEN_READ_WRITE
-            | OpenFlags::SQLITE_OPEN_CREATE
-            | OpenFlags::SQLITE_OPEN_URI
-            | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        (libsql_sys::ffi::SQLITE_OPEN_READWRITE
+            | libsql_sys::ffi::SQLITE_OPEN_CREATE
+            | libsql_sys::ffi::SQLITE_OPEN_URI
+            | libsql_sys::ffi::SQLITE_OPEN_NOMUTEX) as std::ffi::c_int,
     );
 
-    sqld_libsql_bindings::Connection::open(path, flags, wal_methods, hook_ctx)
+    libsql_sys::Connection::open(path, flags, wal_methods, hook_ctx)
 }
 
 impl LibSqlDb {
@@ -234,7 +225,7 @@ impl LibSqlDb {
 
 struct Connection<'a> {
     timeout_deadline: Option<Instant>,
-    conn: sqld_libsql_bindings::Connection<'a>,
+    conn: libsql_sys::Connection<'a>,
     timed_out: bool,
     stats: Stats,
     config_store: Arc<DatabaseConfigStore>,
@@ -260,10 +251,11 @@ impl<'a> Connection<'a> {
             builder_config,
         };
 
+        let conn = unsafe { rusqlite::Connection::from_handle(this.conn.conn as *mut _).unwrap() };
         for ext in extensions {
             unsafe {
-                let _guard = rusqlite::LoadExtensionGuard::new(&this.conn).unwrap();
-                if let Err(e) = this.conn.load_extension(&ext, None) {
+                let _guard = rusqlite::LoadExtensionGuard::new(&conn).unwrap();
+                if let Err(e) = conn.load_extension(&ext, None) {
                     tracing::error!("failed to load extension: {}", ext.display());
                     Err(e)?;
                 }
@@ -276,9 +268,10 @@ impl<'a> Connection<'a> {
 
     fn run<B: QueryResultBuilder>(&mut self, pgm: Program, mut builder: B) -> Result<B> {
         let mut results = Vec::with_capacity(pgm.steps.len());
+        let conn = unsafe { rusqlite::Connection::from_handle(self.conn.conn as *mut _).unwrap() };
 
         builder.init(&self.builder_config)?;
-        let is_autocommit_before = self.conn.is_autocommit();
+        let is_autocommit_before = conn.is_autocommit();
 
         for step in pgm.steps() {
             let res = self.execute_step(step, &results, &mut builder)?;
@@ -286,7 +279,7 @@ impl<'a> Connection<'a> {
         }
 
         // A transaction is still open, set up a timeout
-        if is_autocommit_before && !self.conn.is_autocommit() {
+        if is_autocommit_before && !conn.is_autocommit() {
             self.timeout_deadline = Some(Instant::now() + TXN_TIMEOUT)
         }
 
@@ -350,7 +343,8 @@ impl<'a> Connection<'a> {
             return Err(Error::Blocked(config.block_reason.clone()));
         }
 
-        let mut stmt = self.conn.prepare(&query.stmt.stmt)?;
+        let conn = unsafe { rusqlite::Connection::from_handle(self.conn.conn as *mut _).unwrap() };
+        let mut stmt = conn.prepare(&query.stmt.stmt)?;
 
         let cols = stmt.columns();
         let cols_count = cols.len();
@@ -378,14 +372,14 @@ impl<'a> Connection<'a> {
         // sqlite3_changes() is only modified for INSERT, UPDATE or DELETE; it is not reset for SELECT,
         // but we want to return 0 in that case.
         let affected_row_count = match query.stmt.is_iud {
-            true => self.conn.changes(),
+            true => conn.changes(),
             false => 0,
         };
 
         // sqlite3_last_insert_rowid() only makes sense for INSERTs into a rowid table. we can't detect
         // a rowid table, but at least we can detect an INSERT
         let last_insert_rowid = match query.stmt.is_insert {
-            true => Some(self.conn.last_insert_rowid()),
+            true => Some(conn.last_insert_rowid()),
             false => None,
         };
 
@@ -397,18 +391,20 @@ impl<'a> Connection<'a> {
     }
 
     fn rollback(&self) {
-        let _ = self.conn.execute("ROLLBACK", ());
+        let conn = unsafe { rusqlite::Connection::from_handle(self.conn.conn as *mut _).unwrap() };
+        let _ = conn.execute("ROLLBACK", ());
     }
 
     fn update_stats(&self, stmt: &rusqlite::Statement) {
         self.stats
-            .inc_rows_read(stmt.get_status(StatementStatus::RowsRead) as u64);
+            .inc_rows_read(stmt.get_status(unsafe { std::mem::transmute(libsql_sys::ffi::LIBSQL_STMTSTATUS_ROWS_READ) }) as u64);
         self.stats
-            .inc_rows_written(stmt.get_status(StatementStatus::RowsWritten) as u64);
+            .inc_rows_written(stmt.get_status(unsafe { std::mem::transmute(libsql_sys::ffi::LIBSQL_STMTSTATUS_ROWS_WRITTEN) }) as u64);
     }
 
     fn describe(&self, sql: &str) -> DescribeResult {
-        let stmt = self.conn.prepare(sql)?;
+        let conn = unsafe { rusqlite::Connection::from_handle(self.conn.conn as *mut _).unwrap() };
+        let stmt = conn.prepare(sql)?;
 
         let params = (1..=stmt.parameter_count())
             .map(|param_i| {
@@ -503,7 +499,8 @@ impl Database for LibSqlDb {
         let cb = Box::new(move |maybe_conn: Result<&mut Connection>| {
             let res = maybe_conn.and_then(|c| {
                 let b = c.run(pgm, builder)?;
-                let state = if c.conn.is_autocommit() {
+                let conn = unsafe { rusqlite::Connection::from_handle(c.conn.conn as *mut _).unwrap() };
+                let state = if conn.is_autocommit() {
                     State::Init
                 } else {
                     State::Txn
@@ -554,7 +551,7 @@ mod test {
     fn setup_test_conn(ctx: &mut ()) -> Connection {
         let mut conn = Connection {
             timeout_deadline: None,
-            conn: sqld_libsql_bindings::Connection::test(ctx),
+            conn: libsql_sys::Connection::test(ctx),
             timed_out: false,
             stats: Stats::default(),
             config_store: Arc::new(DatabaseConfigStore::new_test()),

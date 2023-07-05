@@ -9,22 +9,21 @@ use std::sync::Arc;
 use anyhow::{bail, ensure};
 use bytemuck::{bytes_of, pod_read_unaligned, Pod, Zeroable};
 use bytes::{Bytes, BytesMut};
+use libsql_sys::init_static_wal_method;
 use parking_lot::RwLock;
-use sqld_libsql_bindings::init_static_wal_method;
 use tokio::sync::watch;
 use uuid::Uuid;
 
-#[cfg(feature = "bottomless")]
-use crate::libsql::ffi::SQLITE_IOERR_WRITE;
-use crate::libsql::ffi::{
-    sqlite3,
-    types::{XWalCheckpointFn, XWalFrameFn, XWalSavePointUndoFn, XWalUndoFn},
-    PageHdrIter, PgHdr, Wal, SQLITE_CHECKPOINT_TRUNCATE, SQLITE_IOERR, SQLITE_OK,
-};
-use crate::libsql::wal_hook::WalHook;
 use crate::replication::frame::{Frame, FrameHeader};
 use crate::replication::snapshot::{find_snapshot_file, LogCompactor, SnapshotFile};
 use crate::replication::{FrameNo, CRC_64_GO_ISO, WAL_MAGIC, WAL_PAGE_SIZE};
+#[cfg(feature = "bottomless")]
+use libsql_sys::ffi::SQLITE_IOERR_WRITE;
+use libsql_sys::wal_hook::WalHook;
+use libsql_sys::{
+    ffi::{sqlite3, PgHdr, SQLITE_CHECKPOINT_TRUNCATE, SQLITE_IOERR, SQLITE_OK},
+    types::{PageHdrIter, Wal, XWalCheckpointFn, XWalFrameFn, XWalSavePointUndoFn, XWalUndoFn},
+};
 
 init_static_wal_method!(REPLICATION_METHODS, ReplicationLoggerHook);
 

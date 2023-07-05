@@ -1,23 +1,21 @@
 use std::path::Path;
 
-use rusqlite::OpenFlags;
-
 use crate::replication::replica::hook::{SQLITE_CONTINUE_REPLICATION, SQLITE_EXIT_REPLICATION};
 
 use super::hook::{InjectorHookCtx, INJECTOR_METHODS};
 
 pub struct FrameInjector<'a> {
-    conn: sqld_libsql_bindings::Connection<'a>,
+    conn: libsql_sys::Connection<'a>,
 }
 
 impl<'a> FrameInjector<'a> {
     pub fn new(db_path: &Path, hook_ctx: &'a mut InjectorHookCtx) -> anyhow::Result<Self> {
-        let conn = sqld_libsql_bindings::Connection::open(
+        let conn: libsql_sys::Connection<'_> = libsql_sys::Connection::open(
             db_path,
-            OpenFlags::SQLITE_OPEN_READ_WRITE
-                | OpenFlags::SQLITE_OPEN_CREATE
-                | OpenFlags::SQLITE_OPEN_URI
-                | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+            libsql_sys::ffi::SQLITE_OPEN_READWRITE
+                | libsql_sys::ffi::SQLITE_OPEN_CREATE
+                | libsql_sys::ffi::SQLITE_OPEN_URI
+                | libsql_sys::ffi::SQLITE_OPEN_NOMUTEX,
             &INJECTOR_METHODS,
             hook_ctx,
         )?;

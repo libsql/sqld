@@ -1,9 +1,9 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use libsql_sys::wal_hook::TRANSPARENT_METHODS;
 use parking_lot::Mutex as PMutex;
 use rusqlite::types::ValueRef;
-use sqld_libsql_bindings::wal_hook::TRANSPARENT_METHODS;
 use tokio::sync::{watch, Mutex};
 use tonic::transport::Channel;
 use uuid::Uuid;

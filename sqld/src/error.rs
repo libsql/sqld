@@ -12,7 +12,7 @@ pub enum Error {
     #[error(transparent)]
     IOError(#[from] std::io::Error),
     #[error(transparent)]
-    RusqliteError(#[from] rusqlite::Error),
+    LibSqlSysError(#[from] libsql_sys::Error),
     #[error("Failed to execute query via RPC. Error code: {}, message: {}", .0.code, .0.message)]
     RpcQueryError(crate::rpc::proxy::rpc::Error),
     #[error("Failed to execute queries via RPC protocol: `{0}`")]
@@ -44,6 +44,15 @@ impl From<tokio::sync::oneshot::error::RecvError> for Error {
         Self::Internal(format!(
             "Failed to receive response via oneshot channel: {inner}"
         ))
+    }
+}
+
+impl From<rusqlite::Error> for Error {
+    fn from(other: rusqlite::Error) -> Self {
+        match other.sqlite_error() {
+            Some(e) => Self::LibSqlSysError(libsql_sys::Error::LibError(e.extended_code)),
+            None => Self::Internal(format!("Rusqlite error: {other}")),
+        }
     }
 }
 

@@ -5,7 +5,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::anyhow;
-use rusqlite::ErrorCode;
 use tokio::sync::{mpsc, oneshot};
 
 use crate::database::libsql::open_db;
@@ -37,11 +36,15 @@ impl DumpLoader {
                 bottomless_replicator,
             );
             let mut retries = 0;
+            const SQLITE_BUSY: std::ffi::c_int = libsql_sys::ffi::SQLITE_BUSY as std::ffi::c_int;
             let db = loop {
                 match open_db(&path, &REPLICATION_METHODS, &mut ctx, None) {
                     Ok(db) => {
                         if ok_snd.send(Ok(())).is_ok() {
-                            break db;
+                            // safe to unwrap as long as db is a valid pointer
+                            break unsafe {
+                                rusqlite::Connection::from_handle(db.conn as *mut _).unwrap()
+                            };
                         } else {
                             return;
                         }
@@ -49,18 +52,12 @@ impl DumpLoader {
                     // Creating the loader database can, in rare occurences, return sqlite busy,
                     // because of a race condition opening the monitor thread db. This is there to
                     // retry a bunch of times if that happens.
-                    Err(rusqlite::Error::SqliteFailure(
-                        rusqlite::ffi::Error {
-                            code: ErrorCode::DatabaseBusy,
-                            ..
-                        },
-                        _,
-                    )) if retries < 10 => {
+                    Err(libsql_sys::Error::LibError(SQLITE_BUSY)) if retries < 10 => {
                         retries += 1;
                         std::thread::sleep(Duration::from_millis(100));
                     }
                     Err(e) => {
-                        let _ = ok_snd.send(Err(e.into()));
+                        let _ = ok_snd.send(Err(anyhow::anyhow!("{e}")));
                         return;
                     }
                 }
