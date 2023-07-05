@@ -14,7 +14,6 @@ use sqld_libsql_bindings::init_static_wal_method;
 use tokio::sync::watch;
 use uuid::Uuid;
 
-#[cfg(feature = "bottomless")]
 use crate::libsql::ffi::SQLITE_IOERR_WRITE;
 use crate::libsql::ffi::{
     sqlite3,
@@ -46,7 +45,6 @@ pub enum ReplicationLoggerHook {}
 pub struct ReplicationLoggerHookCtx {
     buffer: Vec<WalPage>,
     logger: Arc<ReplicationLogger>,
-    #[cfg(feature = "bottomless")]
     bottomless_replicator: Option<Arc<std::sync::Mutex<bottomless::replicator::Replicator>>>,
 }
 
@@ -76,10 +74,8 @@ unsafe impl WalHook for ReplicationLoggerHook {
     ) -> c_int {
         assert_eq!(page_size, 4096);
         let wal_ptr = wal as *mut _;
-        #[cfg(feature = "bottomless")]
         let last_valid_frame = wal.hdr.mxFrame;
-        #[cfg(feature = "bottomless")]
-        let _frame_checksum = wal.hdr.aFrameCksum;
+        //let _frame_checksum = wal.hdr.aFrameCksum;
         let ctx = Self::wal_extract_ctx(wal);
 
         for (page_no, data) in PageHdrIter::new(page_headers, page_size as _) {
@@ -104,11 +100,11 @@ unsafe impl WalHook for ReplicationLoggerHook {
 
         // FIXME: instead of block_on, we should consider replicating asynchronously in the background,
         // e.g. by sending the data to another fiber by an unbounded channel (which allows sync insertions).
-        #[allow(clippy::await_holding_lock)] // uncontended -> only gets called under a libSQL write lock
-        #[cfg(feature = "bottomless")]
+        #[allow(clippy::await_holding_lock)]
+        // uncontended -> only gets called under a libSQL write lock
         if rc == 0 {
-            let runtime = tokio::runtime::Handle::current();
             if let Some(replicator) = ctx.bottomless_replicator.as_mut() {
+                let runtime = tokio::runtime::Handle::current();
                 match runtime.block_on(async move {
                     let mut replicator = replicator.lock().unwrap();
                     replicator.register_last_valid_frame(last_valid_frame);
@@ -163,7 +159,6 @@ unsafe impl WalHook for ReplicationLoggerHook {
         let ctx = Self::wal_extract_ctx(wal);
         ctx.rollback();
 
-        #[cfg(feature = "bottomless")]
         tracing::error!(
             "fixme: implement bottomless undo for {:?}",
             ctx.bottomless_replicator
@@ -178,7 +173,6 @@ unsafe impl WalHook for ReplicationLoggerHook {
             return rc;
         };
 
-        #[cfg(feature = "bottomless")]
         {
             let ctx = Self::wal_extract_ctx(wal);
             if let Some(replicator) = ctx.bottomless_replicator.as_mut() {
@@ -209,7 +203,6 @@ unsafe impl WalHook for ReplicationLoggerHook {
         backfilled_frames: *mut i32,
         orig: XWalCheckpointFn,
     ) -> i32 {
-        #[cfg(feature = "bottomless")]
         {
             tracing::trace!("bottomless checkpoint");
 
@@ -244,8 +237,8 @@ unsafe impl WalHook for ReplicationLoggerHook {
             return rc;
         }
 
-        #[allow(clippy::await_holding_lock)] // uncontended -> only gets called under a libSQL write lock
-        #[cfg(feature = "bottomless")]
+        #[allow(clippy::await_holding_lock)]
+        // uncontended -> only gets called under a libSQL write lock
         {
             let ctx = Self::wal_extract_ctx(wal);
             let runtime = tokio::runtime::Handle::current();
@@ -290,16 +283,12 @@ pub struct WalPage {
 impl ReplicationLoggerHookCtx {
     pub fn new(
         logger: Arc<ReplicationLogger>,
-        #[cfg(feature = "bottomless")] bottomless_replicator: Option<
-            Arc<std::sync::Mutex<bottomless::replicator::Replicator>>,
-        >,
+        bottomless_replicator: Option<Arc<std::sync::Mutex<bottomless::replicator::Replicator>>>,
     ) -> Self {
-        #[cfg(feature = "bottomless")]
         tracing::trace!("bottomless replication enabled: {bottomless_replicator:?}");
         Self {
             buffer: Default::default(),
             logger,
-            #[cfg(feature = "bottomless")]
             bottomless_replicator,
         }
     }
