@@ -9,6 +9,7 @@ edition = "2021"
 axum = "0.6.18"
 clap = { version = "4.3.11", features = ["derive"] }
 color-eyre = "0.6.2"
+hyper = { version = "0.14.27", features = ["h2"] }
 tokio = { version = "1.29.1", features = ["full"] }
 tracing = "0.1.37"
 tracing-subscriber = "0.3.17"

@@ -2,6 +2,8 @@ use color_eyre::eyre::Result;
 use tracing::metadata::LevelFilter;
 use tracing_subscriber::prelude::*;
 
+mod http;
+
 #[tokio::main]
 async fn main() -> Result<()> {
     init();
@@ -26,4 +28,3 @@ fn init() {
 
     color_eyre::install().unwrap();
 }
-
