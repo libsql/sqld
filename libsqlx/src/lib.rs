@@ -7,7 +7,6 @@ mod database;
 mod program;
 mod result_builder;
 mod seal;
-mod semaphore;
 
 pub type Result<T, E = crate::error::Error> = std::result::Result<T, E>;
 

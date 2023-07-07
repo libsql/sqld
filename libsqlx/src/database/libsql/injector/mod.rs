@@ -42,6 +42,16 @@ pub trait InjectorCommitHandler: 'static {
     fn post_commit(&mut self, frame_no: FrameNo) -> anyhow::Result<()>;
 }
 
+impl<T: InjectorCommitHandler> InjectorCommitHandler for Box<T> {
+    fn pre_commit(&mut self, frame_no: FrameNo) -> anyhow::Result<()> {
+        self.as_mut().pre_commit(frame_no)
+    }
+
+    fn post_commit(&mut self, frame_no: FrameNo) -> anyhow::Result<()> {
+        self.as_mut().post_commit(frame_no)
+    }
+}
+
 #[cfg(test)]
 impl InjectorCommitHandler for () {
     fn pre_commit(&mut self, _frame_no: FrameNo) -> anyhow::Result<()> {
@@ -56,11 +66,11 @@ impl InjectorCommitHandler for () {
 impl Injector {
     pub fn new(
         path: &Path,
-        injector_commit_hanlder: impl InjectorCommitHandler + 'static,
+        injector_commit_handler: Box<dyn InjectorCommitHandler>,
         buffer_capacity: usize,
     ) -> crate::Result<Self> {
         let buffer = FrameBuffer::default();
-        let ctx = InjectorHookCtx::new(buffer.clone(), injector_commit_hanlder);
+        let ctx = InjectorHookCtx::new(buffer.clone(), injector_commit_handler);
         let mut ctx = Box::new(ctx);
         let connection = sqld_libsql_bindings::Connection::open(
             path,
@@ -162,7 +172,7 @@ mod test {
         let log = LogFile::new(file).unwrap();
         let temp = tempfile::tempdir().unwrap();
 
-        let mut injector = Injector::new(temp.path(), (), 10).unwrap();
+        let mut injector = Injector::new(temp.path(), Box::new(()), 10).unwrap();
         for frame in log.frames_iter().unwrap() {
             let frame = frame.unwrap();
             injector.inject_frame(frame).unwrap();
@@ -184,7 +194,7 @@ mod test {
         let temp = tempfile::tempdir().unwrap();
 
         // inject one frame at a time
-        let mut injector = Injector::new(temp.path(), (), 1).unwrap();
+        let mut injector = Injector::new(temp.path(), Box::new(()), 1).unwrap();
         for frame in log.frames_iter().unwrap() {
             let frame = frame.unwrap();
             injector.inject_frame(frame).unwrap();
@@ -206,7 +216,7 @@ mod test {
         let temp = tempfile::tempdir().unwrap();
 
         // inject one frame at a time
-        let mut injector = Injector::new(temp.path(), (), 10).unwrap();
+        let mut injector = Injector::new(temp.path(), Box::new(()), 10).unwrap();
         let mut iter = log.frames_iter().unwrap();
 
         assert!(injector

@@ -80,7 +80,7 @@ pub struct QueryBuilderConfig {
     pub max_size: Option<u64>,
 }
 
-pub trait ResultBuilder: Send + 'static {
+pub trait ResultBuilder {
     /// (Re)initialize the builder. This method can be called multiple times.
     fn init(&mut self, _config: &QueryBuilderConfig) -> Result<(), QueryResultBuilderError> {
         Ok(())

@@ -1,4 +1,3 @@
-use crate::database::frame::Frame;
 use crate::database::{Database, InjectableDatabase};
 use crate::error::Error;
 
@@ -27,7 +26,6 @@ where
     WDB: Database,
 {
     type Connection = WriteProxyConnection<RDB::Connection, WDB::Connection>;
-
     /// Create a new connection to the database
     fn connect(&self) -> Result<Self::Connection, Error> {
         Ok(WriteProxyConnection {
@@ -43,8 +41,7 @@ impl<RDB, WDB> InjectableDatabase for WriteProxyDatabase<RDB, WDB>
 where
     RDB: InjectableDatabase,
 {
-    fn inject_frame(&mut self, frame: Frame) -> Result<(), crate::database::InjectError> {
-        // TODO: handle frame index
-        self.read_db.inject_frame(frame)
+    fn injector(&mut self) -> crate::Result<Box<dyn crate::database::Injector>> {
+        self.read_db.injector()
     }
 }

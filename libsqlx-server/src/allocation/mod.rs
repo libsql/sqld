@@ -1,6 +1,5 @@
 use std::collections::HashMap;
 
-use libsqlx::Database;
 use tokio::{sync::{mpsc, oneshot}, task::{JoinSet, block_in_place}};
 
 pub mod config;
@@ -26,9 +25,17 @@ enum AllocationMessage {
     }
 }
 
+enum Database {}
+
+impl Database {
+    fn connect(&self) -> Box<dyn libsqlx::Connection + Send> {
+        todo!();
+    }
+}
+
 pub struct Allocation {
     inbox: mpsc::Receiver<AllocationMessage>,
-    database: Box<dyn Database>,
+    database: Database,
     /// senders to the spawned connections
     connections: HashMap<u32, mpsc::Sender<ExecFn>>,
     /// spawned connection futures, returning their connection id on completion.
@@ -69,7 +76,7 @@ impl Allocation {
 
     async fn new_conn_exec(&mut self, exec: ExecFn) -> ConnectionId {
         let id = self.next_conn_id();
-        let conn = block_in_place(|| self.database.connect()).unwrap();
+        let conn = block_in_place(|| self.database.connect());
         let (close_sender, exit) = mpsc::channel(1);
         let (exec_sender, exec_receiver) = mpsc::channel(1);
         let conn = Connection {
@@ -103,7 +110,7 @@ impl Allocation {
 
 struct Connection {
     id: u32,
-    conn: Box<dyn libsqlx::Connection>,
+    conn: Box<dyn libsqlx::Connection + Send>,
     exit: mpsc::Receiver<()>,
     exec: mpsc::Receiver<ExecFn>,
 }

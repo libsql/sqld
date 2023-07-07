@@ -51,13 +51,13 @@ impl Database for MockDatabase {
 }
 
 impl Connection for MockConnection {
-    fn execute_program<B: ResultBuilder>(
+    fn execute_program(
         &mut self,
         pgm: crate::program::Program,
-        mut reponse_builder: B,
-    ) -> crate::Result<B> {
-        (self.execute_fn)(pgm, &mut reponse_builder)?;
-        Ok(reponse_builder)
+        reponse_builder: &mut dyn ResultBuilder,
+    ) -> crate::Result<()> {
+        (self.execute_fn)(pgm, reponse_builder)?;
+        Ok(())
     }
 
     fn describe(&self, sql: String) -> crate::Result<DescribeResponse> {

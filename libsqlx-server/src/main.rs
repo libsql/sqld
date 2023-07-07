@@ -2,7 +2,10 @@ use color_eyre::eyre::Result;
 use tracing::metadata::LevelFilter;
 use tracing_subscriber::prelude::*;
 
+mod allocation;
+mod databases;
 mod http;
+mod meta;
 
 #[tokio::main]
 async fn main() -> Result<()> {
