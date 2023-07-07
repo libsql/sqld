@@ -912,10 +912,7 @@ impl ReplicationLogger {
         };
 
         let size_after = last_frame.header().size_after;
-        if size_after == 0 {
-            // last frame does not seem to be a commit boundary, so we can't do a compaction
-            return Ok(false);
-        }
+        assert!(size_after != 0);
 
         log_file.do_compaction(self.compactor.clone(), size_after, &self.db_path)?;
         Ok(true)
