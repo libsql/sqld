@@ -570,19 +570,23 @@ impl LogFile {
         Ok(frame)
     }
 
+    fn should_compact(&self) -> bool {
+        let mut compact = false;
+        compact |= self.header.frame_count > self.max_log_frame_count;
+        if let Some(max_log_duration) = self.max_log_duration {
+            compact |= self.last_compact_instant.elapsed() > max_log_duration;
+        }
+        compact &= self.uncommitted_frame_count == 0;
+        compact
+    }
+
     fn maybe_compact(
         &mut self,
         compactor: LogCompactor,
         size_after: u32,
         path: &Path,
     ) -> anyhow::Result<()> {
-        let mut do_compaction = false;
-        do_compaction |= self.header.frame_count > self.max_log_frame_count;
-        if let Some(max_log_duration) = self.max_log_duration {
-            do_compaction |= self.last_compact_instant.elapsed() > max_log_duration;
-        }
-
-        if do_compaction {
+        if self.should_compact() {
             self.do_compaction(compactor, size_after, path)
         } else {
             Ok(())
@@ -595,6 +599,8 @@ impl LogFile {
         size_after: u32,
         path: &Path,
     ) -> anyhow::Result<()> {
+        assert_eq!(self.uncommitted_frame_count, 0);
+
         tracing::info!("performing log compaction");
         let temp_log_path = path.join("temp_log");
         let file = OpenOptions::new()
@@ -888,6 +894,32 @@ impl ReplicationLogger {
     pub fn get_frame(&self, frame_no: FrameNo) -> Result<Frame, LogReadError> {
         self.log_file.read().frame(frame_no)
     }
+
+    pub fn maybe_compact(&self) -> anyhow::Result<bool> {
+        let mut log_file = self.log_file.write();
+        if !log_file.should_compact() {
+            // compaction is not necessary or impossible, so exit early
+            return Ok(false);
+        }
+
+        let last_frame = {
+            let mut frames_iter = log_file.rev_frames_iter()?;
+            let Some(last_frame_res) = frames_iter.next() else {
+                // the log file is empty, nothing to compact
+                return Ok(false)
+            };
+            last_frame_res?
+        };
+
+        let size_after = last_frame.header().size_after;
+        if size_after == 0 {
+            // last frame does not seem to be a commit boundary, so we can't do a compaction
+            return Ok(false);
+        }
+
+        log_file.do_compaction(self.compactor.clone(), size_after, &self.db_path)?;
+        Ok(true)
+    }
 }
 
 fn checkpoint_db(data_path: &Path) -> anyhow::Result<()> {
@@ -930,7 +962,8 @@ mod test {
     #[test]
     fn write_and_read_from_frame_log() {
         let dir = tempfile::tempdir().unwrap();
-        let logger = ReplicationLogger::open(dir.path(), 0, false, Box::new(|_| Ok(()))).unwrap();
+        let logger =
+            ReplicationLogger::open(dir.path(), 0, None, false, Box::new(|_| Ok(()))).unwrap();
 
         let frames = (0..10)
             .map(|i| WalPage {
@@ -958,7 +991,8 @@ mod test {
     #[test]
     fn index_out_of_bounds() {
         let dir = tempfile::tempdir().unwrap();
-        let logger = ReplicationLogger::open(dir.path(), 0, false, Box::new(|_| Ok(()))).unwrap();
+        let logger =
+            ReplicationLogger::open(dir.path(), 0, None, false, Box::new(|_| Ok(()))).unwrap();
         let log_file = logger.log_file.write();
         assert!(matches!(log_file.frame(1), Err(LogReadError::Ahead)));
     }
@@ -967,7 +1001,8 @@ mod test {
     #[should_panic]
     fn incorrect_frame_size() {
         let dir = tempfile::tempdir().unwrap();
-        let logger = ReplicationLogger::open(dir.path(), 0, false, Box::new(|_| Ok(()))).unwrap();
+        let logger =
+            ReplicationLogger::open(dir.path(), 0, None, false, Box::new(|_| Ok(()))).unwrap();
         let entry = WalPage {
             page_no: 0,
             size_after: 0,
@@ -981,7 +1016,7 @@ mod test {
     #[test]
     fn log_file_test_rollback() {
         let f = tempfile::tempfile().unwrap();
-        let mut log_file = LogFile::new(f, 100).unwrap();
+        let mut log_file = LogFile::new(f, 100, None).unwrap();
         (0..5)
             .map(|i| WalPage {
                 page_no: i,

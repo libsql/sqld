@@ -6,6 +6,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Context as AnyhowContext;
+use enclose::enclose;
 use futures::never::Never;
 use libsql::wal_hook::TRANSPARENT_METHODS;
 use once_cell::sync::Lazy;
@@ -444,6 +445,8 @@ async fn start_primary(
         snapshot_callback,
     )?);
 
+    join_set.spawn(run_periodic_compactions(logger.clone()));
+
     #[cfg(feature = "bottomless")]
     let bottomless_replicator = if let Some(options) = &config.bottomless_replication {
         Some(Arc::new(std::sync::Mutex::new(
@@ -518,6 +521,24 @@ async fn start_primary(
     .await?;
 
     Ok(())
+}
+
+async fn run_periodic_compactions(logger: Arc<ReplicationLogger>) -> anyhow::Result<()> {
+    // calling `ReplicationLogger::maybe_compact()` is cheap if the compaction does not actually
+    // take place, so we can affort to poll it very often for simplicity
+    let mut interval = tokio::time::interval(Duration::from_millis(1000));
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+
+    loop {
+        interval.tick().await;
+        let handle = tokio::task::spawn_blocking(enclose! {(logger) move || {
+            logger.maybe_compact()
+        }});
+        handle
+            .await
+            .expect("Compaction task crashed")
+            .context("Compaction failed")?;
+    }
 }
 
 // Periodically check the storage used by the database and save it in the Stats structure.

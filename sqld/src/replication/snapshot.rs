@@ -474,7 +474,7 @@ mod test {
     #[test]
     fn compact_file_create_snapshot() {
         let temp = tempfile::NamedTempFile::new().unwrap();
-        let mut log_file = LogFile::new(temp.as_file().try_clone().unwrap(), 0).unwrap();
+        let mut log_file = LogFile::new(temp.as_file().try_clone().unwrap(), 0, None).unwrap();
         let db_id = Uuid::new_v4();
         log_file.header.db_id = db_id.as_u128();
         log_file.write_header().unwrap();
