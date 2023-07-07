@@ -237,7 +237,11 @@ fn eval_cond(cond: &Cond, results: &[bool]) -> Result<bool> {
 }
 
 impl<C> Connection for LibsqlConnection<C> {
-    fn execute_program(&mut self, pgm: Program, builder: &mut dyn ResultBuilder) -> crate::Result<()> {
+    fn execute_program(
+        &mut self,
+        pgm: Program,
+        builder: &mut dyn ResultBuilder,
+    ) -> crate::Result<()> {
         self.run(pgm, builder)
     }
 

@@ -1,8 +1,8 @@
 use std::time::Duration;
 
+use self::frame::Frame;
 use crate::connection::Connection;
 use crate::error::Error;
-use self::frame::Frame;
 
 mod frame;
 pub mod libsql;

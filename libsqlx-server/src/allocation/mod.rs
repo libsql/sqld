@@ -1,18 +1,24 @@
 use std::collections::HashMap;
+use std::path::PathBuf;
 
-use tokio::{sync::{mpsc, oneshot}, task::{JoinSet, block_in_place}};
+use libsqlx::libsql::{LibsqlDatabase, LogCompactor, LogFile, PrimaryType};
+use libsqlx::Database as _;
+use tokio::sync::{mpsc, oneshot};
+use tokio::task::{block_in_place, JoinSet};
+
+use self::config::{AllocConfig, DbConfig};
 
 pub mod config;
 
 type ExecFn = Box<dyn FnOnce(&mut dyn libsqlx::Connection) + Send>;
 
 #[derive(Clone)]
-struct ConnectionId {
+pub struct ConnectionId {
     id: u32,
     close_sender: mpsc::Sender<()>,
 }
 
-enum AllocationMessage {
+pub enum AllocationMessage {
     /// Execute callback against connection
     Exec {
         connection_id: ConnectionId,
@@ -22,30 +28,61 @@ enum AllocationMessage {
     NewConnExec {
         exec: ExecFn,
         ret: oneshot::Sender<ConnectionId>,
+    },
+}
+
+pub enum Database {
+    Primary(libsqlx::libsql::LibsqlDatabase<PrimaryType>),
+}
+
+struct Compactor;
+
+impl LogCompactor for Compactor {
+    fn should_compact(&self, _log: &LogFile) -> bool {
+        false
+    }
+
+    fn compact(
+        &self,
+        _log: LogFile,
+        _path: std::path::PathBuf,
+        _size_after: u32,
+    ) -> Result<(), Box<dyn std::error::Error + Sync + Send + 'static>> {
+        todo!()
     }
 }
 
-enum Database {}
-
 impl Database {
+    pub fn from_config(config: &AllocConfig, path: PathBuf) -> Self {
+        match config.db_config {
+            DbConfig::Primary {} => {
+                let db = LibsqlDatabase::new_primary(path, Compactor, false).unwrap();
+                Self::Primary(db)
+            }
+            DbConfig::Replica { .. } => todo!(),
+        }
+    }
+
     fn connect(&self) -> Box<dyn libsqlx::Connection + Send> {
-        todo!();
+        match self {
+            Database::Primary(db) => Box::new(db.connect().unwrap()),
+        }
     }
 }
 
 pub struct Allocation {
-    inbox: mpsc::Receiver<AllocationMessage>,
-    database: Database,
+    pub inbox: mpsc::Receiver<AllocationMessage>,
+    pub database: Database,
     /// senders to the spawned connections
-    connections: HashMap<u32, mpsc::Sender<ExecFn>>,
+    pub connections: HashMap<u32, mpsc::Sender<ExecFn>>,
     /// spawned connection futures, returning their connection id on completion.
-    connections_futs: JoinSet<u32>,
-    next_conn_id: u32,
-    max_concurrent_connections: u32,
+    pub connections_futs: JoinSet<u32>,
+    pub next_conn_id: u32,
+    pub max_concurrent_connections: u32,
 }
 
 impl Allocation {
-    async fn run(mut self) {
+    pub async fn run(mut self) {
         loop {
             tokio::select! {
                 Some(msg) = self.inbox.recv() => {
@@ -86,23 +123,19 @@ impl Allocation {
             exec: exec_receiver,
         };
 
-
         self.connections_futs.spawn(conn.run());
         // This should never block!
         assert!(exec_sender.try_send(exec).is_ok());
         assert!(self.connections.insert(id, exec_sender).is_none());
 
-        ConnectionId {
-            id,
-            close_sender,
-        }
+        ConnectionId { id, close_sender }
     }
 
     fn next_conn_id(&mut self) -> u32 {
         loop {
             self.next_conn_id = self.next_conn_id.wrapping_add(1);
             if !self.connections.contains_key(&self.next_conn_id) {
-                return self.next_conn_id
+                return self.next_conn_id;
             }
         }
     }

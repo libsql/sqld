@@ -602,7 +602,9 @@ impl LogFile {
         // swap old and new snapshot
         atomic_rename(&temp_log_path, path.join("wallog")).unwrap();
         let old_log_file = std::mem::replace(self, new_log_file);
-        compactor.compact(old_log_file, temp_log_path, size_after)?;
+        compactor
+            .compact(old_log_file, temp_log_path, size_after)
+            .unwrap();
 
         Ok(())
     }
@@ -717,17 +719,27 @@ impl Generation {
     }
 }
 
-pub trait LogCompactor: 'static {
+pub trait LogCompactor: Sync + Send + 'static {
     /// returns whether the passed log file should be compacted. If this method returns true,
     /// compact should be called next.
     fn should_compact(&self, log: &LogFile) -> bool;
     /// Compact the given snapshot
-    fn compact(&self, log: LogFile, path: PathBuf, size_after: u32) -> anyhow::Result<()>;
+    fn compact(
+        &self,
+        log: LogFile,
+        path: PathBuf,
+        size_after: u32,
+    ) -> Result<(), Box<dyn std::error::Error + Sync + Send + 'static>>;
 }
 
 #[cfg(test)]
 impl LogCompactor for () {
-    fn compact(&self, _file: LogFile, _path: PathBuf, _size_after: u32) -> anyhow::Result<()> {
+    fn compact(
+        &self,
+        _file: LogFile,
+        _path: PathBuf,
+        _size_after: u32,
+    ) -> Result<(), Box<dyn std::error::Error + Sync + Send + 'static>> {
         Ok(())
     }
 
@@ -739,7 +751,7 @@ impl LogCompactor for () {
 pub struct ReplicationLogger {
     pub generation: Generation,
     pub log_file: RwLock<LogFile>,
-    compactor: Box<dyn LogCompactor>,
+    compactor: Box<dyn LogCompactor + Send>,
     db_path: PathBuf,
     /// a notifier channel other tasks can subscribe to, and get notified when new frames become
     /// available.
