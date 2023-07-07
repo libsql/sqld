@@ -132,6 +132,11 @@ struct Cli {
     /// defaults to 200MB.
     #[clap(long, env = "SQLD_MAX_LOG_SIZE", default_value = "200")]
     max_log_size: u64,
+    /// Maximum duration before the replication log is compacted (in seconds).
+    /// By default, the log is compacted only if it grows above the limit specified with
+    /// `--max-log-size`.
+    #[clap(long, env = "SQLD_MAX_LOG_DURATION")]
+    max_log_duration: Option<f32>,
 
     #[clap(subcommand)]
     utils: Option<UtilsSubcommands>,
@@ -271,6 +276,7 @@ fn config_from_args(args: Cli) -> Result<Config> {
         idle_shutdown_timeout: args.idle_shutdown_timeout_s.map(Duration::from_secs),
         load_from_dump: args.load_from_dump,
         max_log_size: args.max_log_size,
+        max_log_duration: args.max_log_duration,
         heartbeat_url: args.heartbeat_url,
         heartbeat_auth: args.heartbeat_auth,
         heartbeat_period: Duration::from_secs(args.heartbeat_period_s),

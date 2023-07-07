@@ -94,6 +94,7 @@ pub struct Config {
     pub idle_shutdown_timeout: Option<Duration>,
     pub load_from_dump: Option<PathBuf>,
     pub max_log_size: u64,
+    pub max_log_duration: Option<f32>,
     pub heartbeat_url: Option<String>,
     pub heartbeat_auth: Option<String>,
     pub heartbeat_period: Duration,
@@ -132,6 +133,7 @@ impl Default for Config {
             idle_shutdown_timeout: None,
             load_from_dump: None,
             max_log_size: 200,
+            max_log_duration: None,
             heartbeat_url: None,
             heartbeat_auth: None,
             heartbeat_period: Duration::from_secs(30),
@@ -437,6 +439,7 @@ async fn start_primary(
     let logger = Arc::new(ReplicationLogger::open(
         &config.db_path,
         config.max_log_size,
+        config.max_log_duration.map(Duration::from_secs_f32),
         db_is_dirty,
         snapshot_callback,
     )?);
