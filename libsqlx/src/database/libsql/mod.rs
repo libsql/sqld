@@ -9,15 +9,16 @@ use crate::database::{Database, InjectError, InjectableDatabase};
 use crate::error::Error;
 use crate::result_builder::QueryBuilderConfig;
 
-use connection::{LibsqlConnection, RowStats};
+use connection::RowStats;
 use injector::Injector;
 use replication_log::logger::{
     ReplicationLogger, ReplicationLoggerHook, ReplicationLoggerHookCtx, REPLICATION_METHODS,
 };
 
 use self::injector::InjectorCommitHandler;
-use self::replication_log::logger::LogCompactor;
 
+pub use connection::LibsqlConnection;
+pub use replication_log::logger::{LogCompactor, LogFile};
 pub use replication_log::merger::SnapshotMerger;
 
 mod connection;
@@ -44,8 +45,8 @@ impl LibsqlDbType for PrimaryType {
 }
 
 pub struct ReplicaType {
-    // frame injector for the database
-    injector: Injector,
+    commit_handler: Option<Box<dyn InjectorCommitHandler>>,
+    injector_buffer_capacity: usize,
 }
 
 impl LibsqlDbType for ReplicaType {
@@ -67,6 +68,18 @@ pub trait LibsqlDbType {
     fn hook_context(&self) -> <Self::ConnectionHook as WalHook>::Context;
 }
 
+pub struct PlainType;
+
+impl LibsqlDbType for PlainType {
+    type ConnectionHook = TransparentMethods;
+
+    fn hook() -> &'static WalMethodsHook<Self::ConnectionHook> {
+        &TRANSPARENT_METHODS
+    }
+
+    fn hook_context(&self) -> <Self::ConnectionHook as WalHook>::Context {}
+}
+
 /// A generic wrapper around a libsql database.
 /// `LibsqlDatabase` can be specialized into either a `ReplicaType` or a `PrimaryType`.
 /// In `PrimaryType` mode, the LibsqlDatabase maintains a replication log that can be replicated to
@@ -83,13 +96,13 @@ pub struct LibsqlDatabase<T> {
 }
 
 /// Handler trait for gathering row stats when executing queries.
-pub trait RowStatsHandler {
+pub trait RowStatsHandler: Send + Sync {
     fn handle_row_stats(&self, stats: RowStats);
 }
 
 impl<F> RowStatsHandler for F
 where
-    F: Fn(RowStats),
+    F: Fn(RowStats) + Send + Sync,
 {
     fn handle_row_stats(&self, stats: RowStats) {
         (self)(stats)
@@ -104,10 +117,17 @@ impl LibsqlDatabase<ReplicaType> {
         injector_commit_handler: impl InjectorCommitHandler,
     ) -> crate::Result<Self> {
         let ty = ReplicaType {
-            injector: Injector::new(&db_path, injector_commit_handler, injector_buffer_capacity)?,
+            commit_handler: Some(Box::new(injector_commit_handler)),
+            injector_buffer_capacity,
         };
 
         Ok(Self::new(db_path, ty))
+    }
+}
+
+impl LibsqlDatabase<PlainType> {
+    pub fn new_plain(db_path: PathBuf) -> crate::Result<Self> {
+        Ok(Self::new(db_path, PlainType))
     }
 }
 
@@ -154,31 +174,45 @@ impl<T: LibsqlDbType> Database for LibsqlDatabase<T> {
     type Connection = LibsqlConnection<<T::ConnectionHook as WalHook>::Context>;
 
     fn connect(&self) -> Result<Self::Connection, Error> {
-        LibsqlConnection::<<T::ConnectionHook as WalHook>::Context>::new(
-            &self.db_path,
-            self.extensions.clone(),
-            T::hook(),
-            self.ty.hook_context(),
-            self.row_stats_callback.clone(),
-            QueryBuilderConfig {
-                max_size: Some(self.response_size_limit),
-            },
+        dbg!();
+        Ok(
+            LibsqlConnection::<<T::ConnectionHook as WalHook>::Context>::new(
+                &self.db_path,
+                self.extensions.clone(),
+                T::hook(),
+                self.ty.hook_context(),
+                self.row_stats_callback.clone(),
+                QueryBuilderConfig {
+                    max_size: Some(self.response_size_limit),
+                },
+            )?,
         )
     }
 }
 
 impl InjectableDatabase for LibsqlDatabase<ReplicaType> {
-    fn inject_frame(&mut self, frame: Frame) -> Result<(), InjectError> {
-        self.ty.injector.inject_frame(frame).unwrap();
+    fn injector(&mut self) -> crate::Result<Box<dyn super::Injector>> {
+        let Some(commit_handler) = self.ty.commit_handler.take() else { panic!("there can be only one injector") };
+        Ok(Box::new(Injector::new(
+            &self.db_path,
+            commit_handler,
+            self.ty.injector_buffer_capacity,
+        )?))
+    }
+}
+
+impl super::Injector for Injector {
+    fn inject(&mut self, frame: Frame) -> Result<(), InjectError> {
+        self.inject_frame(frame).unwrap();
         Ok(())
     }
 }
 
 #[cfg(test)]
 mod test {
-    use std::cell::Cell;
     use std::fs::File;
-    use std::rc::Rc;
+    use std::sync::atomic::AtomicBool;
+    use std::sync::atomic::Ordering::Relaxed;
 
     use rusqlite::types::Value;
 
@@ -205,32 +239,28 @@ mod test {
     fn inject_libsql_db() {
         let temp = tempfile::tempdir().unwrap();
         let replica = ReplicaType {
-            injector: Injector::new(temp.path(), (), 10).unwrap(),
+            commit_handler: Some(Box::new(())),
+            injector_buffer_capacity: 10,
         };
         let mut db = LibsqlDatabase::new(temp.path().to_path_buf(), replica);
 
         let mut conn = db.connect().unwrap();
-        let res = conn
-            .execute_program(
-                Program::seq(&["select count(*) from test"]),
-                ReadRowBuilder(Vec::new()),
-            )
+        let mut builder = ReadRowBuilder(Vec::new());
+        conn.execute_program(Program::seq(&["select count(*) from test"]), &mut builder)
             .unwrap();
-        assert!(res.0.is_empty());
+        assert!(builder.0.is_empty());
 
         let file = File::open("assets/test/simple_wallog").unwrap();
         let log = LogFile::new(file).unwrap();
+        let mut injector = db.injector().unwrap();
         log.frames_iter()
             .unwrap()
-            .for_each(|f| db.inject_frame(f.unwrap()).unwrap());
+            .for_each(|f| injector.inject(f.unwrap()).unwrap());
 
-        let res = conn
-            .execute_program(
-                Program::seq(&["select count(*) from test"]),
-                ReadRowBuilder(Vec::new()),
-            )
+        let mut builder = ReadRowBuilder(Vec::new());
+        conn.execute_program(Program::seq(&["select count(*) from test"]), &mut builder)
             .unwrap();
-        assert_eq!(res.0[0], Value::Integer(5));
+        assert_eq!(builder.0[0], Value::Integer(5));
     }
 
     #[test]
@@ -248,7 +278,8 @@ mod test {
         let mut replica = LibsqlDatabase::new(
             temp_replica.path().to_path_buf(),
             ReplicaType {
-                injector: Injector::new(temp_replica.path(), (), 10).unwrap(),
+                commit_handler: Some(Box::new(())),
+                injector_buffer_capacity: 10,
             },
         );
 
@@ -256,32 +287,31 @@ mod test {
         primary_conn
             .execute_program(
                 Program::seq(&["create table test (x)", "insert into test values (42)"]),
-                (),
+                &mut (),
             )
             .unwrap();
 
         let logfile = primary.ty.logger.log_file.read();
 
+        let mut injector = replica.injector().unwrap();
         for frame in logfile.frames_iter().unwrap() {
             let frame = frame.unwrap();
-            replica.inject_frame(frame).unwrap();
+            injector.inject(frame).unwrap();
         }
 
         let mut replica_conn = replica.connect().unwrap();
-        let result = replica_conn
-            .execute_program(
-                Program::seq(&["select * from test limit 1"]),
-                ReadRowBuilder(Vec::new()),
-            )
+        let mut builder = ReadRowBuilder(Vec::new());
+        replica_conn
+            .execute_program(Program::seq(&["select * from test limit 1"]), &mut builder)
             .unwrap();
 
-        assert_eq!(result.0.len(), 1);
-        assert_eq!(result.0[0], Value::Integer(42));
+        assert_eq!(builder.0.len(), 1);
+        assert_eq!(builder.0[0], Value::Integer(42));
     }
 
     #[test]
     fn primary_compact_log() {
-        struct Compactor(Rc<Cell<bool>>);
+        struct Compactor(Arc<AtomicBool>);
 
         impl LogCompactor for Compactor {
             fn should_compact(&self, log: &LogFile) -> bool {
@@ -293,14 +323,14 @@ mod test {
                 _file: LogFile,
                 _path: PathBuf,
                 _size_after: u32,
-            ) -> anyhow::Result<()> {
-                self.0.set(true);
+            ) -> Result<(), Box<dyn std::error::Error + Sync + Send + 'static>> {
+                self.0.store(true, Relaxed);
                 Ok(())
             }
         }
 
         let temp = tempfile::tempdir().unwrap();
-        let compactor_called = Rc::new(Cell::new(false));
+        let compactor_called = Arc::new(AtomicBool::new(false));
         let db = LibsqlDatabase::new_primary(
             temp.path().to_path_buf(),
             Compactor(compactor_called.clone()),
@@ -311,20 +341,20 @@ mod test {
         let mut conn = db.connect().unwrap();
         conn.execute_program(
             Program::seq(&["create table test (x)", "insert into test values (12)"]),
-            (),
+            &mut (),
         )
         .unwrap();
-        assert!(compactor_called.get());
+        assert!(compactor_called.load(Relaxed));
     }
 
     #[test]
     fn no_compaction_uncommited_frames() {
-        struct Compactor(Rc<Cell<bool>>);
+        struct Compactor(Arc<AtomicBool>);
 
         impl LogCompactor for Compactor {
             fn should_compact(&self, log: &LogFile) -> bool {
                 assert_eq!(log.uncommitted_frame_count, 0);
-                self.0.set(true);
+                self.0.store(true, Relaxed);
                 false
             }
 
@@ -333,13 +363,13 @@ mod test {
                 _file: LogFile,
                 _path: PathBuf,
                 _size_after: u32,
-            ) -> anyhow::Result<()> {
+            ) -> Result<(), Box<dyn std::error::Error + Sync + Send + 'static>> {
                 unreachable!()
             }
         }
 
         let temp = tempfile::tempdir().unwrap();
-        let compactor_called = Rc::new(Cell::new(false));
+        let compactor_called = Arc::new(AtomicBool::new(false));
         let db = LibsqlDatabase::new_primary(
             temp.path().to_path_buf(),
             Compactor(compactor_called.clone()),
@@ -354,12 +384,13 @@ mod test {
                 "create table test (x)",
                 "insert into test values (12)",
             ]),
-            (),
+            &mut (),
         )
         .unwrap();
         conn.inner_connection().cache_flush().unwrap();
-        assert!(!compactor_called.get());
-        conn.execute_program(Program::seq(&["commit"]), ()).unwrap();
-        assert!(compactor_called.get());
+        assert!(!compactor_called.load(Relaxed));
+        conn.execute_program(Program::seq(&["commit"]), &mut ())
+            .unwrap();
+        assert!(compactor_called.load(Relaxed));
     }
 }

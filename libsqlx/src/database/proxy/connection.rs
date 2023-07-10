@@ -26,9 +26,9 @@ where
     ReadDb: Connection,
     WriteDb: Connection,
 {
-    fn execute_program<B: ResultBuilder>(&mut self, pgm: Program, builder: B) -> Result<B> {
+    fn execute_program(&mut self, pgm: Program, builder: &mut dyn ResultBuilder) -> Result<()> {
         let mut state = self.state.lock();
-        let builder = ExtractFrameNoBuilder::new(builder);
+        let mut builder = ExtractFrameNoBuilder::new(builder);
         if !state.is_txn && pgm.is_read_only() {
             if let Some(frame_no) = state.last_frame_no {
                 (self.wait_frame_no_cb)(frame_no);
@@ -36,24 +36,24 @@ where
             // We know that this program won't perform any writes. We attempt to run it on the
             // replica. If it leaves an open transaction, then this program is an interactive
             // transaction, so we rollback the replica, and execute again on the primary.
-            let builder = self.read_db.execute_program(pgm.clone(), builder)?;
+            self.read_db.execute_program(pgm.clone(), &mut builder)?;
 
             // still in transaction state after running a read-only txn
             if builder.is_txn {
                 // TODO: rollback
                 // self.read_db.rollback().await?;
-                let builder = self.write_db.execute_program(pgm, builder)?;
+                self.write_db.execute_program(pgm, &mut builder)?;
                 state.is_txn = builder.is_txn;
                 state.last_frame_no = builder.frame_no;
-                Ok(builder.inner)
+                Ok(())
             } else {
-                Ok(builder.inner)
+                Ok(())
             }
         } else {
-            let builder = self.write_db.execute_program(pgm, builder)?;
+            self.write_db.execute_program(pgm, &mut builder)?;
             state.is_txn = builder.is_txn;
             state.last_frame_no = builder.frame_no;
-            Ok(builder.inner)
+            Ok(())
         }
     }
 
@@ -65,14 +65,14 @@ where
     }
 }
 
-struct ExtractFrameNoBuilder<B> {
-    inner: B,
+struct ExtractFrameNoBuilder<'a> {
+    inner: &'a mut dyn ResultBuilder,
     frame_no: Option<FrameNo>,
     is_txn: bool,
 }
 
-impl<B> ExtractFrameNoBuilder<B> {
-    fn new(inner: B) -> Self {
+impl<'a> ExtractFrameNoBuilder<'a> {
+    fn new(inner: &'a mut dyn ResultBuilder) -> Self {
         Self {
             inner,
             frame_no: None,
@@ -81,7 +81,7 @@ impl<B> ExtractFrameNoBuilder<B> {
     }
 }
 
-impl<B: ResultBuilder> ResultBuilder for ExtractFrameNoBuilder<B> {
+impl<'a> ResultBuilder for ExtractFrameNoBuilder<'a> {
     fn init(
         &mut self,
         config: &QueryBuilderConfig,
@@ -206,14 +206,14 @@ mod test {
         );
 
         let mut conn = db.connect().unwrap();
-        conn.execute_program(Program::seq(&["insert into test values (12)"]), ())
+        conn.execute_program(Program::seq(&["insert into test values (12)"]), &mut ())
             .unwrap();
 
         assert!(!wait_called.get());
         assert!(!read_called.get());
         assert!(write_called.get());
 
-        conn.execute_program(Program::seq(&["select * from test"]), ())
+        conn.execute_program(Program::seq(&["select * from test"]), &mut ())
             .unwrap();
 
         assert!(read_called.get());

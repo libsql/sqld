@@ -1,10 +1,12 @@
 use crate::result_builder::QueryResultBuilderError;
+pub use rusqlite::Error as RusqliteError;
+pub use rusqlite::ffi::ErrorCode;
 
 #[allow(clippy::enum_variant_names)]
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error("LibSQL failed to bind provided query parameters: `{0}`")]
-    LibSqlInvalidQueryParams(anyhow::Error),
+    LibSqlInvalidQueryParams(String),
     #[error("Transaction timed-out")]
     LibSqlTxTimeout,
     #[error("Server can't handle additional transactions")]
@@ -33,6 +35,14 @@ pub enum Error {
     Blocked(Option<String>),
     #[error("invalid replication log header")]
     InvalidLogHeader,
+    #[error("unsupported statement")]
+    UnsupportedStatement,
+    #[error("Syntax error at {line}:{col}: {found}")]
+    SyntaxError {
+        line: u64, col: usize, found: String
+    },
+    #[error(transparent)]
+    LexerError(#[from] sqlite3_parser::lexer::sql::Error)
 }
 
 impl From<tokio::sync::oneshot::error::RecvError> for Error {

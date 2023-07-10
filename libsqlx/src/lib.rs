@@ -4,10 +4,9 @@ pub mod query;
 
 mod connection;
 mod database;
-mod program;
-mod result_builder;
+pub mod program;
+pub mod result_builder;
 mod seal;
-mod semaphore;
 
 pub type Result<T, E = crate::error::Error> = std::result::Result<T, E>;
 
@@ -15,7 +14,6 @@ pub use connection::Connection;
 pub use database::libsql;
 pub use database::proxy;
 pub use database::Database;
-pub use program::Program;
-pub use result_builder::{
-    Column, QueryBuilderConfig, QueryResultBuilderError, ResultBuilder, ResultBuilderExt,
-};
+pub use database::libsql::replication_log::FrameNo;
+
+pub use rusqlite;

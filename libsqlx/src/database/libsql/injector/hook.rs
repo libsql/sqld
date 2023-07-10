@@ -27,14 +27,11 @@ pub struct InjectorHookCtx {
 }
 
 impl InjectorHookCtx {
-    pub fn new(
-        buffer: FrameBuffer,
-        injector_commit_handler: impl InjectorCommitHandler + 'static,
-    ) -> Self {
+    pub fn new(buffer: FrameBuffer, commit_handler: Box<dyn InjectorCommitHandler>) -> Self {
         Self {
             buffer,
             is_txn: false,
-            commit_handler: Box::new(injector_commit_handler),
+            commit_handler,
         }
     }
 

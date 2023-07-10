@@ -101,14 +101,14 @@ impl<C> LibsqlConnection<C> {
         &self.conn
     }
 
-    fn run<B: ResultBuilder>(&mut self, pgm: Program, mut builder: B) -> Result<B> {
+    fn run(&mut self, pgm: Program, builder: &mut dyn ResultBuilder) -> Result<()> {
         let mut results = Vec::with_capacity(pgm.steps.len());
 
         builder.init(&self.builder_config)?;
         let is_autocommit_before = self.conn.is_autocommit();
 
         for step in pgm.steps() {
-            let res = self.execute_step(step, &results, &mut builder)?;
+            let res = self.execute_step(step, &results, builder)?;
             results.push(res);
         }
 
@@ -119,14 +119,14 @@ impl<C> LibsqlConnection<C> {
 
         builder.finish(!self.conn.is_autocommit(), None)?;
 
-        Ok(builder)
+        Ok(())
     }
 
     fn execute_step(
         &mut self,
         step: &Step,
         results: &[bool],
-        builder: &mut impl ResultBuilder,
+        builder: &mut dyn ResultBuilder,
     ) -> Result<bool> {
         builder.begin_step()?;
         let mut enabled = match step.cond.as_ref() {
@@ -163,7 +163,7 @@ impl<C> LibsqlConnection<C> {
     fn execute_query(
         &self,
         query: &Query,
-        builder: &mut impl ResultBuilder,
+        builder: &mut dyn ResultBuilder,
     ) -> Result<(u64, Option<i64>)> {
         tracing::trace!("executing query: {}", query.stmt.stmt);
 
@@ -177,7 +177,7 @@ impl<C> LibsqlConnection<C> {
         query
             .params
             .bind(&mut stmt)
-            .map_err(Error::LibSqlInvalidQueryParams)?;
+            .map_err(|e|Error::LibSqlInvalidQueryParams(e.to_string()))?;
 
         let mut qresult = stmt.raw_query();
         builder.begin_rows()?;
@@ -237,7 +237,11 @@ fn eval_cond(cond: &Cond, results: &[bool]) -> Result<bool> {
 }
 
 impl<C> Connection for LibsqlConnection<C> {
-    fn execute_program<B: ResultBuilder>(&mut self, pgm: Program, builder: B) -> crate::Result<B> {
+    fn execute_program(
+        &mut self,
+        pgm: Program,
+        builder: &mut dyn ResultBuilder,
+    ) -> crate::Result<()> {
         self.run(pgm, builder)
     }
 
