@@ -18,6 +18,7 @@ mod hrana;
 mod http;
 mod manager;
 mod meta;
+mod linc;
 
 #[tokio::main]
 async fn main() -> Result<()> {
