@@ -101,35 +101,6 @@ unsafe impl WalHook for ReplicationLoggerHook {
             )
         };
 
-        // FIXME: instead of block_on, we should consider replicating asynchronously in the background,
-        // e.g. by sending the data to another fiber by an unbounded channel (which allows sync insertions).
-        #[allow(clippy::await_holding_lock)]
-        // uncontended -> only gets called under a libSQL write lock
-        if rc == 0 {
-            if let Some(replicator) = ctx.bottomless_replicator.as_mut() {
-                let runtime = tokio::runtime::Handle::current();
-                match runtime.block_on(async move {
-                    let mut replicator = replicator.lock().unwrap();
-                    replicator.register_last_valid_frame(last_valid_frame);
-                    // In theory it's enough to set the page size only once, but in practice
-                    // it's a very cheap operation anyway, and the page is not always known
-                    // upfront and can change dynamically.
-                    // FIXME: changing the page size in the middle of operation is *not*
-                    // supported by bottomless storage.
-                    replicator.set_page_size(page_size as usize)?;
-                    let frame_count = PageHdrIter::new(page_headers, page_size as usize).count();
-                    replicator.submit_frames(frame_count as u32);
-                    Ok::<(), anyhow::Error>(())
-                }) {
-                    Ok(()) => {}
-                    Err(e) => {
-                        tracing::error!("error writing to bottomless: {e}");
-                        return SQLITE_IOERR_WRITE;
-                    }
-                }
-            }
-        }
-
         if is_commit != 0 && rc == 0 {
             if let Err(e) = ctx.commit() {
                 // If we reach this point, it means that we have commited a transaction to sqlite wal,
@@ -138,6 +109,19 @@ unsafe impl WalHook for ReplicationLoggerHook {
                     "fatal error: log failed to commit: inconsistent replication log: {e}"
                 );
                 std::process::abort();
+            }
+
+            // do backup after log replication as we don't want to replicate potentially
+            // inconsistent frames
+            if let Some(replicator) = ctx.bottomless_replicator.as_mut() {
+                let mut replicator = replicator.lock().unwrap();
+                replicator.register_last_valid_frame(last_valid_frame);
+                if let Err(e) = replicator.set_page_size(page_size as usize) {
+                    tracing::error!("fatal error during backup: {e}, exiting");
+                    std::process::abort()
+                }
+                let frame_count = PageHdrIter::new(page_headers, page_size as usize).count();
+                replicator.submit_frames(frame_count as u32);
             }
 
             if let Err(e) = ctx.logger.log_file.write().maybe_compact(
@@ -161,12 +145,6 @@ unsafe impl WalHook for ReplicationLoggerHook {
     ) -> i32 {
         let ctx = Self::wal_extract_ctx(wal);
         ctx.rollback();
-
-        tracing::error!(
-            "fixme: implement bottomless undo for {:?}",
-            ctx.bottomless_replicator
-        );
-
         unsafe { orig(wal, func, undo_ctx) }
     }
 
