@@ -197,10 +197,10 @@ async fn rollback_restore() {
     let _ = env_logger::builder().is_test(true).try_init();
     const BUCKET: &str = "testrollbackrestore";
     const PATH: &str = "rollback_restore.sqld";
-    const PORT: u16 = 15001;
+    const PORT: u16 = 15002;
 
     async fn get_data(conn: &Url) -> Result<Vec<(Value, Value)>> {
-        let result = sql(&conn, ["SELECT * FROM t"]).await?;
+        let result = sql(conn, ["SELECT * FROM t"]).await?;
         let rows = result
             .into_iter()
             .next()
