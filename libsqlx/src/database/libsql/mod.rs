@@ -174,6 +174,7 @@ impl<T: LibsqlDbType> Database for LibsqlDatabase<T> {
     type Connection = LibsqlConnection<<T::ConnectionHook as WalHook>::Context>;
 
     fn connect(&self) -> Result<Self::Connection, Error> {
+        dbg!();
         Ok(
             LibsqlConnection::<<T::ConnectionHook as WalHook>::Context>::new(
                 &self.db_path,

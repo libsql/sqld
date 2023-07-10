@@ -1,10 +1,14 @@
-use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use libsqlx::libsql::{LibsqlDatabase, LogCompactor, LogFile, PrimaryType};
 use libsqlx::Database as _;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::{block_in_place, JoinSet};
+
+use crate::hrana;
+use crate::hrana::http::handle_pipeline;
+use crate::hrana::http::proto::{PipelineRequestBody, PipelineResponseBody};
 
 use self::config::{AllocConfig, DbConfig};
 
@@ -19,16 +23,11 @@ pub struct ConnectionId {
 }
 
 pub enum AllocationMessage {
-    /// Execute callback against connection
-    Exec {
-        connection_id: ConnectionId,
-        exec: ExecFn,
-    },
-    /// Create a new connection, execute the callback and return the connection id.
-    NewConnExec {
-        exec: ExecFn,
-        ret: oneshot::Sender<ConnectionId>,
-    },
+    NewConnection(oneshot::Sender<ConnectionHandle>),
+    HranaPipelineReq {
+        req: PipelineRequestBody,
+        ret: oneshot::Sender<crate::Result<PipelineResponseBody>>,
+    }
 }
 
 pub enum Database {
@@ -73,12 +72,34 @@ impl Database {
 pub struct Allocation {
     pub inbox: mpsc::Receiver<AllocationMessage>,
     pub database: Database,
-    /// senders to the spawned connections
-    pub connections: HashMap<u32, mpsc::Sender<ExecFn>>,
     /// spawned connection futures, returning their connection id on completion.
     pub connections_futs: JoinSet<u32>,
     pub next_conn_id: u32,
     pub max_concurrent_connections: u32,
+
+    pub hrana_server: Arc<hrana::http::Server>,
+}
+
+pub struct ConnectionHandle {
+    exec: mpsc::Sender<ExecFn>,
+    exit: oneshot::Sender<()>,
+}
+
+impl ConnectionHandle {
+    pub async fn exec<F, R>(&self, f: F) -> crate::Result<R>
+        where F: for<'a> FnOnce(&'a mut (dyn libsqlx::Connection + 'a)) -> R + Send + 'static,
+              R: Send + 'static,
+    {
+        let (sender, ret) = oneshot::channel();
+        let cb = move |conn: &mut dyn libsqlx::Connection| {
+            let res = f(conn);
+            let _ = sender.send(res);
+        };
+
+        self.exec.send(Box::new(cb)).await.unwrap();
+
+        Ok(ret.await?)
+    }
 }
 
 impl Allocation {
@@ -87,23 +108,22 @@ impl Allocation {
             tokio::select! {
                 Some(msg) = self.inbox.recv() => {
                     match msg {
-                        AllocationMessage::Exec { connection_id, exec } => {
-                            if let Some(sender) = self.connections.get(&connection_id.id) {
-                                if let Err(_) = sender.send(exec).await {
-                                    tracing::debug!("connection {} closed.", connection_id.id);
-                                    self.connections.remove_entry(&connection_id.id);
-                                }
-                            }
+                        AllocationMessage::NewConnection(ret) => {
+                            let _ =ret.send(self.new_conn().await);
                         },
-                        AllocationMessage::NewConnExec { exec, ret } => {
-                            let id = self.new_conn_exec(exec).await;
-                            let _ = ret.send(id);
-                        },
+                        AllocationMessage::HranaPipelineReq { req, ret} => {
+                            let res = handle_pipeline(&self.hrana_server.clone(), req, || async {
+                                let conn= self.new_conn().await;
+                                dbg!();
+                                Ok(conn)
+                            }).await;
+                            let _ = ret.send(res);
+                        }
                     }
                 },
                 maybe_id = self.connections_futs.join_next() => {
-                    if let Some(Ok(id)) = maybe_id {
-                        self.connections.remove_entry(&id);
+                    if let Some(Ok(_id)) = maybe_id {
+                        // self.connections.remove_entry(&id);
                     }
                 },
                 else => break,
@@ -111,10 +131,13 @@ impl Allocation {
         }
     }
 
-    async fn new_conn_exec(&mut self, exec: ExecFn) -> ConnectionId {
+    async fn new_conn(&mut self) -> ConnectionHandle {
+        dbg!();
         let id = self.next_conn_id();
+        dbg!();
         let conn = block_in_place(|| self.database.connect());
-        let (close_sender, exit) = mpsc::channel(1);
+        dbg!();
+        let (close_sender, exit) = oneshot::channel();
         let (exec_sender, exec_receiver) = mpsc::channel(1);
         let conn = Connection {
             id,
@@ -123,20 +146,24 @@ impl Allocation {
             exec: exec_receiver,
         };
 
+        dbg!();
         self.connections_futs.spawn(conn.run());
-        // This should never block!
-        assert!(exec_sender.try_send(exec).is_ok());
-        assert!(self.connections.insert(id, exec_sender).is_none());
+        dbg!();
 
-        ConnectionId { id, close_sender }
+        ConnectionHandle {
+            exec: exec_sender,
+            exit: close_sender,
+        }
+
     }
 
     fn next_conn_id(&mut self) -> u32 {
         loop {
             self.next_conn_id = self.next_conn_id.wrapping_add(1);
-            if !self.connections.contains_key(&self.next_conn_id) {
-                return self.next_conn_id;
-            }
+            return self.next_conn_id;
+            // if !self.connections.contains_key(&self.next_conn_id) {
+            //     return self.next_conn_id;
+            // }
         }
     }
 }
@@ -144,7 +171,7 @@ impl Allocation {
 struct Connection {
     id: u32,
     conn: Box<dyn libsqlx::Connection + Send>,
-    exit: mpsc::Receiver<()>,
+    exit: oneshot::Receiver<()>,
     exec: mpsc::Receiver<ExecFn>,
 }
 
@@ -152,7 +179,7 @@ impl Connection {
     async fn run(mut self) -> u32 {
         loop {
             tokio::select! {
-                _ = self.exit.recv() => break,
+                _ = &mut self.exit => break,
                 Some(exec) = self.exec.recv() => {
                     tokio::task::block_in_place(|| exec(&mut *self.conn));
                 }

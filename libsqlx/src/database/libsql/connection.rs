@@ -177,7 +177,7 @@ impl<C> LibsqlConnection<C> {
         query
             .params
             .bind(&mut stmt)
-            .map_err(Error::LibSqlInvalidQueryParams)?;
+            .map_err(|e|Error::LibSqlInvalidQueryParams(e.to_string()))?;
 
         let mut qresult = stmt.raw_query();
         builder.begin_rows()?;

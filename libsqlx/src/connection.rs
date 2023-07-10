@@ -2,8 +2,7 @@ use rusqlite::types::Value;
 
 use crate::program::{Program, Step};
 use crate::query::Query;
-use crate::result_builder::ResultBuilder;
-use crate::QueryBuilderConfig;
+use crate::result_builder::{ResultBuilder, QueryBuilderConfig, QueryResultBuilderError};
 
 #[derive(Debug, Clone)]
 pub struct DescribeResponse {
@@ -48,7 +47,7 @@ pub trait Connection {
             fn init(
                 &mut self,
                 _config: &QueryBuilderConfig,
-            ) -> std::result::Result<(), crate::QueryResultBuilderError> {
+            ) -> std::result::Result<(), QueryResultBuilderError> {
                 self.error = None;
                 self.rows.clear();
                 self.current_row.clear();
@@ -59,12 +58,12 @@ pub trait Connection {
             fn add_row_value(
                 &mut self,
                 v: rusqlite::types::ValueRef,
-            ) -> Result<(), crate::QueryResultBuilderError> {
+            ) -> Result<(), QueryResultBuilderError> {
                 self.current_row.push(v.into());
                 Ok(())
             }
 
-            fn finish_row(&mut self) -> Result<(), crate::QueryResultBuilderError> {
+            fn finish_row(&mut self) -> Result<(), QueryResultBuilderError> {
                 let row = std::mem::take(&mut self.current_row);
                 self.rows.push(row);
 
@@ -74,7 +73,7 @@ pub trait Connection {
             fn step_error(
                 &mut self,
                 error: crate::error::Error,
-            ) -> Result<(), crate::QueryResultBuilderError> {
+            ) -> Result<(), QueryResultBuilderError> {
                 self.error.replace(error);
                 Ok(())
             }

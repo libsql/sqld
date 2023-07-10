@@ -13,7 +13,7 @@ use tracing::metadata::LevelFilter;
 use tracing_subscriber::prelude::*;
 
 mod allocation;
-mod databases;
+mod database;
 mod hrana;
 mod http;
 mod manager;
@@ -28,7 +28,9 @@ async fn main() -> Result<()> {
     let store = Arc::new(Store::new(&db_path));
     let admin_api_listener = tokio::net::TcpListener::bind("0.0.0.0:3456").await?;
     join_set.spawn(run_admin_api(
-        AdminApiConfig { meta_store: store.clone() },
+        AdminApiConfig {
+            meta_store: store.clone(),
+        },
         AddrIncoming::from_listener(admin_api_listener)?,
     ));
 

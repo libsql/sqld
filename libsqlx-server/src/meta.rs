@@ -32,7 +32,7 @@ impl Store {
         });
     }
 
-    pub async fn deallocate(&self, alloc_id: Uuid) {
+    pub async fn deallocate(&self, _alloc_id: Uuid) {
         todo!()
     }
 
@@ -48,7 +48,7 @@ impl Store {
         tokio::task::block_in_place(|| {
             let mut out = Vec::new();
             for kv in self.meta_store.iter() {
-                let (k, v) = kv.unwrap();
+                let (_k, v) = kv.unwrap();
                 let alloc = bincode::deserialize(&v).unwrap();
                 out.push(alloc);
             }

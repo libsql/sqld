@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -7,6 +6,7 @@ use tokio::sync::mpsc;
 use tokio::task::JoinSet;
 
 use crate::allocation::{Allocation, AllocationMessage, Database};
+use crate::hrana;
 use crate::meta::Store;
 
 pub struct Manager {
@@ -39,10 +39,10 @@ impl Manager {
             let alloc = Allocation {
                 inbox,
                 database: Database::from_config(&config, path),
-                connections: HashMap::new(),
                 connections_futs: JoinSet::new(),
                 next_conn_id: 0,
                 max_concurrent_connections: config.max_conccurent_connection,
+                hrana_server: Arc::new(hrana::http::Server::new(None)), // TODO: handle self URL?
             };
 
             tokio::spawn(alloc.run());

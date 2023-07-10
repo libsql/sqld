@@ -1,4 +1,3 @@
-use anyhow::Result;
 use fallible_iterator::FallibleIterator;
 use sqlite3_parser::ast::{Cmd, PragmaBody, QualifiedName, Stmt};
 use sqlite3_parser::lexer::sql::{Parser, ParserError};
@@ -201,15 +200,15 @@ impl Statement {
         }
     }
 
-    pub fn parse(s: &str) -> impl Iterator<Item = Result<Self>> + '_ {
+    pub fn parse(s: &str) -> impl Iterator<Item = crate::Result<Self>> + '_ {
         fn parse_inner(
             original: &str,
             stmt_count: u64,
             has_more_stmts: bool,
             c: Cmd,
-        ) -> Result<Statement> {
+        ) -> crate::Result<Statement> {
             let kind =
-                StmtKind::kind(&c).ok_or_else(|| anyhow::anyhow!("unsupported statement"))?;
+                StmtKind::kind(&c).ok_or_else(|| crate::error::Error::UnsupportedStatement)?;
 
             if stmt_count == 1 && !has_more_stmts {
                 // XXX: Temporary workaround for integration with Atlas
@@ -259,9 +258,7 @@ impl Statement {
                         found: Some(found),
                     },
                     Some((line, col)),
-                )) => Some(Err(anyhow::anyhow!(
-                    "syntax error around L{line}:{col}: `{found}`"
-                ))),
+                )) => Some(Err(crate::error::Error::SyntaxError { line, col, found})),
                 Err(e) => Some(Err(e.into())),
             }
         })

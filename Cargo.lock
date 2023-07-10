@@ -695,9 +695,9 @@ checksum = "9e1b586273c5702936fe7b7d6896644d8be71e6314cfe09d3167c95f712589e8"
 
 [[package]]
 name = "base64"
-version = "0.21.1"
+version = "0.21.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3f1e31e207a6b8fb791a38ea3105e6cb541f55e4d029902d3039a4ad07cc4105"
+checksum = "604178f6c5c21f02dc555784810edfb88d34ac2c73b2eae109655649ee73ce3d"
 
 [[package]]
 name = "base64-simd"
@@ -2436,7 +2436,7 @@ version = "8.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6971da4d9c3aa03c3d8f3ff0f4155b534aad021292003895a469716b2a230378"
 dependencies = [
- "base64 0.21.1",
+ "base64 0.21.2",
  "pem",
  "ring",
  "serde",
@@ -2502,7 +2502,7 @@ checksum = "9c7b1c078b4d3d45ba0db91accc23dcb8d2761d67f819efd94293065597b7ac8"
 dependencies = [
  "anyhow",
  "async-trait",
- "base64 0.21.1",
+ "base64 0.21.2",
  "num-traits",
  "reqwest",
  "serde_json",
@@ -2568,15 +2568,23 @@ name = "libsqlx-server"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "base64 0.21.2",
  "bincode",
+ "bytes 1.4.0",
  "clap",
  "color-eyre",
  "futures",
+ "hmac",
  "hyper",
  "libsqlx",
  "moka",
+ "parking_lot 0.12.1",
+ "priority-queue",
+ "rand",
  "regex",
  "serde",
+ "serde_json",
+ "sha2",
  "sled",
  "thiserror",
  "tokio",
@@ -3286,9 +3294,9 @@ dependencies = [
 
 [[package]]
 name = "priority-queue"
-version = "1.3.1"
+version = "1.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5ca9c6be70d989d21a136eb86c2d83e4b328447fac4a88dace2143c179c86267"
+checksum = "fff39edfcaec0d64e8d0da38564fad195d2d51b680940295fcc307366e101e61"
 dependencies = [
  "autocfg",
  "indexmap 1.9.3",
@@ -3598,7 +3606,7 @@ version = "0.11.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cde824a14b7c14f85caff81225f411faacc04a2013f41670f41443742b1c1c55"
 dependencies = [
- "base64 0.21.1",
+ "base64 0.21.2",
  "bytes 1.4.0",
  "encoding_rs",
  "futures-core",
@@ -3755,7 +3763,7 @@ version = "1.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d194b56d58803a43635bdc398cd17e383d6f71f9182b9a192c127ca42494a59b"
 dependencies = [
- "base64 0.21.1",
+ "base64 0.21.2",
 ]
 
 [[package]]
@@ -3900,9 +3908,9 @@ dependencies = [
 
 [[package]]
 name = "serde_json"
-version = "1.0.99"
+version = "1.0.100"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "46266871c240a00b8f503b877622fe33430b3c7d963bdc0f2adc511e54a1eae3"
+checksum = "0f1e14e89be7aa4c4b78bdbdc9eb5bf8517829a600ae8eaa39a6e1d960b5185c"
 dependencies = [
  "indexmap 2.0.0",
  "itoa",
@@ -3944,9 +3952,9 @@ dependencies = [
 
 [[package]]
 name = "sha2"
-version = "0.10.6"
+version = "0.10.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "82e6b795fe2e3b1e845bafcb27aa35405c4d47cdfc92af5fc8d3002f76cebdc0"
+checksum = "479fb9d862239e610720565ca91403019f2f00410f1864c5aa7479b950a76ed8"
 dependencies = [
  "cfg-if",
  "cpufeatures",
@@ -4116,7 +4124,7 @@ dependencies = [
  "aws-config",
  "aws-sdk-s3",
  "axum",
- "base64 0.21.1",
+ "base64 0.21.2",
  "bincode",
  "bottomless",
  "bytemuck",
@@ -4590,7 +4598,7 @@ checksum = "3082666a3a6433f7f511c7192923fa1fe07c69332d3c6a2e6bb040b569199d5a"
 dependencies = [
  "async-trait",
  "axum",
- "base64 0.21.1",
+ "base64 0.21.2",
  "bytes 1.4.0",
  "futures-core",
  "futures-util",

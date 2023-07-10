@@ -4,13 +4,13 @@ use crate::query::Query;
 
 #[derive(Debug, Clone)]
 pub struct Program {
-    pub steps: Arc<Vec<Step>>,
+    pub steps: Arc<[Step]>,
 }
 
 impl Program {
     pub fn new(steps: Vec<Step>) -> Self {
         Self {
-            steps: Arc::new(steps),
+            steps: steps.into(),
         }
     }
 
@@ -19,7 +19,20 @@ impl Program {
     }
 
     pub fn steps(&self) -> &[Step] {
-        self.steps.as_slice()
+        &self.steps
+    }
+
+    /// transforms a collection of queries into a batch program. The execution of each query
+    /// depends on the success of the previous one.
+    pub fn from_queries(qs: impl IntoIterator<Item = Query>) -> Self {
+        let steps = qs.into_iter().enumerate().map(|(idx, query)| Step {
+            cond: (idx > 0).then(|| Cond::Ok { step: idx - 1 }),
+            query,
+        })
+        .collect();
+
+        Self { steps }
+
     }
 
     #[cfg(test)]

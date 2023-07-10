@@ -2,7 +2,7 @@ use std::fmt;
 use std::io::{self, ErrorKind};
 
 use bytesize::ByteSize;
-use rusqlite::types::ValueRef;
+pub use rusqlite::types::ValueRef;
 
 use crate::database::FrameNo;
 
@@ -168,6 +168,12 @@ pub struct StepResultsBuilder {
     current: Option<crate::error::Error>,
     step_results: Vec<StepResult>,
     is_skipped: bool,
+}
+
+impl StepResultsBuilder {
+    pub fn into_ret(self) -> Vec<StepResult> {
+        self.step_results
+    }
 }
 
 impl ResultBuilder for StepResultsBuilder {

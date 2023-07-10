@@ -1,4 +1,4 @@
-use std::{path::PathBuf, sync::Arc};
+use std::sync::Arc;
 
 use axum::{extract::State, routing::post, Json, Router};
 use color_eyre::eyre::Result;
