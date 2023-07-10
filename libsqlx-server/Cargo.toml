@@ -14,8 +14,10 @@ futures = "0.3.28"
 hyper = { version = "0.14.27", features = ["h2", "server"] }
 libsqlx = { version = "0.1.0", path = "../libsqlx" }
 moka = { version = "0.11.2", features = ["future"] }
+regex = "1.9.1"
 serde = { version = "1.0.166", features = ["derive"] }
 sled = "0.34.7"
+thiserror = "1.0.43"
 tokio = { version = "1.29.1", features = ["full"] }
 tracing = "0.1.37"
 tracing-subscriber = { version = "0.3.17", features = ["env-filter"] }

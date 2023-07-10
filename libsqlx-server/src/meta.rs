@@ -32,7 +32,9 @@ impl Store {
         });
     }
 
-    pub async fn deallocate(&self, alloc_id: Uuid) {}
+    pub async fn deallocate(&self, alloc_id: Uuid) {
+        todo!()
+    }
 
     pub async fn meta(&self, alloc_id: &str) -> Option<AllocConfig> {
         tokio::task::block_in_place(|| {

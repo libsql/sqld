@@ -11,21 +11,21 @@ use crate::{
     meta::Store,
 };
 
-pub struct AdminServerConfig {
-    pub db_path: PathBuf,
+pub struct AdminApiConfig {
+    pub meta_store: Arc<Store>,
 }
 
 struct AdminServerState {
     meta_store: Arc<Store>,
 }
 
-pub async fn run_admin_server<I>(config: AdminServerConfig, listener: I) -> Result<()>
+pub async fn run_admin_api<I>(config: AdminApiConfig, listener: I) -> Result<()>
 where
     I: Accept<Error = std::io::Error>,
     I::Conn: AsyncRead + AsyncWrite + Send + Unpin + 'static,
 {
     let state = AdminServerState {
-        meta_store: Arc::new(Store::new(&config.db_path)),
+        meta_store: config.meta_store,
     };
 
     let app = Router::new()
@@ -54,7 +54,7 @@ struct AllocateReq {
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum DbConfigReq {
-    Primary { },
+    Primary {},
     Replica { primary_node_id: String },
 }
 
@@ -66,7 +66,7 @@ async fn allocate(
         max_conccurent_connection: req.max_conccurent_connection.unwrap_or(16),
         id: req.alloc_id.clone(),
         db_config: match req.config {
-            DbConfigReq::Primary {  } => DbConfig::Primary {  },
+            DbConfigReq::Primary {} => DbConfig::Primary {},
             DbConfigReq::Replica { primary_node_id } => DbConfig::Replica { primary_node_id },
         },
     };

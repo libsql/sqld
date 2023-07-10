@@ -18,9 +18,18 @@ pub struct Manager {
 const MAX_ALLOC_MESSAGE_QUEUE_LEN: usize = 32;
 
 impl Manager {
-    pub async fn alloc(&self, alloc_id: &str) -> mpsc::Sender<AllocationMessage> {
+    pub fn new(db_path: PathBuf, meta_store: Arc<Store>, max_conccurent_allocs: u64) -> Self {
+        Self {
+            cache: Cache::new(max_conccurent_allocs),
+            meta_store,
+            db_path,
+        }
+    }
+
+    /// Returns a handle to an allocation, lazily initializing if it isn't already loaded.
+    pub async fn alloc(&self, alloc_id: &str) -> Option<mpsc::Sender<AllocationMessage>> {
         if let Some(sender) = self.cache.get(alloc_id) {
-            return sender.clone();
+            return Some(sender.clone());
         }
 
         if let Some(config) = self.meta_store.meta(alloc_id).await {
@@ -42,9 +51,9 @@ impl Manager {
                 .insert(alloc_id.to_string(), alloc_sender.clone())
                 .await;
 
-            return alloc_sender;
+            return Some(alloc_sender);
         }
 
-        todo!("alloc doesn't exist")
+        None
     }
 }
