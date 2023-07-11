@@ -19,6 +19,7 @@ mod http;
 mod manager;
 mod meta;
 mod linc;
+mod config;
 
 #[tokio::main]
 async fn main() -> Result<()> {
