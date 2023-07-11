@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use async_bincode::tokio::AsyncBincodeStream;
 use async_bincode::AsyncDestination;
-use color_eyre::eyre::{bail, anyhow};
+use color_eyre::eyre::{anyhow, bail};
 use futures::{SinkExt, StreamExt};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::mpsc::error::TrySendError;

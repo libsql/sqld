@@ -1,6 +1,6 @@
 use crate::result_builder::QueryResultBuilderError;
-pub use rusqlite::Error as RusqliteError;
 pub use rusqlite::ffi::ErrorCode;
+pub use rusqlite::Error as RusqliteError;
 
 #[allow(clippy::enum_variant_names)]
 #[derive(Debug, thiserror::Error)]
@@ -39,10 +39,12 @@ pub enum Error {
     UnsupportedStatement,
     #[error("Syntax error at {line}:{col}: {found}")]
     SyntaxError {
-        line: u64, col: usize, found: String
+        line: u64,
+        col: usize,
+        found: String,
     },
     #[error(transparent)]
-    LexerError(#[from] sqlite3_parser::lexer::sql::Error)
+    LexerError(#[from] sqlite3_parser::lexer::sql::Error),
 }
 
 impl From<tokio::sync::oneshot::error::RecvError> for Error {

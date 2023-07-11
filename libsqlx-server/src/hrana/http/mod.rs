@@ -49,10 +49,11 @@ fn handle_index() -> color_eyre::Result<hyper::Response<hyper::Body>> {
 pub async fn handle_pipeline<F, Fut>(
     server: &Server,
     req: PipelineRequestBody,
-    mk_conn: F
+    mk_conn: F,
 ) -> color_eyre::Result<PipelineResponseBody>
-where F: FnOnce() -> Fut,
-      Fut: Future<Output = crate::Result<ConnectionHandle>>,
+where
+    F: FnOnce() -> Fut,
+    Fut: Future<Output = crate::Result<ConnectionHandle>>,
 {
     let mut stream_guard = stream::acquire(server, req.baton.as_deref(), mk_conn).await?;
 
@@ -73,7 +74,9 @@ where F: FnOnce() -> Fut,
     Ok(resp_body)
 }
 
-async fn read_request_json<T: DeserializeOwned>(req: hyper::Request<hyper::Body>) -> color_eyre::Result<T> {
+async fn read_request_json<T: DeserializeOwned>(
+    req: hyper::Request<hyper::Body>,
+) -> color_eyre::Result<T> {
     let req_body = hyper::body::to_bytes(req.into_body())
         .await
         .context("Could not read request body")?;

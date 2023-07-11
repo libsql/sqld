@@ -194,10 +194,10 @@ impl ResultBuilder for SingleStatementBuilder {
     }
 
     fn finish(
-        &mut self, 
+        &mut self,
         _is_txn: bool,
         _frame_no: Option<FrameNo>,
-        ) -> Result<(), QueryResultBuilderError> {
+    ) -> Result<(), QueryResultBuilderError> {
         Ok(())
     }
 }

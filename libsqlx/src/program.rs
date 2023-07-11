@@ -25,14 +25,16 @@ impl Program {
     /// transforms a collection of queries into a batch program. The execution of each query
     /// depends on the success of the previous one.
     pub fn from_queries(qs: impl IntoIterator<Item = Query>) -> Self {
-        let steps = qs.into_iter().enumerate().map(|(idx, query)| Step {
-            cond: (idx > 0).then(|| Cond::Ok { step: idx - 1 }),
-            query,
-        })
-        .collect();
+        let steps = qs
+            .into_iter()
+            .enumerate()
+            .map(|(idx, query)| Step {
+                cond: (idx > 0).then(|| Cond::Ok { step: idx - 1 }),
+                query,
+            })
+            .collect();
 
         Self { steps }
-
     }
 
     #[cfg(test)]

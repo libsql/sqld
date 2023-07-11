@@ -27,7 +27,7 @@ pub enum AllocationMessage {
     HranaPipelineReq {
         req: PipelineRequestBody,
         ret: oneshot::Sender<crate::Result<PipelineResponseBody>>,
-    }
+    },
 }
 
 pub enum Database {
@@ -87,8 +87,9 @@ pub struct ConnectionHandle {
 
 impl ConnectionHandle {
     pub async fn exec<F, R>(&self, f: F) -> crate::Result<R>
-        where F: for<'a> FnOnce(&'a mut (dyn libsqlx::Connection + 'a)) -> R + Send + 'static,
-              R: Send + 'static,
+    where
+        F: for<'a> FnOnce(&'a mut (dyn libsqlx::Connection + 'a)) -> R + Send + 'static,
+        R: Send + 'static,
     {
         let (sender, ret) = oneshot::channel();
         let cb = move |conn: &mut dyn libsqlx::Connection| {
@@ -154,7 +155,6 @@ impl Allocation {
             exec: exec_sender,
             exit: close_sender,
         }
-
     }
 
     fn next_conn_id(&mut self) -> u32 {

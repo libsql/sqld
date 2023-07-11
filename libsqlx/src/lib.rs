@@ -12,8 +12,8 @@ pub type Result<T, E = crate::error::Error> = std::result::Result<T, E>;
 
 pub use connection::Connection;
 pub use database::libsql;
+pub use database::libsql::replication_log::FrameNo;
 pub use database::proxy;
 pub use database::Database;
-pub use database::libsql::replication_log::FrameNo;
 
 pub use rusqlite;

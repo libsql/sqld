@@ -11,7 +11,7 @@ use crate::{
     meta::Store,
 };
 
-pub struct AdminApiConfig {
+pub struct Config {
     pub meta_store: Arc<Store>,
 }
 
@@ -19,7 +19,7 @@ struct AdminServerState {
     meta_store: Arc<Store>,
 }
 
-pub async fn run_admin_api<I>(config: AdminApiConfig, listener: I) -> Result<()>
+pub async fn run_admin_api<I>(config: Config, listener: I) -> Result<()>
 where
     I: Accept<Error = std::io::Error>,
     I::Conn: AsyncRead + AsyncWrite + Send + Unpin + 'static,
