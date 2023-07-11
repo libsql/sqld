@@ -72,8 +72,8 @@ async fn main() -> Result<()> {
     let store = Arc::new(Store::new(&config.db_path));
     let manager = Arc::new(Manager::new(config.db_path.clone(), store.clone(), 100));
 
-    spawn_admin_api(&mut join_set, &config.admin_api_config, store.clone()).await?;
-    spawn_user_api(&mut join_set, &config.user_api_config, manager).await?;
+    spawn_admin_api(&mut join_set, &config.admin_api, store.clone()).await?;
+    spawn_user_api(&mut join_set, &config.user_api, manager).await?;
 
     join_set.join_next().await;
 
