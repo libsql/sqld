@@ -78,7 +78,6 @@ unsafe impl WalHook for ReplicationLoggerHook {
         assert_eq!(page_size, 4096);
         let wal_ptr = wal as *mut _;
         let last_valid_frame = wal.hdr.mxFrame;
-        //let _frame_checksum = wal.hdr.aFrameCksum;
         let ctx = Self::wal_extract_ctx(wal);
 
         for (page_no, data) in PageHdrIter::new(page_headers, page_size as _) {
