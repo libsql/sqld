@@ -1,26 +1,35 @@
 use std::net::SocketAddr;
+use std::path::PathBuf;
 
 use serde::Deserialize;
 
 #[derive(Deserialize, Debug, Clone)]
 pub struct Config {
-    cluster_config: ClusterConfig,
-    user_api_config: UserApiConfig,
-    admin_api_config: AdminApiConfig,
+    pub db_path: PathBuf,
+    pub cluster_config: ClusterConfig,
+    pub user_api_config: UserApiConfig,
+    pub admin_api_config: AdminApiConfig,
+}
+
+impl Config {
+    pub fn validate(&self) -> color_eyre::Result<()> {
+        // TODO: implement validation
+        Ok(())
+    }
 }
 
 #[derive(Deserialize, Debug, Clone)]
 pub struct ClusterConfig {
-    addr: SocketAddr,
-    peers: Vec<(u64, String)>,
+    pub addr: SocketAddr,
+    pub peers: Vec<(u64, String)>,
 }
 
 #[derive(Deserialize, Debug, Clone)]
 pub struct UserApiConfig {
-    addr: SocketAddr,
+    pub addr: SocketAddr,
 }
 
 #[derive(Deserialize, Debug, Clone)]
 pub struct AdminApiConfig {
-    addr: SocketAddr,
+    pub addr: SocketAddr,
 }

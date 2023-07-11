@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 
-use color_eyre::eyre::{bail, anyhow};
+use color_eyre::eyre::{anyhow, bail};
 use libsqlx::analysis::Statement;
-use libsqlx::query::{Query, Params, Value};
+use libsqlx::query::{Params, Query, Value};
 
 use super::result_builder::SingleStatementBuilder;
 use super::{proto, ProtocolError, Version};
@@ -47,14 +47,15 @@ pub async fn execute_stmt(
     conn: &ConnectionHandle,
     query: Query,
 ) -> color_eyre::Result<proto::StmtResult> {
-    let builder = conn.exec(move |conn| -> color_eyre::Result<_> {
-        let mut builder = SingleStatementBuilder::default();
-        let pgm = libsqlx::program::Program::from_queries(std::iter::once(query));
-        conn.execute_program(pgm, &mut builder)?;
+    let builder = conn
+        .exec(move |conn| -> color_eyre::Result<_> {
+            let mut builder = SingleStatementBuilder::default();
+            let pgm = libsqlx::program::Program::from_queries(std::iter::once(query));
+            conn.execute_program(pgm, &mut builder)?;
 
-        Ok(builder)
-
-    }).await??;
+            Ok(builder)
+        })
+        .await??;
 
     builder
         .into_ret()
@@ -191,21 +192,27 @@ fn proto_value_from_value(value: Value) -> proto::Value {
 //     }
 // }
 
-pub fn stmt_error_from_sqld_error(sqld_error: libsqlx::error::Error) -> Result<StmtError, libsqlx::error::Error> {
+pub fn stmt_error_from_sqld_error(
+    sqld_error: libsqlx::error::Error,
+) -> Result<StmtError, libsqlx::error::Error> {
     Ok(match sqld_error {
         libsqlx::error::Error::LibSqlInvalidQueryParams(msg) => StmtError::ArgsInvalid { msg },
         libsqlx::error::Error::LibSqlTxTimeout => StmtError::TransactionTimeout,
         libsqlx::error::Error::LibSqlTxBusy => StmtError::TransactionBusy,
         libsqlx::error::Error::Blocked(reason) => StmtError::Blocked { reason },
         libsqlx::error::Error::RusqliteError(rusqlite_error) => match rusqlite_error {
-            libsqlx::error::RusqliteError::SqliteFailure(sqlite_error, Some(message)) => StmtError::SqliteError {
-                source: sqlite_error,
-                message,
-            },
-            libsqlx::error::RusqliteError::SqliteFailure(sqlite_error, None) => StmtError::SqliteError {
-                message: sqlite_error.to_string(),
-                source: sqlite_error,
-            },
+            libsqlx::error::RusqliteError::SqliteFailure(sqlite_error, Some(message)) => {
+                StmtError::SqliteError {
+                    source: sqlite_error,
+                    message,
+                }
+            }
+            libsqlx::error::RusqliteError::SqliteFailure(sqlite_error, None) => {
+                StmtError::SqliteError {
+                    message: sqlite_error.to_string(),
+                    source: sqlite_error,
+                }
+            }
             libsqlx::error::RusqliteError::SqlInputError {
                 error: sqlite_error,
                 msg: message,

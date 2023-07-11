@@ -258,7 +258,7 @@ impl Statement {
                         found: Some(found),
                     },
                     Some((line, col)),
-                )) => Some(Err(crate::error::Error::SyntaxError { line, col, found})),
+                )) => Some(Err(crate::error::Error::SyntaxError { line, col, found })),
                 Err(e) => Some(Err(e.into())),
             }
         })

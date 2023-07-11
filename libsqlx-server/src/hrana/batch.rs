@@ -10,7 +10,7 @@ use super::{proto, ProtocolError, Version};
 use color_eyre::eyre::anyhow;
 use libsqlx::analysis::Statement;
 use libsqlx::program::{Cond, Program, Step};
-use libsqlx::query::{Query, Params};
+use libsqlx::query::{Params, Query};
 use libsqlx::result_builder::{StepResult, StepResultsBuilder};
 
 fn proto_cond_to_cond(cond: &proto::BatchCond, max_step_i: usize) -> color_eyre::Result<Cond> {
@@ -73,11 +73,13 @@ pub async fn execute_batch(
     db: &ConnectionHandle,
     pgm: Program,
 ) -> color_eyre::Result<proto::BatchResult> {
-    let builder = db.exec(move |conn| -> color_eyre::Result<_> {
-        let mut builder = HranaBatchProtoBuilder::default();
-        conn.execute_program(pgm, &mut builder)?;
-        Ok(builder)
-    }).await??;
+    let builder = db
+        .exec(move |conn| -> color_eyre::Result<_> {
+            let mut builder = HranaBatchProtoBuilder::default();
+            conn.execute_program(pgm, &mut builder)?;
+            Ok(builder)
+        })
+        .await??;
 
     Ok(builder.into_ret())
 }
@@ -104,18 +106,18 @@ pub fn proto_sequence_to_program(sql: &str) -> color_eyre::Result<Program> {
         })
         .collect();
 
-    Ok(Program {
-        steps,
-    })
+    Ok(Program { steps })
 }
 
 pub async fn execute_sequence(conn: &ConnectionHandle, pgm: Program) -> color_eyre::Result<()> {
-    let builder = conn.exec(move |conn| -> color_eyre::Result<_> {
-        let mut builder = StepResultsBuilder::default();
-        conn.execute_program(pgm, &mut builder)?;
+    let builder = conn
+        .exec(move |conn| -> color_eyre::Result<_> {
+            let mut builder = StepResultsBuilder::default();
+            conn.execute_program(pgm, &mut builder)?;
 
-        Ok(builder)
-    }).await??;
+            Ok(builder)
+        })
+        .await??;
 
     builder
         .into_ret()

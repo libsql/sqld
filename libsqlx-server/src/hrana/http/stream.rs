@@ -106,8 +106,9 @@ pub async fn acquire<'srv, F, Fut>(
     baton: Option<&str>,
     mk_conn: F,
 ) -> color_eyre::Result<Guard<'srv>>
-where F: FnOnce() -> Fut,
-      Fut: Future<Output = crate::Result<ConnectionHandle>>,
+where
+    F: FnOnce() -> Fut,
+    Fut: Future<Output = crate::Result<ConnectionHandle>>,
 {
     let stream = match baton {
         Some(baton) => {
@@ -117,7 +118,10 @@ where F: FnOnce() -> Fut,
             let handle = state.handles.get_mut(&stream_id);
             match handle {
                 None => {
-                    return Err(ProtocolError::BatonInvalid(format!("Stream handle for {stream_id} was not found")).into())
+                    return Err(ProtocolError::BatonInvalid(format!(
+                        "Stream handle for {stream_id} was not found"
+                    ))
+                    .into())
                 }
                 Some(Handle::Acquired) => {
                     return Err(ProtocolError::BatonReused)
@@ -149,7 +153,9 @@ where F: FnOnce() -> Fut,
             stream
         }
         None => {
-            let conn = mk_conn().await.context("Could not create a database connection")?;
+            let conn = mk_conn()
+                .await
+                .context("Could not create a database connection")?;
 
             let mut state = server.stream_state.lock();
             let stream = Box::new(Stream {
@@ -291,7 +297,8 @@ fn decode_baton(server: &Server, baton_str: &str) -> color_eyre::Result<(u64, u6
         return Err(ProtocolError::BatonInvalid(format!(
             "Baton has invalid size of {} bytes",
             baton_data.len()
-        )).into());
+        ))
+        .into());
     }
 
     let payload = &baton_data[0..16];
@@ -299,8 +306,11 @@ fn decode_baton(server: &Server, baton_str: &str) -> color_eyre::Result<(u64, u6
 
     let mut hmac = hmac::Hmac::<sha2::Sha256>::new_from_slice(&server.baton_key).unwrap();
     hmac.update(payload);
-    hmac.verify_slice(received_mac)
-        .map_err(|_| anyhow!(ProtocolError::BatonInvalid("Invalid MAC on baton".to_string())))?;
+    hmac.verify_slice(received_mac).map_err(|_| {
+        anyhow!(ProtocolError::BatonInvalid(
+            "Invalid MAC on baton".to_string()
+        ))
+    })?;
 
     let stream_id = u64::from_be_bytes(payload[0..8].try_into().unwrap());
     let baton_seq = u64::from_be_bytes(payload[8..16].try_into().unwrap());

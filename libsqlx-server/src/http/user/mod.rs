@@ -13,7 +13,7 @@ use crate::manager::Manager;
 mod error;
 mod extractors;
 
-pub struct UserApiConfig {
+pub struct Config {
     pub manager: Arc<Manager>,
 }
 
@@ -21,7 +21,7 @@ struct UserApiState {
     manager: Arc<Manager>,
 }
 
-pub async fn run_user_api<I>(config: UserApiConfig, listener: I) -> Result<()>
+pub async fn run_user_api<I>(config: Config, listener: I) -> Result<()>
 where
     I: Accept<Error = std::io::Error>,
     I::Conn: AsyncRead + AsyncWrite + Send + Unpin + 'static,
@@ -41,7 +41,10 @@ where
     Ok(())
 }
 
-async fn handle_hrana_pipeline(db: Database, Json(req): Json<PipelineRequestBody>) -> Json<PipelineResponseBody> {
+async fn handle_hrana_pipeline(
+    db: Database,
+    Json(req): Json<PipelineRequestBody>,
+) -> Json<PipelineResponseBody> {
     let resp = db.hrana_pipeline(req).await;
     dbg!();
     Json(resp.unwrap())

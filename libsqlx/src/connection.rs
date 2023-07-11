@@ -2,7 +2,7 @@ use rusqlite::types::Value;
 
 use crate::program::{Program, Step};
 use crate::query::Query;
-use crate::result_builder::{ResultBuilder, QueryBuilderConfig, QueryResultBuilderError};
+use crate::result_builder::{QueryBuilderConfig, QueryResultBuilderError, ResultBuilder};
 
 #[derive(Debug, Clone)]
 pub struct DescribeResponse {

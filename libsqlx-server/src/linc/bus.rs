@@ -1,7 +1,7 @@
 use std::collections::{hash_map::Entry, HashMap};
 use std::sync::Arc;
 
-use color_eyre::eyre::{bail, anyhow};
+use color_eyre::eyre::{anyhow, bail};
 use parking_lot::Mutex;
 use tokio::sync::{mpsc, Notify};
 use uuid::Uuid;
