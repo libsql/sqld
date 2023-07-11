@@ -5,6 +5,7 @@ use serde::Deserialize;
 
 #[derive(Deserialize, Debug, Clone)]
 pub struct Config {
+    #[serde(default = "default_db_path")]
     pub db_path: PathBuf,
     pub cluster_config: ClusterConfig,
     pub user_api_config: UserApiConfig,
@@ -26,10 +27,24 @@ pub struct ClusterConfig {
 
 #[derive(Deserialize, Debug, Clone)]
 pub struct UserApiConfig {
+    #[serde(default = "default_user_addr")]
     pub addr: SocketAddr,
 }
 
 #[derive(Deserialize, Debug, Clone)]
 pub struct AdminApiConfig {
+    #[serde(default = "default_admin_addr")]
     pub addr: SocketAddr,
+}
+
+fn default_db_path() -> PathBuf {
+    PathBuf::from("data.sqld")
+}
+
+fn default_admin_addr() -> SocketAddr {
+    "0.0.0.0:8081".parse().unwrap()
+}
+
+fn default_user_addr() -> SocketAddr {
+    "0.0.0.0:8080".parse().unwrap()
 }
