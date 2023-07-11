@@ -46,6 +46,5 @@ async fn handle_hrana_pipeline(
     Json(req): Json<PipelineRequestBody>,
 ) -> Json<PipelineResponseBody> {
     let resp = db.hrana_pipeline(req).await;
-    dbg!();
     Json(resp.unwrap())
 }

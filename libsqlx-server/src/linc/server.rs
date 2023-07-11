@@ -3,17 +3,18 @@ use tokio::task::JoinSet;
 
 use crate::linc::connection::Connection;
 
-use super::bus::Bus;
+use super::bus::{Bus};
+use super::handler::Handler;
 
-pub struct Server {
+pub struct Server<H> {
     /// reference to the bus
-    bus: Bus,
+    bus: Bus<H>,
     /// Connection tasks owned by the server
     connections: JoinSet<color_eyre::Result<()>>,
 }
 
-impl Server {
-    pub fn new(bus: Bus) -> Self {
+impl<H: Handler> Server<H> {
+    pub fn new(bus: Bus<H>) -> Self {
         Self {
             bus,
             connections: JoinSet::new(),
@@ -25,7 +26,6 @@ impl Server {
     pub async fn close_connections(&mut self) {
         self.connections.abort_all();
         while self.connections.join_next().await.is_some() {}
-        assert!(self.bus.is_empty());
     }
 
     pub async fn run<L>(mut self, mut listener: L)
@@ -57,7 +57,7 @@ impl Server {
     {
         let bus = self.bus.clone();
         let fut = async move {
-            let connection = Connection::new_acceptor(stream, bus.clone());
+            let connection = Connection::new_acceptor(stream, bus);
             connection.run().await;
             Ok(())
         };
@@ -71,7 +71,7 @@ mod test {
     use std::sync::Arc;
 
     use crate::linc::{
-        proto::{ProxyMessage, StreamMessage},
+        proto::{ProxyMessage},
         DatabaseId, NodeId,
     };
 

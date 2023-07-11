@@ -133,11 +133,8 @@ impl Allocation {
     }
 
     async fn new_conn(&mut self) -> ConnectionHandle {
-        dbg!();
         let id = self.next_conn_id();
-        dbg!();
         let conn = block_in_place(|| self.database.connect());
-        dbg!();
         let (close_sender, exit) = oneshot::channel();
         let (exec_sender, exec_receiver) = mpsc::channel(1);
         let conn = Connection {
@@ -147,9 +144,7 @@ impl Allocation {
             exec: exec_receiver,
         };
 
-        dbg!();
         self.connections_futs.spawn(conn.run());
-        dbg!();
 
         ConnectionHandle {
             exec: exec_sender,

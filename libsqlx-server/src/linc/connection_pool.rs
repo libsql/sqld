@@ -5,18 +5,19 @@ use tokio::task::JoinSet;
 use tokio::time::Duration;
 
 use super::connection::Connection;
+use super::handler::Handler;
 use super::net::Connector;
 use super::{bus::Bus, NodeId};
 
 /// Manages a pool of connections to other peers, handling re-connection.
-struct ConnectionPool {
+struct ConnectionPool<H> {
     managed_peers: HashMap<NodeId, String>,
     connections: JoinSet<NodeId>,
-    bus: Bus,
+    bus: Bus<H>,
 }
 
-impl ConnectionPool {
-    pub fn new(bus: Bus, managed_peers: impl IntoIterator<Item = (NodeId, String)>) -> Self {
+impl<H: Handler> ConnectionPool<H> {
+    pub fn new(bus: Bus<H>, managed_peers: impl IntoIterator<Item = (NodeId, String)>) -> Self {
         Self {
             managed_peers: managed_peers.into_iter().collect(),
             connections: JoinSet::new(),
