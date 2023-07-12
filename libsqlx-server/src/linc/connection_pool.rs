@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use itertools::Itertools;
 use tokio::task::JoinSet;
@@ -13,11 +14,14 @@ use super::{bus::Bus, NodeId};
 struct ConnectionPool<H> {
     managed_peers: HashMap<NodeId, String>,
     connections: JoinSet<NodeId>,
-    bus: Bus<H>,
+    bus: Arc<Bus<H>>,
 }
 
 impl<H: Handler> ConnectionPool<H> {
-    pub fn new(bus: Bus<H>, managed_peers: impl IntoIterator<Item = (NodeId, String)>) -> Self {
+    pub fn new(
+        bus: Arc<Bus<H>>,
+        managed_peers: impl IntoIterator<Item = (NodeId, String)>,
+    ) -> Self {
         Self {
             managed_peers: managed_peers.into_iter().collect(),
             connections: JoinSet::new(),
@@ -77,14 +81,14 @@ mod test {
     use tokio::sync::Notify;
     use tokio_stream::StreamExt;
 
-    use crate::linc::{server::Server, DatabaseId};
+    use crate::linc::{server::Server, AllocId};
 
     use super::*;
 
     #[test]
     fn manage_connections() {
         let mut sim = turmoil::Builder::new().build();
-        let database_id = DatabaseId::new_v4();
+        let database_id = AllocId::new_v4();
         let notify = Arc::new(Notify::new());
 
         let expected_msg = crate::linc::proto::StreamMessage::Proxy(

@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use async_bincode::tokio::AsyncBincodeStream;
 use async_bincode::AsyncDestination;
@@ -12,10 +13,10 @@ use tokio::time::{Duration, Instant};
 use crate::linc::proto::ProtoError;
 use crate::linc::CURRENT_PROTO_VERSION;
 
-use super::bus::{Bus};
+use super::bus::Bus;
 use super::handler::Handler;
 use super::proto::{Enveloppe, Message};
-use super::{NodeId, Outbound, Inbound};
+use super::{Inbound, NodeId, Outbound};
 
 /// A connection to another node. Manage the connection state, and (de)register streams with the
 /// `Bus`
@@ -30,7 +31,7 @@ pub struct Connection<S, H> {
     is_initiator: bool,
     /// send queue for this connection
     send_queue: Option<mpsc::UnboundedReceiver<Enveloppe>>,
-    bus: Bus<H>,
+    bus: Arc<Bus<H>>,
 }
 
 #[derive(Debug)]
@@ -85,18 +86,18 @@ where
 {
     const MAX_CONNECTION_MESSAGES: usize = 128;
 
-    pub fn new_initiator(stream: S, bus: Bus<H>) -> Self {
+    pub fn new_initiator(stream: S, bus: Arc<Bus<H>>) -> Self {
         Self {
             peer: None,
             state: ConnectionState::Init,
             conn: AsyncBincodeStream::from(stream).for_async(),
             is_initiator: true,
             send_queue: None,
-            bus, 
+            bus,
         }
     }
 
-    pub fn new_acceptor(stream: S, bus: Bus<H>) -> Self {
+    pub fn new_acceptor(stream: S, bus: Arc<Bus<H>>) -> Self {
         Connection {
             peer: None,
             state: ConnectionState::Connecting,
@@ -231,7 +232,10 @@ where
                     Ok(())
                 }
             }
-            Ok(Some(Ok(Enveloppe { message: Message::Error(e), ..}))) => {
+            Ok(Some(Ok(Enveloppe {
+                message: Message::Error(e),
+                ..
+            }))) => {
                 bail!("handshake error: {e}");
             }
             Ok(Some(Ok(_))) => {

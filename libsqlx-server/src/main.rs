@@ -8,6 +8,7 @@ use config::{AdminApiConfig, UserApiConfig};
 use http::admin::run_admin_api;
 use http::user::run_user_api;
 use hyper::server::conn::AddrIncoming;
+use linc::bus::Bus;
 use manager::Manager;
 use meta::Store;
 use tokio::task::JoinSet;
@@ -49,10 +50,11 @@ async fn spawn_user_api(
     set: &mut JoinSet<Result<()>>,
     config: &UserApiConfig,
     manager: Arc<Manager>,
+    bus: Arc<Bus<Arc<Manager>>>,
 ) -> Result<()> {
     let user_api_listener = tokio::net::TcpListener::bind(config.addr).await?;
     set.spawn(run_user_api(
-        http::user::Config { manager },
+        http::user::Config { manager, bus },
         AddrIncoming::from_listener(user_api_listener)?,
     ));
 
@@ -71,9 +73,10 @@ async fn main() -> Result<()> {
 
     let store = Arc::new(Store::new(&config.db_path));
     let manager = Arc::new(Manager::new(config.db_path.clone(), store.clone(), 100));
+    let bus = Arc::new(Bus::new(config.cluster.id, manager.clone()));
 
     spawn_admin_api(&mut join_set, &config.admin_api, store.clone()).await?;
-    spawn_user_api(&mut join_set, &config.user_api, manager).await?;
+    spawn_user_api(&mut join_set, &config.user_api, manager, bus).await?;
 
     join_set.join_next().await;
 

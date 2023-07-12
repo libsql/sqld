@@ -12,8 +12,6 @@ serde = "1.0.164"
 serde_json = "1.0.99"
 rusqlite = { workspace = true }
 anyhow = "1.0.71"
-futures = "0.3.28"
-tokio = { version = "1.28.2", features = ["sync", "time"] }
 sqlite3-parser = "0.9.0"
 fallible-iterator = "0.3.0"
 bytes = "1.4.0"

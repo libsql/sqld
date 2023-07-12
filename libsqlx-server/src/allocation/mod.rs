@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use libsqlx::libsql::{LibsqlDatabase, LogCompactor, LogFile, PrimaryType};
+use libsqlx::libsql::{LibsqlDatabase, LogCompactor, LogFile, PrimaryType, ReplicaType};
 use libsqlx::Database as _;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::{block_in_place, JoinSet};
@@ -9,6 +9,9 @@ use tokio::task::{block_in_place, JoinSet};
 use crate::hrana;
 use crate::hrana::http::handle_pipeline;
 use crate::hrana::http::proto::{PipelineRequestBody, PipelineResponseBody};
+use crate::linc::bus::Dispatch;
+use crate::linc::{Inbound, NodeId};
+use crate::meta::DatabaseId;
 
 use self::config::{AllocConfig, DbConfig};
 
@@ -28,10 +31,15 @@ pub enum AllocationMessage {
         req: PipelineRequestBody,
         ret: oneshot::Sender<crate::Result<PipelineResponseBody>>,
     },
+    Inbound(Inbound),
 }
 
 pub enum Database {
     Primary(libsqlx::libsql::LibsqlDatabase<PrimaryType>),
+    Replica {
+        db: libsqlx::libsql::LibsqlDatabase<ReplicaType>,
+        primary_node_id: NodeId,
+    },
 }
 
 struct Compactor;
@@ -65,6 +73,7 @@ impl Database {
     fn connect(&self) -> Box<dyn libsqlx::Connection + Send> {
         match self {
             Database::Primary(db) => Box::new(db.connect().unwrap()),
+            Database::Replica { db, .. } => Box::new(db.connect().unwrap()),
         }
     }
 }
@@ -78,6 +87,9 @@ pub struct Allocation {
     pub max_concurrent_connections: u32,
 
     pub hrana_server: Arc<hrana::http::Server>,
+    /// handle to the message bus, to send messages
+    pub dispatcher: Arc<dyn Dispatch>,
+    pub db_name: String,
 }
 
 pub struct ConnectionHandle {
@@ -115,10 +127,12 @@ impl Allocation {
                         AllocationMessage::HranaPipelineReq { req, ret} => {
                             let res = handle_pipeline(&self.hrana_server.clone(), req, || async {
                                 let conn= self.new_conn().await;
-                                dbg!();
                                 Ok(conn)
                             }).await;
                             let _ = ret.send(res);
+                        }
+                        AllocationMessage::Inbound(msg) => {
+                            self.handle_inbound(msg).await;
                         }
                     }
                 },
@@ -129,6 +143,23 @@ impl Allocation {
                 },
                 else => break,
             }
+        }
+    }
+
+    async fn handle_inbound(&mut self, msg: Inbound) {
+        debug_assert_eq!(msg.enveloppe.to, Some(DatabaseId::from_name(&self.db_name)));
+
+        match msg.enveloppe.message {
+            crate::linc::proto::Message::Handshake { .. } => todo!(),
+            crate::linc::proto::Message::ReplicationHandshake { .. } => todo!(),
+            crate::linc::proto::Message::ReplicationHandshakeResponse { .. } => todo!(),
+            crate::linc::proto::Message::Replicate { .. } => todo!(),
+            crate::linc::proto::Message::Transaction { .. } => todo!(),
+            crate::linc::proto::Message::ProxyRequest { .. } => todo!(),
+            crate::linc::proto::Message::ProxyResponse { .. } => todo!(),
+            crate::linc::proto::Message::CancelRequest { .. } => todo!(),
+            crate::linc::proto::Message::CloseConnection { .. } => todo!(),
+            crate::linc::proto::Message::Error(_) => todo!(),
         }
     }
 

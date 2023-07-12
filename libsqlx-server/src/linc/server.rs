@@ -1,20 +1,22 @@
+use std::sync::Arc;
+
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::task::JoinSet;
 
 use crate::linc::connection::Connection;
 
-use super::bus::{Bus};
+use super::bus::Bus;
 use super::handler::Handler;
 
 pub struct Server<H> {
     /// reference to the bus
-    bus: Bus<H>,
+    bus: Arc<Bus<H>>,
     /// Connection tasks owned by the server
     connections: JoinSet<color_eyre::Result<()>>,
 }
 
 impl<H: Handler> Server<H> {
-    pub fn new(bus: Bus<H>) -> Self {
+    pub fn new(bus: Arc<Bus<H>>) -> Self {
         Self {
             bus,
             connections: JoinSet::new(),
@@ -70,10 +72,7 @@ impl<H: Handler> Server<H> {
 mod test {
     use std::sync::Arc;
 
-    use crate::linc::{
-        proto::{ProxyMessage},
-        DatabaseId, NodeId,
-    };
+    use crate::linc::{proto::ProxyMessage, AllocId, NodeId};
 
     use super::*;
 
@@ -125,7 +124,7 @@ mod test {
         let mut sim = turmoil::Builder::new().build();
 
         let host_node_id = NodeId::new_v4();
-        let stream_db_id = DatabaseId::new_v4();
+        let stream_db_id = AllocId::new_v4();
         let notify = Arc::new(Notify::new());
         let expected_msg = StreamMessage::Proxy(ProxyMessage::ProxyRequest {
             connection_id: 12,
@@ -195,7 +194,7 @@ mod test {
         let mut sim = turmoil::Builder::new().build();
 
         let host_node_id = NodeId::new_v4();
-        let database_id = DatabaseId::new_v4();
+        let database_id = AllocId::new_v4();
         let notify = Arc::new(Notify::new());
 
         sim.host("host", {
@@ -251,7 +250,7 @@ mod test {
         let host_node_id = NodeId::new_v4();
         let notify = Arc::new(Notify::new());
         let client_id = NodeId::new_v4();
-        let database_id = DatabaseId::new_v4();
+        let database_id = AllocId::new_v4();
         let expected_msg = StreamMessage::Proxy(ProxyMessage::ProxyRequest {
             connection_id: 12,
             req_id: 1,
@@ -309,7 +308,7 @@ mod test {
 
         let host_node_id = NodeId::new_v4();
         let client_id = NodeId::new_v4();
-        let database_id = DatabaseId::new_v4();
+        let database_id = AllocId::new_v4();
 
         sim.host("host", {
             move || async move {

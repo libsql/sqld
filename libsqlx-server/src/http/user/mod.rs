@@ -8,6 +8,7 @@ use tokio::io::{AsyncRead, AsyncWrite};
 
 use crate::database::Database;
 use crate::hrana::http::proto::{PipelineRequestBody, PipelineResponseBody};
+use crate::linc::bus::Bus;
 use crate::manager::Manager;
 
 mod error;
@@ -15,10 +16,12 @@ mod extractors;
 
 pub struct Config {
     pub manager: Arc<Manager>,
+    pub bus: Arc<Bus<Arc<Manager>>>,
 }
 
 struct UserApiState {
     manager: Arc<Manager>,
+    bus: Arc<Bus<Arc<Manager>>>,
 }
 
 pub async fn run_user_api<I>(config: Config, listener: I) -> Result<()>
@@ -28,6 +31,7 @@ where
 {
     let state = UserApiState {
         manager: config.manager,
+        bus: config.bus,
     };
 
     let app = Router::new()

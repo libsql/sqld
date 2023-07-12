@@ -37,7 +37,7 @@ pub struct Injector {
 /// This trait trait is used to record the last committed frame_no to the log.
 /// The implementer can persist the pre and post commit frame no, and compare them in the event of
 /// a crash; if the pre and post commit frame_no don't match, then the log may be corrupted.
-pub trait InjectorCommitHandler: 'static {
+pub trait InjectorCommitHandler: Send + 'static {
     fn pre_commit(&mut self, frame_no: FrameNo) -> anyhow::Result<()>;
     fn post_commit(&mut self, frame_no: FrameNo) -> anyhow::Result<()>;
 }

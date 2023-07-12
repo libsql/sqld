@@ -139,7 +139,12 @@ impl LibsqlDatabase<PrimaryType> {
         dirty: bool,
     ) -> crate::Result<Self> {
         let ty = PrimaryType {
-            logger: Arc::new(ReplicationLogger::open(&db_path, dirty, compactor)?),
+            logger: Arc::new(ReplicationLogger::open(
+                &db_path,
+                dirty,
+                compactor,
+                Box::new(|_| ()),
+            )?),
         };
         Ok(Self::new(db_path, ty))
     }
@@ -174,7 +179,6 @@ impl<T: LibsqlDbType> Database for LibsqlDatabase<T> {
     type Connection = LibsqlConnection<<T::ConnectionHook as WalHook>::Context>;
 
     fn connect(&self) -> Result<Self::Connection, Error> {
-        dbg!();
         Ok(
             LibsqlConnection::<<T::ConnectionHook as WalHook>::Context>::new(
                 &self.db_path,

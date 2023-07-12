@@ -26,6 +26,7 @@ impl Config {
 
 #[derive(Deserialize, Debug, Clone)]
 pub struct ClusterConfig {
+    pub id: u64,
     /// Address to bind this node to
     #[serde(default = "default_linc_addr")]
     pub addr: SocketAddr,

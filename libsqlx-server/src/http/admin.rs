@@ -8,6 +8,7 @@ use tokio::io::{AsyncRead, AsyncWrite};
 
 use crate::{
     allocation::config::{AllocConfig, DbConfig},
+    linc::NodeId,
     meta::Store,
 };
 
@@ -55,7 +56,7 @@ struct AllocateReq {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum DbConfigReq {
     Primary {},
-    Replica { primary_node_id: String },
+    Replica { primary_node_id: NodeId },
 }
 
 async fn allocate(
@@ -64,7 +65,7 @@ async fn allocate(
 ) -> Result<Json<AllocateResp>, Json<ErrorResponse>> {
     let config = AllocConfig {
         max_conccurent_connection: req.max_conccurent_connection.unwrap_or(16),
-        id: req.alloc_id.clone(),
+        db_name: req.alloc_id.clone(),
         db_config: match req.config {
             DbConfigReq::Primary {} => DbConfig::Primary {},
             DbConfigReq::Replica { primary_node_id } => DbConfig::Replica { primary_node_id },
@@ -93,7 +94,7 @@ async fn list_allocs(
         .list_allocs()
         .await
         .into_iter()
-        .map(|cfg| AllocView { id: cfg.id })
+        .map(|cfg| AllocView { id: cfg.db_name })
         .collect();
 
     Ok(Json(ListAllocResp { allocs }))

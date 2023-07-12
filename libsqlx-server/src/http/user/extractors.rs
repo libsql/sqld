@@ -4,7 +4,7 @@ use axum::async_trait;
 use axum::extract::FromRequestParts;
 use hyper::http::request::Parts;
 
-use crate::database::Database;
+use crate::{database::Database, meta::DatabaseId};
 
 use super::{error::UserApiError, UserApiState};
 
@@ -18,8 +18,9 @@ impl FromRequestParts<Arc<UserApiState>> for Database {
     ) -> Result<Self, Self::Rejection> {
         let Some(host) = parts.headers.get("host") else { return Err(UserApiError::MissingHost) };
         let Ok(host_str) = std::str::from_utf8(host.as_bytes()) else {return Err(UserApiError::MissingHost)};
-        let db_id = parse_host(host_str)?;
-        let Some(sender) = state.manager.alloc(db_id).await else { return Err(UserApiError::UnknownDatabase(db_id.to_owned())) };
+        let db_name = parse_host(host_str)?;
+        let db_id = DatabaseId::from_name(db_name);
+        let Some(sender) = state.manager.alloc(db_id, state.bus.clone()).await else { return Err(UserApiError::UnknownDatabase(db_name.to_owned())) };
 
         Ok(Database { sender })
     }

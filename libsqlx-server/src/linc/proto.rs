@@ -2,7 +2,9 @@ use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use super::{DatabaseId};
+use crate::meta::DatabaseId;
+
+use super::NodeId;
 
 pub type Program = String;
 
@@ -18,10 +20,55 @@ pub enum Message {
     /// Initial message exchanged between nodes when connecting
     Handshake {
         protocol_version: u32,
-        node_id: Uuid,
+        node_id: NodeId,
     },
-    Replication(ReplicationMessage),
-    Proxy(ProxyMessage),
+    ReplicationHandshake {
+        database_name: String,
+    },
+    ReplicationHandshakeResponse {
+        /// id of the replication log
+        log_id: Uuid,
+        /// current frame_no of the primary
+        current_frame_no: u64,
+    },
+    Replicate {
+        /// next frame no to send
+        next_frame_no: u64,
+    },
+    /// a batch of frames that are part of the same transaction
+    Transaction {
+        /// if not None, then the last frame is a commit frame, and this is the new size of the database.
+        size_after: Option<u32>,
+        /// frame_no of the last frame in frames
+        end_frame_no: u64,
+        /// a batch of frames part of the transaction.
+        frames: Vec<Frame>,
+    },
+    /// Proxy a query to a primary
+    ProxyRequest {
+        /// id of the connection to perform the query against
+        /// If the connection doesn't already exist it is created
+        /// Id of the request.
+        /// Responses to this request must have the same id.
+        connection_id: u32,
+        req_id: u32,
+        program: Program,
+    },
+    /// Response to a proxied query
+    ProxyResponse {
+        /// id of the request this message is a response to.
+        req_id: u32,
+        /// Collection of steps to drive the query builder transducer.
+        row_step: Vec<BuilderStep>,
+    },
+    /// Stop processing request `id`.
+    CancelRequest {
+        req_id: u32,
+    },
+    /// Close Connection with passed id.
+    CloseConnection {
+        connection_id: u32,
+    },
     Error(ProtoError),
 }
 
@@ -31,13 +78,15 @@ pub enum ProtoError {
     #[error("invalid protocol version, expected: {expected}")]
     HandshakeVersionMismatch { expected: u32 },
     #[error("unknown database {0}")]
-    UnknownDatabase(DatabaseId),
+    UnknownDatabase(String),
 }
 
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq, Clone)]
 pub enum ReplicationMessage {
-    Handshake {},
-    HandshakeResponse {
+    ReplicationHandshake {
+        database_name: String,
+    },
+    ReplicationHandshakeResponse {
         /// id of the replication log
         log_id: Uuid,
         /// current frame_no of the primary
