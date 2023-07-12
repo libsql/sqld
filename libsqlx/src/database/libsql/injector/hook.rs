@@ -42,7 +42,7 @@ impl InjectorHookCtx {
         wal: *mut Wal,
     ) -> anyhow::Result<()> {
         self.is_txn = true;
-        let buffer = self.buffer.borrow();
+        let buffer = self.buffer.lock();
         let (mut headers, last_frame_no, size_after) =
             make_page_header(buffer.iter().map(|f| &**f));
         if size_after != 0 {
@@ -157,7 +157,7 @@ unsafe impl WalHook for InjectorHook {
             return LIBSQL_INJECT_FATAL;
         }
 
-        ctx.buffer.borrow_mut().clear();
+        ctx.buffer.lock().clear();
 
         if !ctx.is_txn {
             LIBSQL_INJECT_OK

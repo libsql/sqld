@@ -1,16 +1,20 @@
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use libsqlx::libsql::{LibsqlDatabase, LogCompactor, LogFile, PrimaryType, ReplicaType};
-use libsqlx::Database as _;
+use libsqlx::proxy::WriteProxyDatabase;
+use libsqlx::{Database as _, DescribeResponse, Frame, InjectableDatabase, Injector, FrameNo};
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::{block_in_place, JoinSet};
+use tokio::time::timeout;
 
 use crate::hrana;
 use crate::hrana::http::handle_pipeline;
 use crate::hrana::http::proto::{PipelineRequestBody, PipelineResponseBody};
 use crate::linc::bus::Dispatch;
-use crate::linc::{Inbound, NodeId};
+use crate::linc::proto::{Enveloppe, Message, Frames};
+use crate::linc::{Inbound, NodeId, Outbound};
 use crate::meta::DatabaseId;
 
 use self::config::{AllocConfig, DbConfig};
@@ -24,7 +28,6 @@ pub struct ConnectionId {
     id: u32,
     close_sender: mpsc::Sender<()>,
 }
-
 pub enum AllocationMessage {
     NewConnection(oneshot::Sender<ConnectionHandle>),
     HranaPipelineReq {
@@ -34,11 +37,40 @@ pub enum AllocationMessage {
     Inbound(Inbound),
 }
 
+pub struct DummyDb;
+pub struct DummyConn;
+
+impl libsqlx::Connection for DummyConn {
+    fn execute_program(
+        &mut self,
+        _pgm: libsqlx::program::Program,
+        _result_builder: &mut dyn libsqlx::result_builder::ResultBuilder,
+    ) -> libsqlx::Result<()> {
+        todo!()
+    }
+
+    fn describe(&self, _sql: String) -> libsqlx::Result<DescribeResponse> {
+        todo!()
+    }
+}
+
+impl libsqlx::Database for DummyDb {
+    type Connection = DummyConn;
+
+    fn connect(&self) -> Result<Self::Connection, libsqlx::error::Error> {
+        todo!()
+    }
+}
+
+type ProxyDatabase = WriteProxyDatabase<LibsqlDatabase<ReplicaType>, DummyDb>;
+
 pub enum Database {
-    Primary(libsqlx::libsql::LibsqlDatabase<PrimaryType>),
+    Primary(LibsqlDatabase<PrimaryType>),
     Replica {
-        db: libsqlx::libsql::LibsqlDatabase<ReplicaType>,
+        db: ProxyDatabase,
+        injector_handle: mpsc::Sender<Frames>,
         primary_node_id: NodeId,
+        last_received_frame_ts: Option<Instant>,
     },
 }
 
@@ -59,14 +91,107 @@ impl LogCompactor for Compactor {
     }
 }
 
+const MAX_INJECTOR_BUFFER_CAP: usize = 32;
+
+struct Replicator {
+    dispatcher: Arc<dyn Dispatch>,
+    req_id: u32,
+    last_committed: FrameNo,
+    next_seq: u32,
+    database_id: DatabaseId,
+    primary_node_id: NodeId,
+    injector: Box<dyn Injector + Send + 'static>,
+    receiver: mpsc::Receiver<Frames>,
+}
+
+impl Replicator {
+    async fn run(mut self) {
+        loop {
+            match timeout(Duration::from_secs(5), self.receiver.recv()).await {
+                Ok(Some(Frames {
+                    req_id,
+                    seq,
+                    frames,
+                })) => {
+                    // ignore frames from a previous call to Replicate
+                    if req_id != self.req_id { continue }
+                    if seq != self.next_seq { 
+                        // this is not the batch of frame we were expecting, drop what we have, and
+                        // ask again from last checkpoint
+                        self.query_replicate().await;
+                        continue;
+                    };
+                    self.next_seq += 1;
+                    for bytes in frames {
+                        let frame = Frame::try_from_bytes(bytes).unwrap();
+                        block_in_place(|| {
+                            if let Some(last_committed) = self.injector.inject(frame).unwrap() {
+                                self.last_committed = last_committed;
+                            }
+                        });
+                    }
+                }
+                Err(_) => self.query_replicate().await,
+                Ok(None) => break,
+            }
+        }
+    }
+
+    async fn query_replicate(&mut self) {
+        self.req_id += 1;
+        self.next_seq = 0;
+        // clear buffered, uncommitted frames
+        self.injector.clear();
+        self.dispatcher
+            .dispatch(Outbound {
+                to: self.primary_node_id,
+                enveloppe: Enveloppe {
+                    database_id: Some(self.database_id),
+                    message: Message::Replicate {
+                        next_frame_no: self.last_committed + 1,
+                        req_id: self.req_id - 1,
+                    },
+                },
+            })
+        .await;
+    }
+}
+
 impl Database {
-    pub fn from_config(config: &AllocConfig, path: PathBuf) -> Self {
+    pub fn from_config(config: &AllocConfig, path: PathBuf, dispatcher: Arc<dyn Dispatch>) -> Self {
         match config.db_config {
             DbConfig::Primary {} => {
                 let db = LibsqlDatabase::new_primary(path, Compactor, false).unwrap();
                 Self::Primary(db)
             }
-            DbConfig::Replica { .. } => todo!(),
+            DbConfig::Replica { primary_node_id } => {
+                let rdb = LibsqlDatabase::new_replica(path, MAX_INJECTOR_BUFFER_CAP, ()).unwrap();
+                let wdb = DummyDb;
+                let mut db = WriteProxyDatabase::new(rdb, wdb, Arc::new(|_| ()));
+                let injector = db.injector().unwrap();
+                let (sender, receiver) = mpsc::channel(16);
+                let database_id = DatabaseId::from_name(&config.db_name);
+
+                let replicator = Replicator {
+                    dispatcher,
+                    req_id: 0,
+                    last_committed: 0, // TODO: load the last commited from meta file
+                    next_seq: 0,
+                    database_id,
+                    primary_node_id,
+                    injector,
+                    receiver,
+                };
+
+                tokio::spawn(replicator.run());
+
+                Self::Replica {
+                    db,
+                    injector_handle: sender,
+                    primary_node_id,
+                    last_received_frame_ts: None,
+                }
+            }
         }
     }
 
@@ -147,19 +272,32 @@ impl Allocation {
     }
 
     async fn handle_inbound(&mut self, msg: Inbound) {
-        debug_assert_eq!(msg.enveloppe.to, Some(DatabaseId::from_name(&self.db_name)));
+        debug_assert_eq!(
+            msg.enveloppe.database_id,
+            Some(DatabaseId::from_name(&self.db_name))
+        );
 
         match msg.enveloppe.message {
-            crate::linc::proto::Message::Handshake { .. } => todo!(),
-            crate::linc::proto::Message::ReplicationHandshake { .. } => todo!(),
-            crate::linc::proto::Message::ReplicationHandshakeResponse { .. } => todo!(),
-            crate::linc::proto::Message::Replicate { .. } => todo!(),
-            crate::linc::proto::Message::Transaction { .. } => todo!(),
-            crate::linc::proto::Message::ProxyRequest { .. } => todo!(),
-            crate::linc::proto::Message::ProxyResponse { .. } => todo!(),
-            crate::linc::proto::Message::CancelRequest { .. } => todo!(),
-            crate::linc::proto::Message::CloseConnection { .. } => todo!(),
-            crate::linc::proto::Message::Error(_) => todo!(),
+            Message::Handshake { .. } => todo!(),
+            Message::ReplicationHandshake { .. } => todo!(),
+            Message::ReplicationHandshakeResponse { .. } => todo!(),
+            Message::Replicate { .. } => todo!(),
+            Message::Frames(frames) => match &mut self.database {
+                Database::Replica {
+                    injector_handle,
+                    last_received_frame_ts,
+                    ..
+                } => {
+                    *last_received_frame_ts = Some(Instant::now());
+                    injector_handle.send(frames).await;
+                }
+                Database::Primary(_) => todo!("handle primary receiving txn"),
+            },
+            Message::ProxyRequest { .. } => todo!(),
+            Message::ProxyResponse { .. } => todo!(),
+            Message::CancelRequest { .. } => todo!(),
+            Message::CloseConnection { .. } => todo!(),
+            Message::Error(_) => todo!(),
         }
     }
 

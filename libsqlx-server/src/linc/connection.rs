@@ -200,8 +200,7 @@ where
             }))) => {
                 if protocol_version != CURRENT_PROTO_VERSION {
                     let msg = Enveloppe {
-                        from: None,
-                        to: None,
+                        database_id: None,
                         message: Message::Error(ProtoError::HandshakeVersionMismatch {
                             expected: CURRENT_PROTO_VERSION,
                         }),
@@ -215,8 +214,7 @@ where
                     // handshake message
                     if !self.is_initiator {
                         let msg = Enveloppe {
-                            from: None,
-                            to: None,
+                            database_id: None,
                             message: Message::Handshake {
                                 protocol_version: CURRENT_PROTO_VERSION,
                                 node_id: self.bus.node_id(),
@@ -228,6 +226,7 @@ where
                     self.peer = Some(node_id);
                     self.state = ConnectionState::Connected;
                     self.send_queue = Some(self.bus.send_queue().register(node_id));
+                    self.bus.connect(node_id);
 
                     Ok(())
                 }
@@ -255,8 +254,7 @@ where
 
     async fn initiate_connection(&mut self) -> color_eyre::Result<()> {
         let msg = Enveloppe {
-            from: None,
-            to: None,
+            database_id: None,
             message: Message::Handshake {
                 protocol_version: CURRENT_PROTO_VERSION,
                 node_id: self.bus.node_id(),

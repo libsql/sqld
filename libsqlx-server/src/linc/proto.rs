@@ -10,9 +10,19 @@ pub type Program = String;
 
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Enveloppe {
-    pub from: Option<DatabaseId>,
-    pub to: Option<DatabaseId>,
+    pub database_id: Option<DatabaseId>,
     pub message: Message,
+}
+
+#[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
+/// a batch of frames to inject
+pub struct Frames{
+    /// must match the Replicate request id
+    pub req_id: u32,
+    /// sequence id, monotonically incremented, reset when req_id changes.
+    /// Used to detect gaps in received frames.
+    pub seq: u32,
+    pub frames: Vec<Bytes>,
 }
 
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -32,18 +42,12 @@ pub enum Message {
         current_frame_no: u64,
     },
     Replicate {
+        /// incremental request id, used when responding with a Frames message
+        req_id: u32,
         /// next frame no to send
         next_frame_no: u64,
     },
-    /// a batch of frames that are part of the same transaction
-    Transaction {
-        /// if not None, then the last frame is a commit frame, and this is the new size of the database.
-        size_after: Option<u32>,
-        /// frame_no of the last frame in frames
-        end_frame_no: u64,
-        /// a batch of frames part of the transaction.
-        frames: Vec<Frame>,
-    },
+    Frames(Frames),
     /// Proxy a query to a primary
     ProxyRequest {
         /// id of the connection to perform the query against

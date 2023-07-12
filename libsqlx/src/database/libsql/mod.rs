@@ -4,8 +4,7 @@ use std::sync::Arc;
 use sqld_libsql_bindings::wal_hook::{TransparentMethods, WalHook, TRANSPARENT_METHODS};
 use sqld_libsql_bindings::WalMethodsHook;
 
-use crate::database::frame::Frame;
-use crate::database::{Database, InjectError, InjectableDatabase};
+use crate::database::{Database, InjectableDatabase};
 use crate::error::Error;
 use crate::result_builder::QueryBuilderConfig;
 
@@ -68,18 +67,6 @@ pub trait LibsqlDbType {
     fn hook_context(&self) -> <Self::ConnectionHook as WalHook>::Context;
 }
 
-pub struct PlainType;
-
-impl LibsqlDbType for PlainType {
-    type ConnectionHook = TransparentMethods;
-
-    fn hook() -> &'static WalMethodsHook<Self::ConnectionHook> {
-        &TRANSPARENT_METHODS
-    }
-
-    fn hook_context(&self) -> <Self::ConnectionHook as WalHook>::Context {}
-}
-
 /// A generic wrapper around a libsql database.
 /// `LibsqlDatabase` can be specialized into either a `ReplicaType` or a `PrimaryType`.
 /// In `PrimaryType` mode, the LibsqlDatabase maintains a replication log that can be replicated to
@@ -122,12 +109,6 @@ impl LibsqlDatabase<ReplicaType> {
         };
 
         Ok(Self::new(db_path, ty))
-    }
-}
-
-impl LibsqlDatabase<PlainType> {
-    pub fn new_plain(db_path: PathBuf) -> crate::Result<Self> {
-        Ok(Self::new(db_path, PlainType))
     }
 }
 
@@ -195,20 +176,13 @@ impl<T: LibsqlDbType> Database for LibsqlDatabase<T> {
 }
 
 impl InjectableDatabase for LibsqlDatabase<ReplicaType> {
-    fn injector(&mut self) -> crate::Result<Box<dyn super::Injector>> {
+    fn injector(&mut self) -> crate::Result<Box<dyn super::Injector + Send + 'static>> {
         let Some(commit_handler) = self.ty.commit_handler.take() else { panic!("there can be only one injector") };
         Ok(Box::new(Injector::new(
             &self.db_path,
             commit_handler,
             self.ty.injector_buffer_capacity,
         )?))
-    }
-}
-
-impl super::Injector for Injector {
-    fn inject(&mut self, frame: Frame) -> Result<(), InjectError> {
-        self.inject_frame(frame).unwrap();
-        Ok(())
     }
 }
 

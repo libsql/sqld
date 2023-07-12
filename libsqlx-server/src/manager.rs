@@ -20,6 +20,10 @@ pub struct Manager {
 
 const MAX_ALLOC_MESSAGE_QUEUE_LEN: usize = 32;
 
+trait IsSync: Sync {}
+
+impl IsSync for Allocation {}
+
 impl Manager {
     pub fn new(db_path: PathBuf, meta_store: Arc<Store>, max_conccurent_allocs: u64) -> Self {
         Self {
@@ -45,7 +49,7 @@ impl Manager {
             let (alloc_sender, inbox) = mpsc::channel(MAX_ALLOC_MESSAGE_QUEUE_LEN);
             let alloc = Allocation {
                 inbox,
-                database: Database::from_config(&config, path),
+                database: Database::from_config(&config, path, bus.clone()),
                 connections_futs: JoinSet::new(),
                 next_conn_id: 0,
                 max_concurrent_connections: config.max_conccurent_connection,
@@ -70,7 +74,7 @@ impl Handler for Arc<Manager> {
     async fn handle(&self, bus: Arc<Bus<Self>>, msg: Inbound) {
         if let Some(sender) = self
             .clone()
-            .alloc(msg.enveloppe.to.unwrap(), bus.clone())
+            .alloc(msg.enveloppe.database_id.unwrap(), bus.clone())
             .await
         {
             let _ = sender.send(AllocationMessage::Inbound(msg)).await;

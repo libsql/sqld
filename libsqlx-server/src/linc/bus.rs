@@ -1,10 +1,16 @@
+use std::collections::HashSet;
 use std::sync::Arc;
 
-use super::{connection::SendQueue, handler::Handler, Inbound, NodeId, Outbound};
+use parking_lot::RwLock;
+
+use super::connection::SendQueue;
+use super::handler::Handler;
+use super::{Inbound, NodeId, Outbound};
 
 pub struct Bus<H> {
     node_id: NodeId,
     handler: H,
+    peers: RwLock<HashSet<NodeId>>,
     send_queue: SendQueue,
 }
 
@@ -15,6 +21,7 @@ impl<H: Handler> Bus<H> {
             node_id,
             handler,
             send_queue,
+            peers: Default::default(),
         }
     }
 
@@ -28,6 +35,15 @@ impl<H: Handler> Bus<H> {
 
     pub fn send_queue(&self) -> &SendQueue {
         &self.send_queue
+    }
+
+    pub fn connect(&self, node_id: NodeId) {
+        // TODO: handle peer already exists
+        self.peers.write().insert(node_id);
+    }
+
+    pub fn disconnect(&self, node_id: NodeId) {
+        self.peers.write().remove(&node_id);
     }
 }
 

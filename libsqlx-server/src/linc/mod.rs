@@ -26,8 +26,7 @@ impl Inbound {
         Outbound {
             to: self.from,
             enveloppe: Enveloppe {
-                from: self.enveloppe.to,
-                to: self.enveloppe.from,
+                database_id: None,
                 message,
             },
         }

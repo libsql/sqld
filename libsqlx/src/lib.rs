@@ -10,10 +10,11 @@ mod seal;
 
 pub type Result<T, E = crate::error::Error> = std::result::Result<T, E>;
 
-pub use connection::Connection;
+pub use connection::{Connection, DescribeResponse};
 pub use database::libsql;
 pub use database::libsql::replication_log::FrameNo;
 pub use database::proxy;
-pub use database::Database;
+pub use database::Frame;
+pub use database::{Database, InjectableDatabase, Injector};
 
 pub use rusqlite;

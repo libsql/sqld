@@ -1,15 +1,15 @@
-use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::path::Path;
-use std::rc::Rc;
+use std::sync::Arc;
 
+use parking_lot::Mutex;
 use rusqlite::OpenFlags;
 
 use crate::database::frame::Frame;
 use crate::database::libsql::injector::hook::{
     INJECTOR_METHODS, LIBSQL_INJECT_FATAL, LIBSQL_INJECT_OK, LIBSQL_INJECT_OK_TXN,
 };
-use crate::database::FrameNo;
+use crate::database::{FrameNo, InjectError};
 use crate::seal::Seal;
 
 use hook::InjectorHookCtx;
@@ -17,7 +17,7 @@ use hook::InjectorHookCtx;
 mod headers;
 mod hook;
 
-pub type FrameBuffer = Rc<RefCell<VecDeque<Frame>>>;
+pub type FrameBuffer = Arc<Mutex<VecDeque<Frame>>>;
 
 pub struct Injector {
     /// The injector is in a transaction state
@@ -33,11 +33,22 @@ pub struct Injector {
     _hook_ctx: Seal<Box<InjectorHookCtx>>,
 }
 
+impl crate::database::Injector for Injector {
+    fn inject(&mut self, frame: Frame) -> Result<Option<FrameNo>, InjectError> {
+        let res = self.inject_frame(frame).unwrap();
+        Ok(res)
+    }
+
+    fn clear(&mut self) {
+        self.buffer.lock().clear();
+    }
+}
+
 /// Methods from this trait are called before and after performing a frame injection.
 /// This trait trait is used to record the last committed frame_no to the log.
 /// The implementer can persist the pre and post commit frame no, and compare them in the event of
 /// a crash; if the pre and post commit frame_no don't match, then the log may be corrupted.
-pub trait InjectorCommitHandler: Send + 'static {
+pub trait InjectorCommitHandler: Send + Sync + 'static {
     fn pre_commit(&mut self, frame_no: FrameNo) -> anyhow::Result<()>;
     fn post_commit(&mut self, frame_no: FrameNo) -> anyhow::Result<()>;
 }
@@ -52,7 +63,6 @@ impl<T: InjectorCommitHandler> InjectorCommitHandler for Box<T> {
     }
 }
 
-#[cfg(test)]
 impl InjectorCommitHandler for () {
     fn pre_commit(&mut self, _frame_no: FrameNo) -> anyhow::Result<()> {
         Ok(())
@@ -95,8 +105,8 @@ impl Injector {
     /// Inject on frame into the log. If this was a commit frame, returns Ok(Some(FrameNo)).
     pub(crate) fn inject_frame(&mut self, frame: Frame) -> crate::Result<Option<FrameNo>> {
         let frame_close_txn = frame.header().size_after != 0;
-        self.buffer.borrow_mut().push_back(frame);
-        if frame_close_txn || self.buffer.borrow().len() >= self.capacity {
+        self.buffer.lock().push_back(frame);
+        if frame_close_txn || self.buffer.lock().len() >= self.capacity {
             if !self.is_txn {
                 self.begin_txn();
             }
@@ -110,7 +120,7 @@ impl Injector {
     /// Trigger a dummy write, and flush the cache to trigger a call to xFrame. The buffer's frame
     /// are then injected into the wal.
     fn flush(&mut self) -> crate::Result<Option<FrameNo>> {
-        let last_frame_no = match self.buffer.borrow().back() {
+        let last_frame_no = match self.buffer.lock().back() {
             Some(f) => f.header().frame_no,
             None => {
                 tracing::trace!("nothing to inject");
@@ -130,11 +140,11 @@ impl Injector {
                             .pragma_update(None, "writable_schema", "reset")?;
                         self.commit();
                         self.is_txn = false;
-                        assert!(self.buffer.borrow().is_empty());
+                        assert!(self.buffer.lock().is_empty());
                         return Ok(Some(last_frame_no));
                     } else if e.extended_code == LIBSQL_INJECT_OK_TXN {
                         self.is_txn = true;
-                        assert!(self.buffer.borrow().is_empty());
+                        assert!(self.buffer.lock().is_empty());
                         return Ok(None);
                     } else if e.extended_code == LIBSQL_INJECT_FATAL {
                         todo!("handle fatal error");

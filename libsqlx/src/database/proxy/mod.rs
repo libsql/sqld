@@ -8,4 +8,4 @@ mod database;
 pub use database::WriteProxyDatabase;
 
 // Waits until passed frameno has been replicated back to the database
-type WaitFrameNoCb = Arc<dyn Fn(FrameNo) + 'static>;
+type WaitFrameNoCb = Arc<dyn Fn(FrameNo) + Sync + Send + 'static>;

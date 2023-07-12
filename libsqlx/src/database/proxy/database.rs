@@ -41,7 +41,7 @@ impl<RDB, WDB> InjectableDatabase for WriteProxyDatabase<RDB, WDB>
 where
     RDB: InjectableDatabase,
 {
-    fn injector(&mut self) -> crate::Result<Box<dyn crate::database::Injector>> {
+    fn injector(&mut self) -> crate::Result<Box<dyn crate::database::Injector + Send + 'static>> {
         self.read_db.injector()
     }
 }
