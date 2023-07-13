@@ -11,7 +11,7 @@ use super::net::Connector;
 use super::{bus::Bus, NodeId};
 
 /// Manages a pool of connections to other peers, handling re-connection.
-struct ConnectionPool<H> {
+pub struct ConnectionPool<H> {
     managed_peers: HashMap<NodeId, String>,
     connections: JoinSet<NodeId>,
     bus: Arc<Bus<H>>,
@@ -23,16 +23,22 @@ impl<H: Handler> ConnectionPool<H> {
         managed_peers: impl IntoIterator<Item = (NodeId, String)>,
     ) -> Self {
         Self {
-            managed_peers: managed_peers.into_iter().collect(),
+            managed_peers: managed_peers.into_iter().filter(|(id, _)| *id < bus.node_id()).collect(),
             connections: JoinSet::new(),
             bus,
         }
     }
 
-    pub async fn run<C: Connector>(mut self) {
+    pub fn managed_count(&self) -> usize {
+        self.managed_peers.len()
+    }
+
+    pub async fn run<C: Connector>(mut self) -> color_eyre::Result<()> {
         self.init::<C>().await;
 
         while self.tick::<C>().await {}
+
+        Ok(())
     }
 
     pub async fn tick<C: Connector>(&mut self) -> bool {
@@ -66,6 +72,7 @@ impl<H: Handler> ConnectionPool<H> {
             let connection = Connection::new_initiator(stream, bus.clone());
             connection.run().await;
 
+            dbg!();
             peer_id
         };
 

@@ -30,11 +30,14 @@ impl<H: Handler> Server<H> {
         while self.connections.join_next().await.is_some() {}
     }
 
-    pub async fn run<L>(mut self, mut listener: L)
+    pub async fn run<L>(mut self, mut listener: L) -> color_eyre::Result<()>
     where
         L: super::net::Listener,
     {
+        tracing::info!("Cluster server listening on {}", listener.local_addr()?);
         while self.tick(&mut listener).await {}
+
+        Ok(())
     }
 
     pub async fn tick<L>(&mut self, listener: &mut L) -> bool

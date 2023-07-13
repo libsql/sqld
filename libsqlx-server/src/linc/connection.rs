@@ -68,7 +68,8 @@ impl SendQueue {
             None => todo!("no queue"),
         };
 
-        sender.send(msg.enveloppe);
+        dbg!();
+        sender.send(msg.enveloppe).unwrap();
     }
 
     pub fn register(&self, node_id: NodeId) -> mpsc::UnboundedReceiver<Enveloppe> {
@@ -145,6 +146,7 @@ where
             m = self.conn.next() => {
                 match m {
                     Some(Ok(m)) => {
+                        dbg!();
                         self.handle_message(m).await;
                     }
                     Some(Err(e)) => {
@@ -157,11 +159,13 @@ where
             },
             // TODO: pop send queue
             Some(m) = self.send_queue.as_mut().unwrap().recv() => {
+                dbg!();
                 self.conn.feed(m).await.unwrap();
                 // send as many as possible
                 while let Ok(m) = self.send_queue.as_mut().unwrap().try_recv() {
                     self.conn.feed(m).await.unwrap();
                 }
+                dbg!();
                 self.conn.flush().await.unwrap();
             }
             else => {
@@ -216,12 +220,14 @@ where
                         let msg = Enveloppe {
                             database_id: None,
                             message: Message::Handshake {
-                                protocol_version: CURRENT_PROTO_VERSION,
+                               protocol_version: CURRENT_PROTO_VERSION,
                                 node_id: self.bus.node_id(),
                             },
                         };
                         self.conn.send(msg).await?;
                     }
+
+                    tracing::info!("Connected to peer {node_id}");
 
                     self.peer = Some(node_id);
                     self.state = ConnectionState::Connected;

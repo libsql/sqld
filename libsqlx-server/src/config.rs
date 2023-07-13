@@ -30,7 +30,7 @@ pub struct ClusterConfig {
     /// Address to bind this node to
     #[serde(default = "default_linc_addr")]
     pub addr: SocketAddr,
-    /// List of peers in the format `<node_id>:<node_addr>`
+    /// List of peers in the format `<node_id>@<node_addr>`
     pub peers: Vec<Peer>,
 }
 
@@ -64,8 +64,8 @@ fn default_linc_addr() -> SocketAddr {
 
 #[derive(Debug, Clone)]
 pub struct Peer {
-    id: u64,
-    addr: String,
+    pub id: u64,
+    pub addr: String,
 }
 
 impl<'de> Deserialize<'de> for Peer {
@@ -86,7 +86,7 @@ impl<'de> Deserialize<'de> for Peer {
             where
                 E: serde::de::Error,
             {
-                let mut iter = v.split(":");
+                let mut iter = v.split("@");
                 let Some(id) = iter.next() else { return Err(E::custom("node id is missing")) };
                 let Ok(id) = id.parse::<u64>() else { return Err(E::custom("failed to parse node id")) };
                 let Some(addr) = iter.next() else { return Err(E::custom("node address is missing")) };

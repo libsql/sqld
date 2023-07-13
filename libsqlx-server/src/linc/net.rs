@@ -31,6 +31,7 @@ pub trait Listener {
         Self: 'a;
 
     fn accept(&self) -> Self::Future<'_>;
+    fn local_addr(&self) -> color_eyre::Result<SocketAddr>;
 }
 
 pub struct AcceptFut<'a>(&'a TcpListener);
@@ -52,6 +53,10 @@ impl Listener for TcpListener {
 
     fn accept(&self) -> Self::Future<'_> {
         AcceptFut(self)
+    }
+
+    fn local_addr(&self) -> color_eyre::Result<SocketAddr> {
+        Ok(self.local_addr()?)
     }
 }
 

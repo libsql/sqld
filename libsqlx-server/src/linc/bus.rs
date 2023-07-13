@@ -30,7 +30,7 @@ impl<H: Handler> Bus<H> {
     }
 
     pub async fn incomming(self: &Arc<Self>, incomming: Inbound) {
-        self.handler.handle(self.clone(), incomming);
+        self.handler.handle(self.clone(), incomming).await;
     }
 
     pub fn send_queue(&self) -> &SendQueue {

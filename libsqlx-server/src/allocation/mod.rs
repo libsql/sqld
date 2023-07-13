@@ -58,7 +58,7 @@ impl libsqlx::Database for DummyDb {
     type Connection = DummyConn;
 
     fn connect(&self) -> Result<Self::Connection, libsqlx::error::Error> {
-        todo!()
+        Ok(DummyConn)
     }
 }
 
@@ -106,6 +106,9 @@ struct Replicator {
 
 impl Replicator {
     async fn run(mut self) {
+        dbg!();
+        self.query_replicate().await;
+        dbg!();
         loop {
             match timeout(Duration::from_secs(5), self.receiver.recv()).await {
                 Ok(Some(Frames {
@@ -281,7 +284,10 @@ impl Allocation {
             Message::Handshake { .. } => todo!(),
             Message::ReplicationHandshake { .. } => todo!(),
             Message::ReplicationHandshakeResponse { .. } => todo!(),
-            Message::Replicate { .. } => todo!(),
+            Message::Replicate { .. } => match &mut self.database {
+                Database::Primary(_) => todo!(),
+                Database::Replica { .. } => (),
+            },
             Message::Frames(frames) => match &mut self.database {
                 Database::Replica {
                     injector_handle,
@@ -289,7 +295,7 @@ impl Allocation {
                     ..
                 } => {
                     *last_received_frame_ts = Some(Instant::now());
-                    injector_handle.send(frames).await;
+                    injector_handle.send(frames).await.unwrap();
                 }
                 Database::Primary(_) => todo!("handle primary receiving txn"),
             },
