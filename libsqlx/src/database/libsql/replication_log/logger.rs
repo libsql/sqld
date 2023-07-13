@@ -441,6 +441,7 @@ impl LogFile {
     }
 
     pub fn commit(&mut self) -> crate::Result<()> {
+        dbg!(&self);
         self.header.frame_count += self.uncommitted_frame_count;
         self.uncommitted_frame_count = 0;
         self.commited_checksum = self.uncommitted_checksum;
@@ -550,6 +551,7 @@ impl LogFile {
     /// If the requested frame is before the first frame in the log, or after the last frame,
     /// Ok(None) is returned.
     pub fn frame(&self, frame_no: FrameNo) -> std::result::Result<Frame, LogReadError> {
+        dbg!(frame_no);
         if frame_no < self.header.start_frame_no {
             return Err(LogReadError::SnapshotRequired);
         }
@@ -695,8 +697,12 @@ pub struct LogFileHeader {
 }
 
 impl LogFileHeader {
-    pub fn last_frame_no(&self) -> FrameNo {
-        self.start_frame_no + self.frame_count
+    pub fn last_frame_no(&self) -> Option<FrameNo> {
+        if self.start_frame_no == 0 && self.frame_count == 0 {
+            None
+        } else {
+            Some(self.start_frame_no + self.frame_count - 1)
+        }
     }
 
     fn sqld_version(&self) -> Version {
@@ -871,6 +877,7 @@ impl ReplicationLogger {
     /// Returns the new frame count and checksum to commit
     fn write_pages(&self, pages: &[WalPage]) -> anyhow::Result<()> {
         let mut log_file = self.log_file.write();
+            dbg!();
         for page in pages.iter() {
             log_file.push_page(page)?;
         }
@@ -899,7 +906,7 @@ impl ReplicationLogger {
     fn commit(&self) -> anyhow::Result<FrameNo> {
         let mut log_file = self.log_file.write();
         log_file.commit()?;
-        Ok(log_file.header().last_frame_no())
+        Ok(log_file.header().last_frame_no().expect("there should be at least one frame after commit"))
     }
 
     pub fn get_snapshot_file(&self, from: FrameNo) -> anyhow::Result<Option<SnapshotFile>> {

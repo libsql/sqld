@@ -16,12 +16,12 @@ pub struct Enveloppe {
 
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
 /// a batch of frames to inject
-pub struct Frames{
+pub struct Frames {
     /// must match the Replicate request id
-    pub req_id: u32,
+    pub req_no: u32,
     /// sequence id, monotonically incremented, reset when req_id changes.
     /// Used to detect gaps in received frames.
-    pub seq: u32,
+    pub seq_no: u32,
     pub frames: Vec<Bytes>,
 }
 
@@ -43,7 +43,7 @@ pub enum Message {
     },
     Replicate {
         /// incremental request id, used when responding with a Frames message
-        req_id: u32,
+        req_no: u32,
         /// next frame no to send
         next_frame_no: u64,
     },

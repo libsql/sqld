@@ -23,7 +23,10 @@ impl<H: Handler> ConnectionPool<H> {
         managed_peers: impl IntoIterator<Item = (NodeId, String)>,
     ) -> Self {
         Self {
-            managed_peers: managed_peers.into_iter().filter(|(id, _)| *id < bus.node_id()).collect(),
+            managed_peers: managed_peers
+                .into_iter()
+                .filter(|(id, _)| *id < bus.node_id())
+                .collect(),
             connections: JoinSet::new(),
             bus,
         }
@@ -72,7 +75,6 @@ impl<H: Handler> ConnectionPool<H> {
             let connection = Connection::new_initiator(stream, bus.clone());
             connection.run().await;
 
-            dbg!();
             peer_id
         };
 

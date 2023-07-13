@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use clap::Parser;
 use color_eyre::eyre::Result;
-use config::{AdminApiConfig, UserApiConfig, ClusterConfig};
+use config::{AdminApiConfig, ClusterConfig, UserApiConfig};
 use http::admin::run_admin_api;
 use http::user::run_user_api;
 use hyper::server::conn::AddrIncoming;
@@ -72,7 +72,10 @@ async fn spawn_cluster_networking(
     let listener = TcpListener::bind(config.addr).await?;
     set.spawn(server.run(listener));
 
-    let pool = linc::connection_pool::ConnectionPool::new(bus, config.peers.iter().map(|p| (p.id, dbg!(p.addr.clone()))));
+    let pool = linc::connection_pool::ConnectionPool::new(
+        bus,
+        config.peers.iter().map(|p| (p.id, p.addr.clone())),
+    );
     if pool.managed_count() > 0 {
         set.spawn(pool.run::<TcpStream>());
     }
@@ -80,7 +83,7 @@ async fn spawn_cluster_networking(
     Ok(())
 }
 
-#[tokio::main]
+#[tokio::main(flavor = "multi_thread", worker_threads = 10)]
 async fn main() -> Result<()> {
     init();
     let args = Args::parse();

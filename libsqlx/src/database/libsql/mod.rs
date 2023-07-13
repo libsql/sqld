@@ -15,6 +15,7 @@ use replication_log::logger::{
 };
 
 use self::injector::InjectorCommitHandler;
+use self::replication_log::logger::FrameNotifierCb;
 
 pub use connection::LibsqlConnection;
 pub use replication_log::logger::{LogCompactor, LogFile};
@@ -118,16 +119,21 @@ impl LibsqlDatabase<PrimaryType> {
         compactor: impl LogCompactor,
         // whether the log is dirty and might need repair
         dirty: bool,
+        new_frame_notifier: FrameNotifierCb,
     ) -> crate::Result<Self> {
         let ty = PrimaryType {
             logger: Arc::new(ReplicationLogger::open(
                 &db_path,
                 dirty,
                 compactor,
-                Box::new(|_| ()),
+                new_frame_notifier,
             )?),
         };
         Ok(Self::new(db_path, ty))
+    }
+
+    pub fn logger(&self) -> Arc<ReplicationLogger> {
+        self.ty.logger.clone()
     }
 }
 

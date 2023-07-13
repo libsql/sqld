@@ -1,10 +1,16 @@
+use std::collections::HashMap;
+use std::collections::hash_map::Entry;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use bytes::Bytes;
 use libsqlx::libsql::{LibsqlDatabase, LogCompactor, LogFile, PrimaryType, ReplicaType};
 use libsqlx::proxy::WriteProxyDatabase;
-use libsqlx::{Database as _, DescribeResponse, Frame, InjectableDatabase, Injector, FrameNo};
+use libsqlx::{
+    Database as _, DescribeResponse, Frame, FrameNo, InjectableDatabase, Injector, LogReadError,
+    ReplicationLogger,
+};
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::{block_in_place, JoinSet};
 use tokio::time::timeout;
@@ -13,7 +19,7 @@ use crate::hrana;
 use crate::hrana::http::handle_pipeline;
 use crate::hrana::http::proto::{PipelineRequestBody, PipelineResponseBody};
 use crate::linc::bus::Dispatch;
-use crate::linc::proto::{Enveloppe, Message, Frames};
+use crate::linc::proto::{Enveloppe, Frames, Message};
 use crate::linc::{Inbound, NodeId, Outbound};
 use crate::meta::DatabaseId;
 
@@ -65,7 +71,11 @@ impl libsqlx::Database for DummyDb {
 type ProxyDatabase = WriteProxyDatabase<LibsqlDatabase<ReplicaType>, DummyDb>;
 
 pub enum Database {
-    Primary(LibsqlDatabase<PrimaryType>),
+    Primary {
+        db: LibsqlDatabase<PrimaryType>,
+        replica_streams: HashMap<NodeId, (u32, tokio::task::JoinHandle<()>)>,
+        frame_notifier: tokio::sync::watch::Receiver<FrameNo>,
+    },
     Replica {
         db: ProxyDatabase,
         injector_handle: mpsc::Sender<Frames>,
@@ -96,7 +106,7 @@ const MAX_INJECTOR_BUFFER_CAP: usize = 32;
 struct Replicator {
     dispatcher: Arc<dyn Dispatch>,
     req_id: u32,
-    last_committed: FrameNo,
+    next_frame_no: FrameNo,
     next_seq: u32,
     database_id: DatabaseId,
     primary_node_id: NodeId,
@@ -106,30 +116,36 @@ struct Replicator {
 
 impl Replicator {
     async fn run(mut self) {
-        dbg!();
         self.query_replicate().await;
-        dbg!();
         loop {
             match timeout(Duration::from_secs(5), self.receiver.recv()).await {
                 Ok(Some(Frames {
-                    req_id,
-                    seq,
+                    req_no: req_id,
+                    seq_no: seq,
                     frames,
                 })) => {
                     // ignore frames from a previous call to Replicate
-                    if req_id != self.req_id { continue }
-                    if seq != self.next_seq { 
+                    if req_id != self.req_id {
+                        tracing::debug!(req_id, self.req_id, "wrong req_id");
+                        continue;
+                    }
+                    if seq != self.next_seq {
                         // this is not the batch of frame we were expecting, drop what we have, and
                         // ask again from last checkpoint
+                        tracing::debug!(seq, self.next_seq, "wrong seq");
                         self.query_replicate().await;
                         continue;
                     };
                     self.next_seq += 1;
+
+                    tracing::debug!("injecting {} frames", frames.len());
+
                     for bytes in frames {
                         let frame = Frame::try_from_bytes(bytes).unwrap();
                         block_in_place(|| {
                             if let Some(last_committed) = self.injector.inject(frame).unwrap() {
-                                self.last_committed = last_committed;
+                                tracing::debug!(last_committed);
+                                self.next_frame_no = last_committed + 1;
                             }
                         });
                     }
@@ -151,12 +167,71 @@ impl Replicator {
                 enveloppe: Enveloppe {
                     database_id: Some(self.database_id),
                     message: Message::Replicate {
-                        next_frame_no: self.last_committed + 1,
-                        req_id: self.req_id - 1,
+                        next_frame_no: self.next_frame_no,
+                        req_no: self.req_id,
                     },
                 },
             })
-        .await;
+            .await;
+    }
+}
+
+struct FrameStreamer {
+    logger: Arc<ReplicationLogger>,
+    database_id: DatabaseId,
+    node_id: NodeId,
+    next_frame_no: FrameNo,
+    req_no: u32,
+    seq_no: u32,
+    dipatcher: Arc<dyn Dispatch>,
+    notifier: tokio::sync::watch::Receiver<FrameNo>,
+    buffer: Vec<Bytes>,
+}
+
+// the maximum number of frame a Frame messahe is allowed to contain
+const FRAMES_MESSAGE_MAX_COUNT: usize = 5;
+
+impl FrameStreamer {
+    async fn run(mut self) {
+        loop {
+            match block_in_place(|| self.logger.get_frame(self.next_frame_no)) {
+                Ok(frame) => {
+                    if self.buffer.len() > FRAMES_MESSAGE_MAX_COUNT {
+                        self.send_frames().await;
+                    }
+                    self.buffer.push(frame.bytes());
+                    self.next_frame_no += 1;
+                }
+                Err(LogReadError::Ahead) => {
+                    tracing::debug!("frame {} not yet avaiblable", self.next_frame_no);
+                    if !self.buffer.is_empty() {
+                        self.send_frames().await;
+                    }
+                    if self.notifier.wait_for(|fno| dbg!(*fno) >= self.next_frame_no).await.is_err() {
+                        break;
+                    }
+                }
+                Err(LogReadError::Error(_)) => todo!("handle log read error"),
+                Err(LogReadError::SnapshotRequired) => todo!("handle reading from snapshot"),
+            }
+        }
+    }
+
+    async fn send_frames(&mut self) {
+        let frames = std::mem::take(&mut self.buffer);
+        let outbound = Outbound {
+            to: self.node_id,
+            enveloppe: Enveloppe {
+                database_id: Some(self.database_id),
+                message: Message::Frames(Frames {
+                    req_no: self.req_no,
+                    seq_no: self.seq_no,
+                    frames,
+                }),
+            },
+        };
+        self.seq_no += 1;
+        self.dipatcher.dispatch(outbound).await;
     }
 }
 
@@ -164,9 +239,21 @@ impl Database {
     pub fn from_config(config: &AllocConfig, path: PathBuf, dispatcher: Arc<dyn Dispatch>) -> Self {
         match config.db_config {
             DbConfig::Primary {} => {
-                let db = LibsqlDatabase::new_primary(path, Compactor, false).unwrap();
-                Self::Primary(db)
-            }
+                let (sender, receiver) = tokio::sync::watch::channel(0);
+                let db = LibsqlDatabase::new_primary(
+                    path,
+                    Compactor,
+                    false,
+                    Box::new(move |fno| { let _ = sender.send(fno); } ),
+                )
+                .unwrap();
+
+                Self::Primary {
+                    db,
+                    replica_streams: HashMap::new(),
+                    frame_notifier: receiver,
+                }
+            },
             DbConfig::Replica { primary_node_id } => {
                 let rdb = LibsqlDatabase::new_replica(path, MAX_INJECTOR_BUFFER_CAP, ()).unwrap();
                 let wdb = DummyDb;
@@ -178,7 +265,7 @@ impl Database {
                 let replicator = Replicator {
                     dispatcher,
                     req_id: 0,
-                    last_committed: 0, // TODO: load the last commited from meta file
+                    next_frame_no: 0, // TODO: load the last commited from meta file
                     next_seq: 0,
                     database_id,
                     primary_node_id,
@@ -200,7 +287,7 @@ impl Database {
 
     fn connect(&self) -> Box<dyn libsqlx::Connection + Send> {
         match self {
-            Database::Primary(db) => Box::new(db.connect().unwrap()),
+            Database::Primary { db, .. } => Box::new(db.connect().unwrap()),
             Database::Replica { db, .. } => Box::new(db.connect().unwrap()),
         }
     }
@@ -281,12 +368,44 @@ impl Allocation {
         );
 
         match msg.enveloppe.message {
-            Message::Handshake { .. } => todo!(),
+            Message::Handshake { .. } => unreachable!("handshake should have been caught earlier"),
             Message::ReplicationHandshake { .. } => todo!(),
             Message::ReplicationHandshakeResponse { .. } => todo!(),
-            Message::Replicate { .. } => match &mut self.database {
-                Database::Primary(_) => todo!(),
-                Database::Replica { .. } => (),
+            Message::Replicate { req_no, next_frame_no } => match &mut self.database {
+                Database::Primary { db, replica_streams, frame_notifier } => {
+                    dbg!(next_frame_no);
+                    let streamer = FrameStreamer {
+                        logger: db.logger(),
+                        database_id: DatabaseId::from_name(&self.db_name),
+                        node_id: msg.from,
+                        next_frame_no,
+                        req_no,
+                        seq_no: 0,
+                        dipatcher: self.dispatcher.clone(),
+                        notifier: frame_notifier.clone(),
+                        buffer: Vec::new(),
+                    };
+
+                    match replica_streams.entry(msg.from) {
+                        Entry::Occupied(mut e) => {
+                            let (old_req_no, old_handle) = e.get_mut();
+                            // ignore req_no older that the current req_no
+                            if *old_req_no < req_no {
+                                let handle = tokio::spawn(streamer.run());
+                                let old_handle = std::mem::replace(old_handle, handle);
+                                *old_req_no = req_no;
+                                old_handle.abort();
+                            }
+                        },
+                        Entry::Vacant(e) => {
+                            let handle = tokio::spawn(streamer.run());
+                            // For some reason, not yielding causes the task not to be spawned
+                            tokio::task::yield_now().await;
+                            e.insert((req_no, handle));
+                        },
+                    }
+                },
+                Database::Replica { .. } => todo!("not a primary!"),
             },
             Message::Frames(frames) => match &mut self.database {
                 Database::Replica {
@@ -297,7 +416,7 @@ impl Allocation {
                     *last_received_frame_ts = Some(Instant::now());
                     injector_handle.send(frames).await.unwrap();
                 }
-                Database::Primary(_) => todo!("handle primary receiving txn"),
+                Database::Primary { .. } => todo!("handle primary receiving txn"),
             },
             Message::ProxyRequest { .. } => todo!(),
             Message::ProxyResponse { .. } => todo!(),
