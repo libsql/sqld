@@ -163,7 +163,7 @@ where
                     self.conn.feed(m).await.unwrap();
                 }
                 self.conn.flush().await.unwrap();
-            }
+            },
             else => {
                 self.state = ConnectionState::Close;
             }

@@ -24,13 +24,14 @@ impl<RDB, WDB> Database for WriteProxyDatabase<RDB, WDB>
 where
     RDB: Database,
     WDB: Database,
+    WDB::Connection: Clone + Send + 'static,
 {
     type Connection = WriteProxyConnection<RDB::Connection, WDB::Connection>;
     /// Create a new connection to the database
     fn connect(&self) -> Result<Self::Connection, Error> {
         Ok(WriteProxyConnection {
-            read_db: self.read_db.connect()?,
-            write_db: self.write_db.connect()?,
+            read_conn: self.read_db.connect()?,
+            write_conn: self.write_db.connect()?,
             wait_frame_no_cb: self.wait_frame_no_cb.clone(),
             state: Default::default(),
         })

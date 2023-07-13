@@ -1,9 +1,10 @@
 use fallible_iterator::FallibleIterator;
+use serde::{Deserialize, Serialize};
 use sqlite3_parser::ast::{Cmd, PragmaBody, QualifiedName, Stmt};
 use sqlite3_parser::lexer::sql::{Parser, ParserError};
 
 /// A group of statements to be executed together.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Statement {
     pub stmt: String,
     pub kind: StmtKind,
@@ -19,7 +20,7 @@ impl Default for Statement {
 }
 
 /// Classify statement in categories of interest.
-#[derive(Debug, PartialEq, Clone, Copy)]
+#[derive(Debug, PartialEq, Clone, Copy, Serialize, Deserialize)]
 pub enum StmtKind {
     /// The begining of a transaction
     TxnBegin,

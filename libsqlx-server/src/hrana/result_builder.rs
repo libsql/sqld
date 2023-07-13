@@ -11,16 +11,22 @@ use super::proto;
 
 pub struct SingleStatementBuilder {
     builder: StatementBuilder,
-    ret: oneshot::Sender<Result<proto::StmtResult, libsqlx::error::Error>>,
+    ret: Option<oneshot::Sender<Result<proto::StmtResult, libsqlx::error::Error>>>,
 }
 
 impl SingleStatementBuilder {
-    pub fn new() -> (Self, oneshot::Receiver<Result<proto::StmtResult, libsqlx::error::Error>>) {
+    pub fn new() -> (
+        Self,
+        oneshot::Receiver<Result<proto::StmtResult, libsqlx::error::Error>>,
+    ) {
         let (ret, rcv) = oneshot::channel();
-        (Self {
-            builder: StatementBuilder::default(),
-            ret,
-        }, rcv)
+        (
+            Self {
+                builder: StatementBuilder::default(),
+                ret: Some(ret),
+            },
+            rcv,
+        )
     }
 }
 
@@ -38,7 +44,8 @@ impl ResultBuilder for SingleStatementBuilder {
         affected_row_count: u64,
         last_insert_rowid: Option<i64>,
     ) -> Result<(), QueryResultBuilderError> {
-        self.builder.finish_step(affected_row_count, last_insert_rowid)
+        self.builder
+            .finish_step(affected_row_count, last_insert_rowid)
     }
 
     fn step_error(&mut self, error: libsqlx::error::Error) -> Result<(), QueryResultBuilderError> {
@@ -61,18 +68,15 @@ impl ResultBuilder for SingleStatementBuilder {
     }
 
     fn finnalize(
-        self,
+        &mut self,
         _is_txn: bool,
         _frame_no: Option<FrameNo>,
-    ) -> Result<bool, QueryResultBuilderError>
-        where Self: Sized
-    {
-        let res = self.builder.into_ret();
-        let _ = self.ret.send(res);
+    ) -> Result<bool, QueryResultBuilderError> {
+        let res = self.builder.take_ret();
+        let _ = self.ret.take().unwrap().send(res);
         Ok(true)
     }
 }
-
 
 #[derive(Debug, Default)]
 struct StatementBuilder {
@@ -191,12 +195,12 @@ impl StatementBuilder {
         Ok(())
     }
 
-    pub fn into_ret(self) -> Result<proto::StmtResult, libsqlx::error::Error> {
-        match self.err {
+    pub fn take_ret(&mut self) -> Result<proto::StmtResult, libsqlx::error::Error> {
+        match self.err.take() {
             Some(err) => Err(err),
             None => Ok(proto::StmtResult {
-                cols: self.cols,
-                rows: self.rows,
+                cols: std::mem::take(&mut self.cols),
+                rows: std::mem::take(&mut self.rows),
                 affected_row_count: self.affected_row_count,
                 last_insert_rowid: self.last_insert_rowid,
             }),
@@ -262,23 +266,24 @@ pub struct HranaBatchProtoBuilder {
     current_size: u64,
     max_response_size: u64,
     step_empty: bool,
-    ret: oneshot::Sender<proto::BatchResult>
+    ret: oneshot::Sender<proto::BatchResult>,
 }
 
 impl HranaBatchProtoBuilder {
     pub fn new() -> (Self, oneshot::Receiver<proto::BatchResult>) {
         let (ret, rcv) = oneshot::channel();
-        (Self {
-            step_results: Vec::new(),
-            step_errors: Vec::new(),
-            stmt_builder: StatementBuilder::default(),
-            current_size: 0,
-            max_response_size: u64::MAX,
-            step_empty: false,
-            ret,
-        },
-        rcv)
-
+        (
+            Self {
+                step_results: Vec::new(),
+                step_errors: Vec::new(),
+                stmt_builder: StatementBuilder::default(),
+                current_size: 0,
+                max_response_size: u64::MAX,
+                step_empty: false,
+                ret,
+            },
+            rcv,
+        )
     }
     pub fn into_ret(self) -> proto::BatchResult {
         proto::BatchResult {
@@ -314,7 +319,7 @@ impl ResultBuilder for HranaBatchProtoBuilder {
             max_response_size: self.max_response_size - self.current_size,
             ..Default::default()
         };
-        match std::mem::replace(&mut self.stmt_builder, new_builder).into_ret() {
+        match std::mem::replace(&mut self.stmt_builder, new_builder).take_ret() {
             Ok(res) => {
                 self.step_results.push((!self.step_empty).then_some(res));
                 self.step_errors.push(None);

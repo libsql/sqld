@@ -1,7 +1,10 @@
+use std::sync::Arc;
+
 use color_eyre::eyre::Context;
 use futures::Future;
 use parking_lot::Mutex;
 use serde::{de::DeserializeOwned, Serialize};
+use tokio::sync::oneshot;
 
 use crate::allocation::ConnectionHandle;
 
@@ -47,31 +50,38 @@ fn handle_index() -> color_eyre::Result<hyper::Response<hyper::Body>> {
 }
 
 pub async fn handle_pipeline<F, Fut>(
-    server: &Server,
+    server: Arc<Server>,
     req: PipelineRequestBody,
+    ret: oneshot::Sender<color_eyre::Result<PipelineResponseBody>>,
     mk_conn: F,
-) -> color_eyre::Result<PipelineResponseBody>
+) -> color_eyre::Result<()>
 where
     F: FnOnce() -> Fut,
     Fut: Future<Output = crate::Result<ConnectionHandle>>,
 {
-    let mut stream_guard = stream::acquire(server, req.baton.as_deref(), mk_conn).await?;
+    let mut stream_guard = stream::acquire(server.clone(), req.baton.as_deref(), mk_conn).await?;
 
-    let mut results = Vec::with_capacity(req.requests.len());
-    for request in req.requests.into_iter() {
-        let result = request::handle(&mut stream_guard, request)
-            .await
-            .context("Could not execute a request in pipeline")?;
-        results.push(result);
-    }
+    tokio::spawn(async move {
+        let f = async move {
+            let mut results = Vec::with_capacity(req.requests.len());
+            for request in req.requests.into_iter() {
+                let result = request::handle(&mut stream_guard, request)
+                    .await
+                    .context("Could not execute a request in pipeline")?;
+                results.push(result);
+            }
 
-    let resp_body = proto::PipelineResponseBody {
-        baton: stream_guard.release(),
-        base_url: server.self_url.clone(),
-        results,
-    };
+            Ok(proto::PipelineResponseBody {
+                baton: stream_guard.release(),
+                base_url: server.self_url.clone(),
+                results,
+            })
+        };
 
-    Ok(resp_body)
+        let _ = ret.send(f.await);
+    });
+
+    Ok(())
 }
 
 async fn read_request_json<T: DeserializeOwned>(

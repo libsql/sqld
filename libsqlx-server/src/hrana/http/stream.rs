@@ -1,6 +1,7 @@
 use std::cmp::Reverse;
 use std::collections::{HashMap, VecDeque};
 use std::pin::Pin;
+use std::sync::Arc;
 use std::{future, mem, task};
 
 use base64::prelude::{Engine as _, BASE64_STANDARD_NO_PAD};
@@ -67,8 +68,8 @@ struct Stream {
 /// Guard object that is used to access a stream from the outside. The guard makes sure that the
 /// stream's entry in [`ServerStreamState::handles`] is either removed or replaced with
 /// [`Handle::Available`] after the guard goes out of scope.
-pub struct Guard<'srv> {
-    server: &'srv Server,
+pub struct Guard {
+    server: Arc<Server>,
     /// The guarded stream. This is only set to `None` in the destructor.
     stream: Option<Box<Stream>>,
     /// If set to `true`, the destructor will release the stream for further use (saving it as
@@ -101,18 +102,18 @@ impl ServerStreamState {
 
 /// Acquire a guard to a new or existing stream. If baton is `Some`, we try to look up the stream,
 /// otherwise we create a new stream.
-pub async fn acquire<'srv, F, Fut>(
-    server: &'srv Server,
+pub async fn acquire<F, Fut>(
+    server: Arc<Server>,
     baton: Option<&str>,
     mk_conn: F,
-) -> color_eyre::Result<Guard<'srv>>
+) -> color_eyre::Result<Guard>
 where
     F: FnOnce() -> Fut,
     Fut: Future<Output = crate::Result<ConnectionHandle>>,
 {
     let stream = match baton {
         Some(baton) => {
-            let (stream_id, baton_seq) = decode_baton(server, baton)?;
+            let (stream_id, baton_seq) = decode_baton(&server, baton)?;
 
             let mut state = server.stream_state.lock();
             let handle = state.handles.get_mut(&stream_id);
@@ -182,7 +183,7 @@ where
     })
 }
 
-impl<'srv> Guard<'srv> {
+impl Guard {
     pub fn get_db(&self) -> Result<&ConnectionHandle, ProtocolError> {
         let stream = self.stream.as_ref().unwrap();
         stream.conn.as_ref().ok_or(ProtocolError::BatonStreamClosed)
@@ -211,7 +212,7 @@ impl<'srv> Guard<'srv> {
         if stream.conn.is_some() {
             self.release = true; // tell destructor to make the stream available again
             Some(encode_baton(
-                self.server,
+                &self.server,
                 stream.stream_id,
                 stream.baton_seq,
             ))
@@ -221,7 +222,7 @@ impl<'srv> Guard<'srv> {
     }
 }
 
-impl<'srv> Drop for Guard<'srv> {
+impl Drop for Guard {
     fn drop(&mut self) {
         let stream = self.stream.take().unwrap();
         let stream_id = stream.stream_id;

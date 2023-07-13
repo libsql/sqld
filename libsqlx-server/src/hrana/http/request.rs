@@ -13,7 +13,7 @@ pub enum StreamResponseError {
 }
 
 pub async fn handle(
-    stream_guard: &mut stream::Guard<'_>,
+    stream_guard: &mut stream::Guard,
     request: proto::StreamRequest,
 ) -> color_eyre::Result<proto::StreamResult> {
     let result = match try_handle(stream_guard, request).await {
@@ -31,7 +31,7 @@ pub async fn handle(
 }
 
 async fn try_handle(
-    stream_guard: &mut stream::Guard<'_>,
+    stream_guard: &mut stream::Guard,
     request: proto::StreamRequest,
 ) -> color_eyre::Result<proto::StreamResponse> {
     Ok(match request {
