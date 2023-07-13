@@ -7,10 +7,11 @@ edition = "2021"
 
 [dependencies]
 async-bincode = { version = "0.7.1", features = ["tokio"] }
+async-trait = "0.1.71"
 axum = "0.6.18"
 base64 = "0.21.2"
 bincode = "1.3.3"
-bytes = "1.4.0"
+bytes = { version =  "1.4.0", features = ["serde"] }
 clap = { version = "4.3.11", features = ["derive"] }
 color-eyre = "0.6.2"
 futures = "0.3.28"
@@ -26,6 +27,7 @@ regex = "1.9.1"
 serde = { version = "1.0.166", features = ["derive", "rc"] }
 serde_json = "1.0.100"
 sha2 = "0.10.7"
+sha3 = "0.10.8"
 sled = "0.34.7"
 thiserror = "1.0.43"
 tokio = { version = "1.29.1", features = ["full"] }
@@ -34,7 +36,7 @@ tokio-util = "0.7.8"
 toml = "0.7.6"
 tracing = "0.1.37"
 tracing-subscriber = { version = "0.3.17", features = ["env-filter"] }
-uuid = { version = "1.4.0", features = ["v4"] }
+uuid = { version = "1.4.0", features = ["v4", "serde"] }
 
 [dev-dependencies]
 turmoil = "0.5.5"

@@ -1,8 +1,8 @@
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
-use serde::Deserialize;
 use serde::de::Visitor;
+use serde::Deserialize;
 
 #[derive(Deserialize, Debug, Clone)]
 pub struct Config {
@@ -26,10 +26,11 @@ impl Config {
 
 #[derive(Deserialize, Debug, Clone)]
 pub struct ClusterConfig {
+    pub id: u64,
     /// Address to bind this node to
     #[serde(default = "default_linc_addr")]
     pub addr: SocketAddr,
-    /// List of peers in the format `<node_id>:<node_addr>`
+    /// List of peers in the format `<node_id>@<node_addr>`
     pub peers: Vec<Peer>,
 }
 
@@ -62,37 +63,40 @@ fn default_linc_addr() -> SocketAddr {
 }
 
 #[derive(Debug, Clone)]
-struct Peer {
-    id: u64,
-    addr: String,
+pub struct Peer {
+    pub id: u64,
+    pub addr: String,
 }
 
 impl<'de> Deserialize<'de> for Peer {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
-        D: serde::Deserializer<'de> {
-            struct V;
+        D: serde::Deserializer<'de>,
+    {
+        struct V;
 
-            impl Visitor<'_> for V {
-                type Value = Peer;
+        impl Visitor<'_> for V {
+            type Value = Peer;
 
-                fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
-                    formatter.write_str("a string in the format <node_id>:<node_addr>")
-                }
-
-                fn visit_str<E>(self, v: &str) -> Result<Self::Value, E>
-                where
-                    E: serde::de::Error, {
-
-                        let mut iter = v.split(":");
-                        let Some(id) = iter.next() else { return Err(E::custom("node id is missing")) };
-                        let Ok(id) = id.parse::<u64>() else { return Err(E::custom("failed to parse node id")) };
-                        let Some(addr) = iter.next() else { return Err(E::custom("node address is missing")) };
-                        Ok(Peer { id, addr: addr.to_string() })
-                }
+            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+                formatter.write_str("a string in the format <node_id>:<node_addr>")
             }
 
-            deserializer.deserialize_str(V)
+            fn visit_str<E>(self, v: &str) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                let mut iter = v.split("@");
+                let Some(id) = iter.next() else { return Err(E::custom("node id is missing")) };
+                let Ok(id) = id.parse::<u64>() else { return Err(E::custom("failed to parse node id")) };
+                let Some(addr) = iter.next() else { return Err(E::custom("node address is missing")) };
+                Ok(Peer {
+                    id,
+                    addr: addr.to_string(),
+                })
+            }
         }
-}
 
+        deserializer.deserialize_str(V)
+    }
+}

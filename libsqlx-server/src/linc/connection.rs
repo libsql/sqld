@@ -1,157 +1,37 @@
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use async_bincode::tokio::AsyncBincodeStream;
 use async_bincode::AsyncDestination;
-use color_eyre::eyre::{anyhow, bail};
+use color_eyre::eyre::bail;
 use futures::{SinkExt, StreamExt};
+use parking_lot::RwLock;
 use tokio::io::{AsyncRead, AsyncWrite};
-use tokio::sync::mpsc::error::TrySendError;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::mpsc;
 use tokio::time::{Duration, Instant};
-use tokio_util::sync::PollSender;
 
-use crate::linc::proto::{NodeError, NodeMessage};
+use crate::linc::proto::ProtoError;
 use crate::linc::CURRENT_PROTO_VERSION;
 
-use super::bus::{Bus, Registration};
-use super::proto::{Message, StreamId, StreamMessage};
-use super::{DatabaseId, NodeId};
-use super::{StreamIdAllocator, MAX_STREAM_MSG};
-
-#[derive(Debug, Clone)]
-pub struct ConnectionHandle {
-    connection_sender: mpsc::Sender<ConnectionMessage>,
-}
-
-impl ConnectionHandle {
-    pub async fn new_stream(&self, database_id: DatabaseId) -> color_eyre::eyre::Result<Stream> {
-        let (send, ret) = oneshot::channel();
-        self.connection_sender
-            .send(ConnectionMessage::StreamCreate {
-                database_id,
-                ret: send,
-            })
-            .await
-            .unwrap();
-
-        Ok(ret.await?)
-    }
-}
-
-/// A Bidirectional stream between databases on two nodes.
-#[derive(Debug)]
-pub struct Stream {
-    stream_id: StreamId,
-    /// sender to the connection
-    sender: tokio_util::sync::PollSender<ConnectionMessage>,
-    /// incoming message for this stream
-    recv: tokio_stream::wrappers::ReceiverStream<StreamMessage>,
-}
-
-impl futures::Sink<StreamMessage> for Stream {
-    type Error = tokio_util::sync::PollSendError<ConnectionMessage>;
-
-    fn poll_ready(
-        mut self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<Result<(), Self::Error>> {
-        self.sender.poll_ready_unpin(cx)
-    }
-
-    fn start_send(
-        mut self: std::pin::Pin<&mut Self>,
-        payload: StreamMessage,
-    ) -> Result<(), Self::Error> {
-        let stream_id = self.stream_id;
-        self.sender
-            .start_send_unpin(ConnectionMessage::Message(Message::Stream {
-                stream_id,
-                payload,
-            }))
-    }
-
-    fn poll_flush(
-        mut self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<Result<(), Self::Error>> {
-        self.sender.poll_flush_unpin(cx)
-    }
-
-    fn poll_close(
-        mut self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<Result<(), Self::Error>> {
-        self.sender.poll_close_unpin(cx)
-    }
-}
-
-impl futures::Stream for Stream {
-    type Item = StreamMessage;
-
-    fn poll_next(
-        mut self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<Option<Self::Item>> {
-        self.recv.poll_next_unpin(cx)
-    }
-}
-
-impl Drop for Stream {
-    fn drop(&mut self) {
-        self.recv.close();
-        assert!(self.recv.as_mut().try_recv().is_err());
-        let mut sender = self.sender.clone();
-        let id = self.stream_id;
-        if let Some(sender_ref) = sender.get_ref() {
-            // Try send here is mostly for turmoil, since it stops polling the future as soon as
-            // the test future returns which causes spawn to panic. In the tests, the channel will
-            // always have capacity.
-            if let Err(TrySendError::Full(m)) =
-                sender_ref.try_send(ConnectionMessage::CloseStream(id))
-            {
-                tokio::task::spawn(async move {
-                    let _ = sender.send(m).await;
-                });
-            }
-        }
-    }
-}
-
-struct StreamState {
-    sender: mpsc::Sender<StreamMessage>,
-}
+use super::bus::Bus;
+use super::handler::Handler;
+use super::proto::{Enveloppe, Message};
+use super::{Inbound, NodeId, Outbound};
 
 /// A connection to another node. Manage the connection state, and (de)register streams with the
 /// `Bus`
-pub struct Connection<S> {
+pub struct Connection<S, H> {
     /// Id of the current node
     pub peer: Option<NodeId>,
     /// State of the connection
     pub state: ConnectionState,
     /// Sink/Stream for network messages
-    conn: AsyncBincodeStream<S, Message, Message, AsyncDestination>,
-    /// Collection of streams for that connection
-    streams: HashMap<StreamId, StreamState>,
-    /// internal connection messages
-    connection_messages: mpsc::Receiver<ConnectionMessage>,
-    connection_messages_sender: mpsc::Sender<ConnectionMessage>,
+    conn: AsyncBincodeStream<S, Enveloppe, Enveloppe, AsyncDestination>,
     /// Are we the initiator of this connection?
     is_initiator: bool,
-    bus: Bus,
-    stream_id_allocator: StreamIdAllocator,
-    /// handle to the registration of this connection to the bus.
-    /// Dropping this deregister this connection from the bus
-    registration: Option<Registration>,
-}
-
-#[derive(Debug)]
-pub enum ConnectionMessage {
-    StreamCreate {
-        database_id: DatabaseId,
-        ret: oneshot::Sender<Stream>,
-    },
-    CloseStream(StreamId),
-    Message(Message),
+    /// send queue for this connection
+    send_queue: Option<mpsc::UnboundedReceiver<Enveloppe>>,
+    bus: Arc<Bus<H>>,
 }
 
 #[derive(Debug)]
@@ -170,49 +50,61 @@ pub fn handshake_deadline() -> Instant {
     Instant::now() + HANDSHAKE_TIMEOUT
 }
 
-impl<S> Connection<S>
+// TODO: limit send queue depth
+pub struct SendQueue {
+    senders: RwLock<HashMap<NodeId, mpsc::UnboundedSender<Enveloppe>>>,
+}
+
+impl SendQueue {
+    pub fn new() -> Self {
+        Self {
+            senders: Default::default(),
+        }
+    }
+
+    pub async fn enqueue(&self, msg: Outbound) {
+        let sender = match self.senders.read().get(&msg.to) {
+            Some(sender) => sender.clone(),
+            None => todo!("no queue"),
+        };
+
+        sender.send(msg.enveloppe).unwrap();
+    }
+
+    pub fn register(&self, node_id: NodeId) -> mpsc::UnboundedReceiver<Enveloppe> {
+        let (sender, receiver) = mpsc::unbounded_channel();
+        self.senders.write().insert(node_id, sender);
+
+        receiver
+    }
+}
+
+impl<S, H> Connection<S, H>
 where
     S: AsyncRead + AsyncWrite + Unpin,
+    H: Handler,
 {
     const MAX_CONNECTION_MESSAGES: usize = 128;
 
-    pub fn new_initiator(stream: S, bus: Bus) -> Self {
-        let (connection_messages_sender, connection_messages) =
-            mpsc::channel(Self::MAX_CONNECTION_MESSAGES);
+    pub fn new_initiator(stream: S, bus: Arc<Bus<H>>) -> Self {
         Self {
             peer: None,
             state: ConnectionState::Init,
             conn: AsyncBincodeStream::from(stream).for_async(),
-            streams: HashMap::new(),
             is_initiator: true,
+            send_queue: None,
             bus,
-            stream_id_allocator: StreamIdAllocator::new(true),
-            connection_messages,
-            connection_messages_sender,
-            registration: None,
         }
     }
 
-    pub fn new_acceptor(stream: S, bus: Bus) -> Self {
-        let (connection_messages_sender, connection_messages) =
-            mpsc::channel(Self::MAX_CONNECTION_MESSAGES);
+    pub fn new_acceptor(stream: S, bus: Arc<Bus<H>>) -> Self {
         Connection {
             peer: None,
             state: ConnectionState::Connecting,
-            streams: HashMap::new(),
-            connection_messages,
-            connection_messages_sender,
             is_initiator: false,
             bus,
+            send_queue: None,
             conn: AsyncBincodeStream::from(stream).for_async(),
-            stream_id_allocator: StreamIdAllocator::new(false),
-            registration: None,
-        }
-    }
-
-    pub fn handle(&self) -> ConnectionHandle {
-        ConnectionHandle {
-            connection_sender: self.connection_messages_sender.clone(),
         }
     }
 
@@ -262,133 +154,32 @@ where
                         self.state = ConnectionState::Close;
                     }
                 }
-            }
-            Some(command) = self.connection_messages.recv() => {
-                self.handle_command(command).await;
             },
+            // TODO: pop send queue
+            Some(m) = self.send_queue.as_mut().unwrap().recv() => {
+                self.conn.feed(m).await.unwrap();
+                // send as many as possible
+                while let Ok(m) = self.send_queue.as_mut().unwrap().try_recv() {
+                    self.conn.feed(m).await.unwrap();
+                }
+                self.conn.flush().await.unwrap();
+            }
             else => {
                 self.state = ConnectionState::Close;
             }
         }
     }
 
-    async fn handle_message(&mut self, message: Message) {
-        match message {
-            Message::Node(NodeMessage::OpenStream {
-                stream_id,
-                database_id,
-            }) => {
-                if self.streams.contains_key(&stream_id) {
-                    self.send_message(Message::Node(NodeMessage::Error(
-                        NodeError::StreamAlreadyExist(stream_id),
-                    )))
-                    .await;
-                    return;
-                }
-                let stream = self.create_stream(stream_id);
-                if let Err(e) = self.bus.notify_subscription(database_id, stream).await {
-                    tracing::error!("{e}");
-                    self.send_message(Message::Node(NodeMessage::Error(
-                        NodeError::UnknownDatabase(database_id, stream_id),
-                    )))
-                    .await;
-                }
-            }
-            Message::Node(NodeMessage::Handshake { .. }) => {
-                self.close_error(anyhow!("unexpected handshake: closing connection"));
-            }
-            Message::Node(NodeMessage::CloseStream { stream_id: id }) => {
-                self.close_stream(id);
-            }
-            Message::Node(NodeMessage::Error(e @ NodeError::HandshakeVersionMismatch { .. })) => {
-                self.close_error(anyhow!("unexpected peer error: {e}"));
-            }
-            Message::Node(NodeMessage::Error(NodeError::UnknownStream(id))) => {
-                tracing::error!("unkown stream: {id}");
-                self.close_stream(id);
-            }
-            Message::Node(NodeMessage::Error(e @ NodeError::StreamAlreadyExist(_))) => {
-                self.state = ConnectionState::CloseError(e.into());
-            }
-            Message::Node(NodeMessage::Error(ref e @ NodeError::UnknownDatabase(_, stream_id))) => {
-                tracing::error!("{e}");
-                self.close_stream(stream_id);
-            }
-            Message::Stream { stream_id, payload } => {
-                match self.streams.get_mut(&stream_id) {
-                    Some(s) => {
-                        // TODO: there is not stream-independant control-flow for now.
-                        // When/if control-flow is implemented, it will be handled here.
-                        if s.sender.send(payload).await.is_err() {
-                            self.close_stream(stream_id);
-                        }
-                    }
-                    None => {
-                        self.send_message(Message::Node(NodeMessage::Error(
-                            NodeError::UnknownStream(stream_id),
-                        )))
-                        .await;
-                    }
-                }
-            }
-        }
+    async fn handle_message(&mut self, enveloppe: Enveloppe) {
+        let incomming = Inbound {
+            from: self.peer.expect("peer id should be known at this point"),
+            enveloppe,
+        };
+        self.bus.incomming(incomming).await;
     }
 
     fn close_error(&mut self, error: color_eyre::eyre::Error) {
         self.state = ConnectionState::CloseError(error);
-    }
-
-    fn close_stream(&mut self, id: StreamId) {
-        self.streams.remove(&id);
-    }
-
-    async fn handle_command(&mut self, command: ConnectionMessage) {
-        match command {
-            ConnectionMessage::Message(m) => {
-                self.send_message(m).await;
-            }
-            ConnectionMessage::CloseStream(stream_id) => {
-                self.close_stream(stream_id);
-                self.send_message(Message::Node(NodeMessage::CloseStream { stream_id }))
-                    .await;
-            }
-            ConnectionMessage::StreamCreate { database_id, ret } => {
-                let Some(stream_id) = self.stream_id_allocator.allocate() else {
-                    // TODO: We close the connection here, which will cause a reconnections, and
-                    // reset the stream_id allocator. If that happens in practice, it should be very quick to
-                    // re-establish a connection. If this is an issue, we can either start using
-                    // i64 stream_ids, or use a smarter id allocator.
-                    self.state = ConnectionState::CloseError(anyhow!("Ran out of stream ids"));
-                    return
-                };
-                assert_eq!(stream_id.is_positive(), self.is_initiator);
-                assert!(!self.streams.contains_key(&stream_id));
-                let stream = self.create_stream(stream_id);
-                self.send_message(Message::Node(NodeMessage::OpenStream {
-                    stream_id,
-                    database_id,
-                }))
-                .await;
-                let _ = ret.send(stream);
-            }
-        }
-    }
-
-    async fn send_message(&mut self, message: Message) {
-        if let Err(e) = self.conn.send(message).await {
-            self.close_error(e.into());
-        }
-    }
-
-    fn create_stream(&mut self, stream_id: StreamId) -> Stream {
-        let (sender, recv) = mpsc::channel(MAX_STREAM_MSG);
-        let stream = Stream {
-            stream_id,
-            sender: PollSender::new(self.connection_messages_sender.clone()),
-            recv: recv.into(),
-        };
-        self.streams.insert(stream_id, StreamState { sender });
-        stream
     }
 
     /// wait for a handshake response from peer
@@ -399,41 +190,53 @@ where
         assert!(matches!(self.state, ConnectionState::Connecting));
 
         match tokio::time::timeout_at(deadline, self.conn.next()).await {
-            Ok(Some(Ok(Message::Node(NodeMessage::Handshake {
-                protocol_version,
-                node_id,
-            })))) => {
+            Ok(Some(Ok(Enveloppe {
+                message:
+                    Message::Handshake {
+                        protocol_version,
+                        node_id,
+                    },
+                ..
+            }))) => {
                 if protocol_version != CURRENT_PROTO_VERSION {
-                    let _ = self
-                        .conn
-                        .send(Message::Node(NodeMessage::Error(
-                            NodeError::HandshakeVersionMismatch {
-                                expected: CURRENT_PROTO_VERSION,
-                            },
-                        )))
-                        .await;
+                    let msg = Enveloppe {
+                        database_id: None,
+                        message: Message::Error(ProtoError::HandshakeVersionMismatch {
+                            expected: CURRENT_PROTO_VERSION,
+                        }),
+                    };
+
+                    let _ = self.conn.send(msg).await;
 
                     bail!("handshake error: invalid peer protocol version");
                 } else {
                     // when not initiating a connection, respond to handshake message with a
                     // handshake message
                     if !self.is_initiator {
-                        self.conn
-                            .send(Message::Node(NodeMessage::Handshake {
+                        let msg = Enveloppe {
+                            database_id: None,
+                            message: Message::Handshake {
                                 protocol_version: CURRENT_PROTO_VERSION,
-                                node_id: self.bus.node_id,
-                            }))
-                            .await?;
+                                node_id: self.bus.node_id(),
+                            },
+                        };
+                        self.conn.send(msg).await?;
                     }
+
+                    tracing::info!("Connected to peer {node_id}");
 
                     self.peer = Some(node_id);
                     self.state = ConnectionState::Connected;
-                    self.registration = Some(self.bus.register_connection(node_id, self.handle()));
+                    self.send_queue = Some(self.bus.send_queue().register(node_id));
+                    self.bus.connect(node_id);
 
                     Ok(())
                 }
             }
-            Ok(Some(Ok(Message::Node(NodeMessage::Error(e))))) => {
+            Ok(Some(Ok(Enveloppe {
+                message: Message::Error(e),
+                ..
+            }))) => {
                 bail!("handshake error: {e}");
             }
             Ok(Some(Ok(_))) => {
@@ -452,12 +255,15 @@ where
     }
 
     async fn initiate_connection(&mut self) -> color_eyre::Result<()> {
-        self.conn
-            .send(Message::Node(NodeMessage::Handshake {
+        let msg = Enveloppe {
+            database_id: None,
+            message: Message::Handshake {
                 protocol_version: CURRENT_PROTO_VERSION,
-                node_id: self.bus.node_id,
-            }))
-            .await?;
+                node_id: self.bus.node_id(),
+            },
+        };
+
+        self.conn.send(msg).await?;
 
         Ok(())
     }

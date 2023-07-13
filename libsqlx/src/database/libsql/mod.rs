@@ -4,8 +4,7 @@ use std::sync::Arc;
 use sqld_libsql_bindings::wal_hook::{TransparentMethods, WalHook, TRANSPARENT_METHODS};
 use sqld_libsql_bindings::WalMethodsHook;
 
-use crate::database::frame::Frame;
-use crate::database::{Database, InjectError, InjectableDatabase};
+use crate::database::{Database, InjectableDatabase};
 use crate::error::Error;
 use crate::result_builder::QueryBuilderConfig;
 
@@ -16,6 +15,7 @@ use replication_log::logger::{
 };
 
 use self::injector::InjectorCommitHandler;
+use self::replication_log::logger::FrameNotifierCb;
 
 pub use connection::LibsqlConnection;
 pub use replication_log::logger::{LogCompactor, LogFile};
@@ -68,18 +68,6 @@ pub trait LibsqlDbType {
     fn hook_context(&self) -> <Self::ConnectionHook as WalHook>::Context;
 }
 
-pub struct PlainType;
-
-impl LibsqlDbType for PlainType {
-    type ConnectionHook = TransparentMethods;
-
-    fn hook() -> &'static WalMethodsHook<Self::ConnectionHook> {
-        &TRANSPARENT_METHODS
-    }
-
-    fn hook_context(&self) -> <Self::ConnectionHook as WalHook>::Context {}
-}
-
 /// A generic wrapper around a libsql database.
 /// `LibsqlDatabase` can be specialized into either a `ReplicaType` or a `PrimaryType`.
 /// In `PrimaryType` mode, the LibsqlDatabase maintains a replication log that can be replicated to
@@ -125,23 +113,27 @@ impl LibsqlDatabase<ReplicaType> {
     }
 }
 
-impl LibsqlDatabase<PlainType> {
-    pub fn new_plain(db_path: PathBuf) -> crate::Result<Self> {
-        Ok(Self::new(db_path, PlainType))
-    }
-}
-
 impl LibsqlDatabase<PrimaryType> {
     pub fn new_primary(
         db_path: PathBuf,
         compactor: impl LogCompactor,
         // whether the log is dirty and might need repair
         dirty: bool,
+        new_frame_notifier: FrameNotifierCb,
     ) -> crate::Result<Self> {
         let ty = PrimaryType {
-            logger: Arc::new(ReplicationLogger::open(&db_path, dirty, compactor)?),
+            logger: Arc::new(ReplicationLogger::open(
+                &db_path,
+                dirty,
+                compactor,
+                new_frame_notifier,
+            )?),
         };
         Ok(Self::new(db_path, ty))
+    }
+
+    pub fn logger(&self) -> Arc<ReplicationLogger> {
+        self.ty.logger.clone()
     }
 }
 
@@ -174,7 +166,6 @@ impl<T: LibsqlDbType> Database for LibsqlDatabase<T> {
     type Connection = LibsqlConnection<<T::ConnectionHook as WalHook>::Context>;
 
     fn connect(&self) -> Result<Self::Connection, Error> {
-        dbg!();
         Ok(
             LibsqlConnection::<<T::ConnectionHook as WalHook>::Context>::new(
                 &self.db_path,
@@ -191,20 +182,13 @@ impl<T: LibsqlDbType> Database for LibsqlDatabase<T> {
 }
 
 impl InjectableDatabase for LibsqlDatabase<ReplicaType> {
-    fn injector(&mut self) -> crate::Result<Box<dyn super::Injector>> {
+    fn injector(&mut self) -> crate::Result<Box<dyn super::Injector + Send + 'static>> {
         let Some(commit_handler) = self.ty.commit_handler.take() else { panic!("there can be only one injector") };
         Ok(Box::new(Injector::new(
             &self.db_path,
             commit_handler,
             self.ty.injector_buffer_capacity,
         )?))
-    }
-}
-
-impl super::Injector for Injector {
-    fn inject(&mut self, frame: Frame) -> Result<(), InjectError> {
-        self.inject_frame(frame).unwrap();
-        Ok(())
     }
 }
 

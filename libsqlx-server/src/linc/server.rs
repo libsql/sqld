@@ -1,19 +1,22 @@
+use std::sync::Arc;
+
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::task::JoinSet;
 
 use crate::linc::connection::Connection;
 
 use super::bus::Bus;
+use super::handler::Handler;
 
-pub struct Server {
+pub struct Server<H> {
     /// reference to the bus
-    bus: Bus,
+    bus: Arc<Bus<H>>,
     /// Connection tasks owned by the server
     connections: JoinSet<color_eyre::Result<()>>,
 }
 
-impl Server {
-    pub fn new(bus: Bus) -> Self {
+impl<H: Handler> Server<H> {
+    pub fn new(bus: Arc<Bus<H>>) -> Self {
         Self {
             bus,
             connections: JoinSet::new(),
@@ -25,14 +28,16 @@ impl Server {
     pub async fn close_connections(&mut self) {
         self.connections.abort_all();
         while self.connections.join_next().await.is_some() {}
-        assert!(self.bus.is_empty());
     }
 
-    pub async fn run<L>(mut self, mut listener: L)
+    pub async fn run<L>(mut self, mut listener: L) -> color_eyre::Result<()>
     where
         L: super::net::Listener,
     {
+        tracing::info!("Cluster server listening on {}", listener.local_addr()?);
         while self.tick(&mut listener).await {}
+
+        Ok(())
     }
 
     pub async fn tick<L>(&mut self, listener: &mut L) -> bool
@@ -57,7 +62,7 @@ impl Server {
     {
         let bus = self.bus.clone();
         let fut = async move {
-            let connection = Connection::new_acceptor(stream, bus.clone());
+            let connection = Connection::new_acceptor(stream, bus);
             connection.run().await;
             Ok(())
         };
@@ -70,10 +75,7 @@ impl Server {
 mod test {
     use std::sync::Arc;
 
-    use crate::linc::{
-        proto::{ProxyMessage, StreamMessage},
-        DatabaseId, NodeId,
-    };
+    use crate::linc::{proto::ProxyMessage, AllocId, NodeId};
 
     use super::*;
 
@@ -125,7 +127,7 @@ mod test {
         let mut sim = turmoil::Builder::new().build();
 
         let host_node_id = NodeId::new_v4();
-        let stream_db_id = DatabaseId::new_v4();
+        let stream_db_id = AllocId::new_v4();
         let notify = Arc::new(Notify::new());
         let expected_msg = StreamMessage::Proxy(ProxyMessage::ProxyRequest {
             connection_id: 12,
@@ -195,7 +197,7 @@ mod test {
         let mut sim = turmoil::Builder::new().build();
 
         let host_node_id = NodeId::new_v4();
-        let database_id = DatabaseId::new_v4();
+        let database_id = AllocId::new_v4();
         let notify = Arc::new(Notify::new());
 
         sim.host("host", {
@@ -251,7 +253,7 @@ mod test {
         let host_node_id = NodeId::new_v4();
         let notify = Arc::new(Notify::new());
         let client_id = NodeId::new_v4();
-        let database_id = DatabaseId::new_v4();
+        let database_id = AllocId::new_v4();
         let expected_msg = StreamMessage::Proxy(ProxyMessage::ProxyRequest {
             connection_id: 12,
             req_id: 1,
@@ -309,7 +311,7 @@ mod test {
 
         let host_node_id = NodeId::new_v4();
         let client_id = NodeId::new_v4();
-        let database_id = DatabaseId::new_v4();
+        let database_id = AllocId::new_v4();
 
         sim.host("host", {
             move || async move {

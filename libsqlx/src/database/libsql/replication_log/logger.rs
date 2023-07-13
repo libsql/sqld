@@ -19,7 +19,6 @@ use sqld_libsql_bindings::ffi::types::{
 use sqld_libsql_bindings::ffi::PageHdrIter;
 use sqld_libsql_bindings::init_static_wal_method;
 use sqld_libsql_bindings::wal_hook::WalHook;
-use tokio::sync::watch;
 use uuid::Uuid;
 
 use crate::database::frame::{Frame, FrameHeader};
@@ -329,7 +328,7 @@ impl ReplicationLoggerHookCtx {
 
     fn commit(&self) -> anyhow::Result<()> {
         let new_frame_no = self.logger.commit()?;
-        let _ = self.logger.new_frame_notifier.send(new_frame_no);
+        let _ = (self.logger.new_frame_notifier)(new_frame_no);
         Ok(())
     }
 
@@ -442,6 +441,7 @@ impl LogFile {
     }
 
     pub fn commit(&mut self) -> crate::Result<()> {
+        dbg!(&self);
         self.header.frame_count += self.uncommitted_frame_count;
         self.uncommitted_frame_count = 0;
         self.commited_checksum = self.uncommitted_checksum;
@@ -551,6 +551,7 @@ impl LogFile {
     /// If the requested frame is before the first frame in the log, or after the last frame,
     /// Ok(None) is returned.
     pub fn frame(&self, frame_no: FrameNo) -> std::result::Result<Frame, LogReadError> {
+        dbg!(frame_no);
         if frame_no < self.header.start_frame_no {
             return Err(LogReadError::SnapshotRequired);
         }
@@ -696,8 +697,12 @@ pub struct LogFileHeader {
 }
 
 impl LogFileHeader {
-    pub fn last_frame_no(&self) -> FrameNo {
-        self.start_frame_no + self.frame_count
+    pub fn last_frame_no(&self) -> Option<FrameNo> {
+        if self.start_frame_no == 0 && self.frame_count == 0 {
+            None
+        } else {
+            Some(self.start_frame_no + self.frame_count - 1)
+        }
     }
 
     fn sqld_version(&self) -> Version {
@@ -748,6 +753,8 @@ impl LogCompactor for () {
     }
 }
 
+pub type FrameNotifierCb = Box<dyn Fn(FrameNo) + Send + Sync + 'static>;
+
 pub struct ReplicationLogger {
     pub generation: Generation,
     pub log_file: RwLock<LogFile>,
@@ -755,11 +762,16 @@ pub struct ReplicationLogger {
     db_path: PathBuf,
     /// a notifier channel other tasks can subscribe to, and get notified when new frames become
     /// available.
-    pub new_frame_notifier: watch::Sender<FrameNo>,
+    pub new_frame_notifier: FrameNotifierCb,
 }
 
 impl ReplicationLogger {
-    pub fn open(db_path: &Path, dirty: bool, compactor: impl LogCompactor) -> crate::Result<Self> {
+    pub fn open(
+        db_path: &Path,
+        dirty: bool,
+        compactor: impl LogCompactor,
+        new_frame_notifier: FrameNotifierCb,
+    ) -> crate::Result<Self> {
         let log_path = db_path.join("wallog");
         let data_path = db_path.join("data");
 
@@ -788,9 +800,14 @@ impl ReplicationLogger {
         };
 
         if should_recover {
-            Self::recover(log_file, data_path, compactor)
+            Self::recover(log_file, data_path, compactor, new_frame_notifier)
         } else {
-            Self::from_log_file(db_path.to_path_buf(), log_file, compactor)
+            Self::from_log_file(
+                db_path.to_path_buf(),
+                log_file,
+                compactor,
+                new_frame_notifier,
+            )
         }
     }
 
@@ -798,11 +815,10 @@ impl ReplicationLogger {
         db_path: PathBuf,
         log_file: LogFile,
         compactor: impl LogCompactor,
+        new_frame_notifier: FrameNotifierCb,
     ) -> crate::Result<Self> {
         let header = log_file.header();
         let generation_start_frame_no = header.start_frame_no + header.frame_count;
-
-        let (new_frame_notifier, _) = watch::channel(generation_start_frame_no);
 
         Ok(Self {
             generation: Generation::new(generation_start_frame_no),
@@ -817,6 +833,7 @@ impl ReplicationLogger {
         log_file: LogFile,
         mut data_path: PathBuf,
         compactor: impl LogCompactor,
+        new_frame_notifier: FrameNotifierCb,
     ) -> crate::Result<Self> {
         // It is necessary to checkpoint before we restore the replication log, since the WAL may
         // contain pages that are not in the database file.
@@ -849,7 +866,7 @@ impl ReplicationLogger {
 
         assert!(data_path.pop());
 
-        Self::from_log_file(data_path, log_file, compactor)
+        Self::from_log_file(data_path, log_file, compactor, new_frame_notifier)
     }
 
     pub fn database_id(&self) -> anyhow::Result<Uuid> {
@@ -860,6 +877,7 @@ impl ReplicationLogger {
     /// Returns the new frame count and checksum to commit
     fn write_pages(&self, pages: &[WalPage]) -> anyhow::Result<()> {
         let mut log_file = self.log_file.write();
+            dbg!();
         for page in pages.iter() {
             log_file.push_page(page)?;
         }
@@ -888,7 +906,7 @@ impl ReplicationLogger {
     fn commit(&self) -> anyhow::Result<FrameNo> {
         let mut log_file = self.log_file.write();
         log_file.commit()?;
-        Ok(log_file.header().last_frame_no())
+        Ok(log_file.header().last_frame_no().expect("there should be at least one frame after commit"))
     }
 
     pub fn get_snapshot_file(&self, from: FrameNo) -> anyhow::Result<Option<SnapshotFile>> {

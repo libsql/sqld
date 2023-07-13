@@ -46,11 +46,3 @@ pub enum Error {
     #[error(transparent)]
     LexerError(#[from] sqlite3_parser::lexer::sql::Error),
 }
-
-impl From<tokio::sync::oneshot::error::RecvError> for Error {
-    fn from(inner: tokio::sync::oneshot::error::RecvError) -> Self {
-        Self::Internal(format!(
-            "Failed to receive response via oneshot channel: {inner}"
-        ))
-    }
-}

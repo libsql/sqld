@@ -1,33 +1,47 @@
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use itertools::Itertools;
 use tokio::task::JoinSet;
 use tokio::time::Duration;
 
 use super::connection::Connection;
+use super::handler::Handler;
 use super::net::Connector;
 use super::{bus::Bus, NodeId};
 
 /// Manages a pool of connections to other peers, handling re-connection.
-struct ConnectionPool {
+pub struct ConnectionPool<H> {
     managed_peers: HashMap<NodeId, String>,
     connections: JoinSet<NodeId>,
-    bus: Bus,
+    bus: Arc<Bus<H>>,
 }
 
-impl ConnectionPool {
-    pub fn new(bus: Bus, managed_peers: impl IntoIterator<Item = (NodeId, String)>) -> Self {
+impl<H: Handler> ConnectionPool<H> {
+    pub fn new(
+        bus: Arc<Bus<H>>,
+        managed_peers: impl IntoIterator<Item = (NodeId, String)>,
+    ) -> Self {
         Self {
-            managed_peers: managed_peers.into_iter().collect(),
+            managed_peers: managed_peers
+                .into_iter()
+                .filter(|(id, _)| *id < bus.node_id())
+                .collect(),
             connections: JoinSet::new(),
             bus,
         }
     }
 
-    pub async fn run<C: Connector>(mut self) {
+    pub fn managed_count(&self) -> usize {
+        self.managed_peers.len()
+    }
+
+    pub async fn run<C: Connector>(mut self) -> color_eyre::Result<()> {
         self.init::<C>().await;
 
         while self.tick::<C>().await {}
+
+        Ok(())
     }
 
     pub async fn tick<C: Connector>(&mut self) -> bool {
@@ -76,14 +90,14 @@ mod test {
     use tokio::sync::Notify;
     use tokio_stream::StreamExt;
 
-    use crate::linc::{server::Server, DatabaseId};
+    use crate::linc::{server::Server, AllocId};
 
     use super::*;
 
     #[test]
     fn manage_connections() {
         let mut sim = turmoil::Builder::new().build();
-        let database_id = DatabaseId::new_v4();
+        let database_id = AllocId::new_v4();
         let notify = Arc::new(Notify::new());
 
         let expected_msg = crate::linc::proto::StreamMessage::Proxy(

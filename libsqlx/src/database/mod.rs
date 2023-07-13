@@ -1,6 +1,5 @@
 use std::time::Duration;
 
-use self::frame::Frame;
 use crate::connection::Connection;
 use crate::error::Error;
 
@@ -9,6 +8,8 @@ pub mod libsql;
 pub mod proxy;
 #[cfg(test)]
 mod test_utils;
+
+pub use frame::Frame;
 
 pub type FrameNo = u64;
 
@@ -24,10 +25,12 @@ pub trait Database {
 }
 
 pub trait InjectableDatabase {
-    fn injector(&mut self) -> crate::Result<Box<dyn Injector>>;
+    fn injector(&mut self) -> crate::Result<Box<dyn Injector + Send + 'static>>;
 }
 
 // Trait implemented by databases that support frame injection
 pub trait Injector {
-    fn inject(&mut self, frame: Frame) -> Result<(), InjectError>;
+    fn inject(&mut self, frame: Frame) -> Result<Option<FrameNo>, InjectError>;
+    /// clear internal buffer
+    fn clear(&mut self);
 }

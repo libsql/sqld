@@ -1,38 +1,40 @@
-use uuid::Uuid;
-
-use self::proto::StreamId;
+use self::proto::{Enveloppe, Message};
 
 pub mod bus;
 pub mod connection;
 pub mod connection_pool;
+pub mod handler;
 pub mod net;
 pub mod proto;
 pub mod server;
 
-type NodeId = Uuid;
-type DatabaseId = Uuid;
+pub type NodeId = u64;
 
 const CURRENT_PROTO_VERSION: u32 = 1;
 const MAX_STREAM_MSG: usize = 64;
 
 #[derive(Debug)]
-pub struct StreamIdAllocator {
-    direction: i32,
-    next_id: i32,
+pub struct Inbound {
+    /// Id of the node sending the message
+    pub from: NodeId,
+    /// payload
+    pub enveloppe: Enveloppe,
 }
 
-impl StreamIdAllocator {
-    fn new(positive: bool) -> Self {
-        let direction = if positive { 1 } else { -1 };
-        Self {
-            direction,
-            next_id: direction,
+impl Inbound {
+    pub fn respond(&self, message: Message) -> Outbound {
+        Outbound {
+            to: self.from,
+            enveloppe: Enveloppe {
+                database_id: None,
+                message,
+            },
         }
     }
+}
 
-    pub fn allocate(&mut self) -> Option<StreamId> {
-        let id = self.next_id;
-        self.next_id = id.checked_add(self.direction)?;
-        Some(StreamId::new(id))
-    }
+#[derive(Debug)]
+pub struct Outbound {
+    pub to: NodeId,
+    pub enveloppe: Enveloppe,
 }
