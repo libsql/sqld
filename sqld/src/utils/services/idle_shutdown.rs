@@ -14,27 +14,33 @@ pub struct IdleShutdownLayer {
 }
 
 impl IdleShutdownLayer {
-    pub fn new(idle_timeout: Duration, shutdown_notifier: mpsc::Sender<()>) -> Self {
+    pub fn new(
+        idle_timeout: Duration,
+        initial_idle_timeout: Option<Duration>,
+        shutdown_notifier: mpsc::Sender<()>,
+    ) -> Self {
         let (sender, mut receiver) = watch::channel(());
         let connected_replicas = Arc::new(AtomicUsize::new(0));
         let connected_replicas_clone = connected_replicas.clone();
+        let mut sleep_time = initial_idle_timeout.unwrap_or(idle_timeout);
         tokio::spawn(async move {
             loop {
                 // FIXME: if we measure that this is causing performance issues, we may want to
                 // implement some debouncing.
-                let timeout_res = timeout(idle_timeout, receiver.changed()).await;
+                let timeout_res = timeout(sleep_time, receiver.changed()).await;
                 if let Ok(Err(_)) = timeout_res {
                     break;
                 }
                 if timeout_res.is_err() && connected_replicas_clone.load(Ordering::SeqCst) == 0 {
                     tracing::info!(
-                        "Idle timeout, no new connection in {idle_timeout:.0?}. Shutting down.",
+                        "Idle timeout, no new connection in {sleep_time:.0?}. Shutting down.",
                     );
                     shutdown_notifier
                         .send(())
                         .await
                         .expect("failed to shutdown gracefully");
                 }
+                sleep_time = idle_timeout;
             }
 
             tracing::debug!("idle shutdown loop exited");
