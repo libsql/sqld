@@ -22,22 +22,18 @@ impl IdleShutdownLayer {
             loop {
                 // FIXME: if we measure that this is causing performance issues, we may want to
                 // implement some debouncing.
-                let timeout_fut = timeout(idle_timeout, receiver.changed());
-                match timeout_fut.await {
-                    Ok(Ok(_)) => continue,
-                    Ok(Err(_)) => break,
-                    Err(_) => {
-                        if connected_replicas_clone.load(Ordering::SeqCst) > 0 {
-                            continue;
-                        }
-                        tracing::info!(
-                            "Idle timeout, no new connection in {idle_timeout:.0?}. Shutting down.",
-                        );
-                        shutdown_notifier
-                            .send(())
-                            .await
-                            .expect("failed to shutdown gracefully");
-                    }
+                let timeout_res = timeout(idle_timeout, receiver.changed()).await;
+                if let Ok(Err(_)) = timeout_res {
+                    break;
+                }
+                if timeout_res.is_err() && connected_replicas_clone.load(Ordering::SeqCst) == 0 {
+                    tracing::info!(
+                        "Idle timeout, no new connection in {idle_timeout:.0?}. Shutting down.",
+                    );
+                    shutdown_notifier
+                        .send(())
+                        .await
+                        .expect("failed to shutdown gracefully");
                 }
             }
 
