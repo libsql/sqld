@@ -130,12 +130,16 @@ pub trait ResultBuilder {
         Ok(())
     }
     /// finish the builder, and pass the transaction state.
-    fn finish(
-        &mut self,
+    /// If false is returned, and is_txn is true, then the transaction is rolledback.
+    fn finnalize(
+        self,
         _is_txn: bool,
         _frame_no: Option<FrameNo>,
-    ) -> Result<(), QueryResultBuilderError> {
-        Ok(())
+    ) -> Result<bool, QueryResultBuilderError>
+    where
+        Self: Sized,
+    {
+        Ok(true)
     }
 }
 
@@ -163,22 +167,40 @@ pub enum StepResult {
 }
 
 /// A `QueryResultBuilder` that ignores rows, but records the outcome of each step in a `StepResult`
-#[derive(Debug, Default)]
-pub struct StepResultsBuilder {
+pub struct StepResultsBuilder<R> {
     current: Option<crate::error::Error>,
     step_results: Vec<StepResult>,
     is_skipped: bool,
+    ret: R
 }
 
-impl StepResultsBuilder {
-    pub fn into_ret(self) -> Vec<StepResult> {
-        self.step_results
+pub trait RetChannel<T> {
+    fn send(self, t: T);
+}
+
+#[cfg(feature = "tokio")]
+impl<T> RetChannel<T> for tokio::sync::oneshot::Sender<T> {
+    fn send(self, t: T) {
+        let _ = self.send(t);
     }
 }
 
-impl ResultBuilder for StepResultsBuilder {
+impl<R> StepResultsBuilder<R> {
+    pub fn new(ret: R) -> Self {
+        Self {
+            current: None,
+            step_results: Vec::new(),
+            is_skipped: false,
+            ret,
+        }
+    }
+}
+
+impl<R: RetChannel<Vec<StepResult>>> ResultBuilder for StepResultsBuilder<R> {
     fn init(&mut self, _config: &QueryBuilderConfig) -> Result<(), QueryResultBuilderError> {
-        *self = Default::default();
+        self.current = None;
+        self.step_results.clear();
+        self.is_skipped = false;
         Ok(())
     }
 
@@ -218,32 +240,13 @@ impl ResultBuilder for StepResultsBuilder {
         Ok(())
     }
 
-    fn begin_rows(&mut self) -> Result<(), QueryResultBuilderError> {
-        Ok(())
-    }
-
-    fn begin_row(&mut self) -> Result<(), QueryResultBuilderError> {
-        Ok(())
-    }
-
-    fn add_row_value(&mut self, _v: ValueRef) -> Result<(), QueryResultBuilderError> {
-        Ok(())
-    }
-
-    fn finish_row(&mut self) -> Result<(), QueryResultBuilderError> {
-        Ok(())
-    }
-
-    fn finish_rows(&mut self) -> Result<(), QueryResultBuilderError> {
-        Ok(())
-    }
-
-    fn finish(
-        &mut self,
+    fn finnalize(
+        self,
         _is_txn: bool,
         _frame_no: Option<FrameNo>,
-    ) -> Result<(), QueryResultBuilderError> {
-        Ok(())
+    ) -> Result<bool, QueryResultBuilderError> {
+        self.ret.send(self.step_results);
+        Ok(true)
     }
 }
 
@@ -349,12 +352,12 @@ impl<B: ResultBuilder> ResultBuilder for Take<B> {
         }
     }
 
-    fn finish(
-        &mut self,
+    fn finnalize(
+        self,
         is_txn: bool,
         frame_no: Option<FrameNo>,
-    ) -> Result<(), QueryResultBuilderError> {
-        self.inner.finish(is_txn, frame_no)
+    ) -> Result<bool, QueryResultBuilderError> {
+        self.inner.finnalize(is_txn, frame_no)
     }
 }
 
@@ -500,7 +503,7 @@ pub mod test {
                 FinishRow => b.finish_row().unwrap(),
                 FinishRows => b.finish_rows().unwrap(),
                 Finish => {
-                    b.finish(false, None).unwrap();
+                    b.finnalize(false, None).unwrap();
                     break;
                 }
                 BuilderError => return b,
@@ -643,7 +646,7 @@ pub mod test {
             self.transition(FinishRows)
         }
 
-        fn finish(
+        fn finnalize(
             &mut self,
             _is_txn: bool,
             _frame_no: Option<FrameNo>,
@@ -700,7 +703,7 @@ pub mod test {
         builder.finish_rows().unwrap();
         builder.finish_step(0, None).unwrap();
 
-        builder.finish(false, None).unwrap();
+        builder.finnalize(false, None).unwrap();
     }
 
     #[test]

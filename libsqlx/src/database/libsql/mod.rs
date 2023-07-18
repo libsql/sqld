@@ -163,21 +163,19 @@ impl<T> LibsqlDatabase<T> {
 }
 
 impl<T: LibsqlDbType> Database for LibsqlDatabase<T> {
-    type Connection = LibsqlConnection<<T::ConnectionHook as WalHook>::Context>;
+    type Connection = LibsqlConnection<T>;
 
     fn connect(&self) -> Result<Self::Connection, Error> {
-        Ok(
-            LibsqlConnection::<<T::ConnectionHook as WalHook>::Context>::new(
-                &self.db_path,
-                self.extensions.clone(),
-                T::hook(),
-                self.ty.hook_context(),
-                self.row_stats_callback.clone(),
-                QueryBuilderConfig {
-                    max_size: Some(self.response_size_limit),
-                },
-            )?,
-        )
+        Ok(LibsqlConnection::<T>::new(
+            &self.db_path,
+            self.extensions.clone(),
+            T::hook(),
+            self.ty.hook_context(),
+            self.row_stats_callback.clone(),
+            QueryBuilderConfig {
+                max_size: Some(self.response_size_limit),
+            },
+        )?)
     }
 }
 

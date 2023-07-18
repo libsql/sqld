@@ -14,11 +14,12 @@ bincode = "1.3.3"
 bytes = { version =  "1.4.0", features = ["serde"] }
 clap = { version = "4.3.11", features = ["derive"] }
 color-eyre = "0.6.2"
+either = "1.8.1"
 futures = "0.3.28"
 hmac = "0.12.1"
 hyper = { version = "0.14.27", features = ["h2", "server"] }
 itertools = "0.11.0"
-libsqlx = { version = "0.1.0", path = "../libsqlx" }
+libsqlx = { version = "0.1.0", path = "../libsqlx", features = ["tokio"] }
 moka = { version = "0.11.2", features = ["future"] }
 parking_lot = "0.12.1"
 priority-queue = "1.3.2"

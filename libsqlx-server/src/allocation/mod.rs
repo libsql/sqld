@@ -1,12 +1,14 @@
-use std::collections::HashMap;
 use std::collections::hash_map::Entry;
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
+use either::Either;
 use libsqlx::libsql::{LibsqlDatabase, LogCompactor, LogFile, PrimaryType, ReplicaType};
-use libsqlx::proxy::WriteProxyDatabase;
+use libsqlx::proxy::{WriteProxyConnection, WriteProxyDatabase};
+use libsqlx::result_builder::ResultBuilder;
 use libsqlx::{
     Database as _, DescribeResponse, Frame, FrameNo, InjectableDatabase, Injector, LogReadError,
     ReplicationLogger,
@@ -27,7 +29,11 @@ use self::config::{AllocConfig, DbConfig};
 
 pub mod config;
 
-type ExecFn = Box<dyn FnOnce(&mut dyn libsqlx::Connection) + Send>;
+type LibsqlConnection = Either<
+    libsqlx::libsql::LibsqlConnection<PrimaryType>,
+    WriteProxyConnection<libsqlx::libsql::LibsqlConnection<ReplicaType>, DummyConn>,
+>;
+type ExecFn = Box<dyn FnOnce(&mut LibsqlConnection) + Send>;
 
 #[derive(Clone)]
 pub struct ConnectionId {
@@ -47,10 +53,10 @@ pub struct DummyDb;
 pub struct DummyConn;
 
 impl libsqlx::Connection for DummyConn {
-    fn execute_program(
+    fn execute_program<B: ResultBuilder>(
         &mut self,
-        _pgm: libsqlx::program::Program,
-        _result_builder: &mut dyn libsqlx::result_builder::ResultBuilder,
+        _pgm: &libsqlx::program::Program,
+        _result_builder: B,
     ) -> libsqlx::Result<()> {
         todo!()
     }
@@ -207,7 +213,12 @@ impl FrameStreamer {
                     if !self.buffer.is_empty() {
                         self.send_frames().await;
                     }
-                    if self.notifier.wait_for(|fno| dbg!(*fno) >= self.next_frame_no).await.is_err() {
+                    if self
+                        .notifier
+                        .wait_for(|fno| *fno >= self.next_frame_no)
+                        .await
+                        .is_err()
+                    {
                         break;
                     }
                 }
@@ -244,7 +255,9 @@ impl Database {
                     path,
                     Compactor,
                     false,
-                    Box::new(move |fno| { let _ = sender.send(fno); } ),
+                    Box::new(move |fno| {
+                        let _ = sender.send(fno);
+                    }),
                 )
                 .unwrap();
 
@@ -253,7 +266,7 @@ impl Database {
                     replica_streams: HashMap::new(),
                     frame_notifier: receiver,
                 }
-            },
+            }
             DbConfig::Replica { primary_node_id } => {
                 let rdb = LibsqlDatabase::new_replica(path, MAX_INJECTOR_BUFFER_CAP, ()).unwrap();
                 let wdb = DummyDb;
@@ -285,10 +298,10 @@ impl Database {
         }
     }
 
-    fn connect(&self) -> Box<dyn libsqlx::Connection + Send> {
+    fn connect(&self) -> LibsqlConnection {
         match self {
-            Database::Primary { db, .. } => Box::new(db.connect().unwrap()),
-            Database::Replica { db, .. } => Box::new(db.connect().unwrap()),
+            Database::Primary { db, .. } => Either::Left(db.connect().unwrap()),
+            Database::Replica { db, .. } => Either::Right(db.connect().unwrap()),
         }
     }
 }
@@ -315,11 +328,11 @@ pub struct ConnectionHandle {
 impl ConnectionHandle {
     pub async fn exec<F, R>(&self, f: F) -> crate::Result<R>
     where
-        F: for<'a> FnOnce(&'a mut (dyn libsqlx::Connection + 'a)) -> R + Send + 'static,
+        F: for<'a> FnOnce(&'a mut LibsqlConnection) -> R + Send + 'static,
         R: Send + 'static,
     {
         let (sender, ret) = oneshot::channel();
-        let cb = move |conn: &mut dyn libsqlx::Connection| {
+        let cb = move |conn: &mut LibsqlConnection| {
             let res = f(conn);
             let _ = sender.send(res);
         };
@@ -371,9 +384,15 @@ impl Allocation {
             Message::Handshake { .. } => unreachable!("handshake should have been caught earlier"),
             Message::ReplicationHandshake { .. } => todo!(),
             Message::ReplicationHandshakeResponse { .. } => todo!(),
-            Message::Replicate { req_no, next_frame_no } => match &mut self.database {
-                Database::Primary { db, replica_streams, frame_notifier } => {
-                    dbg!(next_frame_no);
+            Message::Replicate {
+                req_no,
+                next_frame_no,
+            } => match &mut self.database {
+                Database::Primary {
+                    db,
+                    replica_streams,
+                    frame_notifier,
+                } => {
                     let streamer = FrameStreamer {
                         logger: db.logger(),
                         database_id: DatabaseId::from_name(&self.db_name),
@@ -396,15 +415,15 @@ impl Allocation {
                                 *old_req_no = req_no;
                                 old_handle.abort();
                             }
-                        },
+                        }
                         Entry::Vacant(e) => {
                             let handle = tokio::spawn(streamer.run());
                             // For some reason, not yielding causes the task not to be spawned
                             tokio::task::yield_now().await;
                             e.insert((req_no, handle));
-                        },
+                        }
                     }
-                },
+                }
                 Database::Replica { .. } => todo!("not a primary!"),
             },
             Message::Frames(frames) => match &mut self.database {
@@ -459,7 +478,7 @@ impl Allocation {
 
 struct Connection {
     id: u32,
-    conn: Box<dyn libsqlx::Connection + Send>,
+    conn: LibsqlConnection,
     exit: oneshot::Receiver<()>,
     exec: mpsc::Receiver<ExecFn>,
 }
@@ -470,7 +489,7 @@ impl Connection {
             tokio::select! {
                 _ = &mut self.exit => break,
                 Some(exec) = self.exec.recv() => {
-                    tokio::task::block_in_place(|| exec(&mut *self.conn));
+                    tokio::task::block_in_place(|| exec(&mut self.conn));
                 }
             }
         }

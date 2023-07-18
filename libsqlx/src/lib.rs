@@ -18,4 +18,6 @@ pub use database::proxy;
 pub use database::Frame;
 pub use database::{Database, InjectableDatabase, Injector};
 
+pub use sqld_libsql_bindings::wal_hook::WalHook;
+
 pub use rusqlite;

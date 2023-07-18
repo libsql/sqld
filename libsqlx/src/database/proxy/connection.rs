@@ -1,7 +1,7 @@
 use crate::connection::{Connection, DescribeResponse};
 use crate::database::FrameNo;
 use crate::program::Program;
-use crate::result_builder::{QueryBuilderConfig, ResultBuilder};
+use crate::result_builder::{Column, QueryBuilderConfig, QueryResultBuilderError, ResultBuilder};
 use crate::Result;
 
 use super::WaitFrameNoCb;
@@ -18,7 +18,92 @@ pub struct WriteProxyConnection<ReadDb, WriteDb> {
     pub(crate) read_db: ReadDb,
     pub(crate) write_db: WriteDb,
     pub(crate) wait_frame_no_cb: WaitFrameNoCb,
-    pub(crate) state: parking_lot::Mutex<ConnState>,
+    pub(crate) state: ConnState,
+}
+
+struct MaybeRemoteExecBuilder<'a, 'b, B, W> {
+    builder: B,
+    conn: &'a mut W,
+    pgm: &'b Program,
+    state: &'a mut ConnState,
+}
+
+impl<'a, 'b, B, W> ResultBuilder for MaybeRemoteExecBuilder<'a, 'b, B, W>
+where
+    W: Connection,
+    B: ResultBuilder,
+{
+    fn init(&mut self, config: &QueryBuilderConfig) -> Result<(), QueryResultBuilderError> {
+        self.builder.init(config)
+    }
+
+    fn begin_step(&mut self) -> Result<(), QueryResultBuilderError> {
+        self.builder.begin_step()
+    }
+
+    fn finish_step(
+        &mut self,
+        affected_row_count: u64,
+        last_insert_rowid: Option<i64>,
+    ) -> Result<(), QueryResultBuilderError> {
+        self.builder
+            .finish_step(affected_row_count, last_insert_rowid)
+    }
+
+    fn step_error(&mut self, error: crate::error::Error) -> Result<(), QueryResultBuilderError> {
+        self.builder.step_error(error)
+    }
+
+    fn cols_description(
+        &mut self,
+        cols: &mut dyn Iterator<Item = Column>,
+    ) -> Result<(), QueryResultBuilderError> {
+        self.builder.cols_description(cols)
+    }
+
+    fn begin_rows(&mut self) -> Result<(), QueryResultBuilderError> {
+        self.builder.begin_rows()
+    }
+
+    fn begin_row(&mut self) -> Result<(), QueryResultBuilderError> {
+        self.builder.begin_row()
+    }
+
+    fn add_row_value(
+        &mut self,
+        v: rusqlite::types::ValueRef,
+    ) -> Result<(), QueryResultBuilderError> {
+        self.builder.add_row_value(v)
+    }
+
+    fn finish_row(&mut self) -> Result<(), QueryResultBuilderError> {
+        self.builder.finish_row()
+    }
+
+    fn finish_rows(&mut self) -> Result<(), QueryResultBuilderError> {
+        self.builder.finish_rows()
+    }
+
+    fn finnalize(
+        self,
+        is_txn: bool,
+        frame_no: Option<FrameNo>,
+    ) -> Result<bool, QueryResultBuilderError> {
+        if is_txn {
+            // a read only connection is not allowed to leave an open transaction. We mispredicted the
+            // final state of the connection, so we rollback, and execute again on the write proxy.
+            let builder = ExtractFrameNoBuilder {
+                builder: self.builder,
+                state: self.state,
+            };
+
+            self.conn.execute_program(self.pgm, builder).unwrap();
+
+            Ok(false)
+        } else {
+            self.builder.finnalize(is_txn, frame_no)
+        }
+    }
 }
 
 impl<ReadDb, WriteDb> Connection for WriteProxyConnection<ReadDb, WriteDb>
@@ -26,137 +111,111 @@ where
     ReadDb: Connection,
     WriteDb: Connection,
 {
-    fn execute_program(&mut self, pgm: Program, builder: &mut dyn ResultBuilder) -> Result<()> {
-        let mut state = self.state.lock();
-        let mut builder = ExtractFrameNoBuilder::new(builder);
-        if !state.is_txn && pgm.is_read_only() {
-            if let Some(frame_no) = state.last_frame_no {
+    fn execute_program<B: ResultBuilder>(
+        &mut self,
+        pgm: &Program,
+        builder: B,
+    ) -> crate::Result<()> {
+        if !self.state.is_txn && pgm.is_read_only() {
+            if let Some(frame_no) = self.state.last_frame_no {
                 (self.wait_frame_no_cb)(frame_no);
             }
+
+            let builder = MaybeRemoteExecBuilder {
+                builder,
+                conn: &mut self.write_db,
+                state: &mut self.state,
+                pgm,
+            };
             // We know that this program won't perform any writes. We attempt to run it on the
             // replica. If it leaves an open transaction, then this program is an interactive
             // transaction, so we rollback the replica, and execute again on the primary.
-            self.read_db.execute_program(pgm.clone(), &mut builder)?;
-
-            // still in transaction state after running a read-only txn
-            if builder.is_txn {
-                // TODO: rollback
-                // self.read_db.rollback().await?;
-                self.write_db.execute_program(pgm, &mut builder)?;
-                state.is_txn = builder.is_txn;
-                state.last_frame_no = builder.frame_no;
-                Ok(())
-            } else {
-                Ok(())
-            }
+            self.read_db.execute_program(pgm, builder)?;
+            // rollback(&mut self.conn.read_db);
+            Ok(())
         } else {
-            self.write_db.execute_program(pgm, &mut builder)?;
-            state.is_txn = builder.is_txn;
-            state.last_frame_no = builder.frame_no;
+            let builder = ExtractFrameNoBuilder {
+                builder,
+                state: &mut self.state,
+            };
+            self.write_db.execute_program(pgm, builder)?;
             Ok(())
         }
     }
 
-    fn describe(&self, sql: String) -> Result<DescribeResponse> {
-        if let Some(frame_no) = self.state.lock().last_frame_no {
+    fn describe(&self, sql: String) -> crate::Result<DescribeResponse> {
+        if let Some(frame_no) = self.state.last_frame_no {
             (self.wait_frame_no_cb)(frame_no);
         }
         self.read_db.describe(sql)
     }
 }
 
-struct ExtractFrameNoBuilder<'a> {
-    inner: &'a mut dyn ResultBuilder,
-    frame_no: Option<FrameNo>,
-    is_txn: bool,
+struct ExtractFrameNoBuilder<'a, B> {
+    builder: B,
+    state: &'a mut ConnState,
 }
 
-impl<'a> ExtractFrameNoBuilder<'a> {
-    fn new(inner: &'a mut dyn ResultBuilder) -> Self {
-        Self {
-            inner,
-            frame_no: None,
-            is_txn: false,
-        }
-    }
-}
-
-impl<'a> ResultBuilder for ExtractFrameNoBuilder<'a> {
-    fn init(
-        &mut self,
-        config: &QueryBuilderConfig,
-    ) -> std::result::Result<(), crate::result_builder::QueryResultBuilderError> {
-        self.inner.init(config)
+impl<B: ResultBuilder> ResultBuilder for ExtractFrameNoBuilder<'_, B> {
+    fn init(&mut self, config: &QueryBuilderConfig) -> Result<(), QueryResultBuilderError> {
+        self.builder.init(config)
     }
 
-    fn begin_step(
-        &mut self,
-    ) -> std::result::Result<(), crate::result_builder::QueryResultBuilderError> {
-        self.inner.begin_step()
+    fn begin_step(&mut self) -> Result<(), QueryResultBuilderError> {
+        self.builder.begin_step()
     }
 
     fn finish_step(
         &mut self,
         affected_row_count: u64,
         last_insert_rowid: Option<i64>,
-    ) -> std::result::Result<(), crate::result_builder::QueryResultBuilderError> {
-        self.inner
+    ) -> Result<(), QueryResultBuilderError> {
+        self.builder
             .finish_step(affected_row_count, last_insert_rowid)
     }
 
-    fn step_error(
-        &mut self,
-        error: crate::error::Error,
-    ) -> std::result::Result<(), crate::result_builder::QueryResultBuilderError> {
-        self.inner.step_error(error)
+    fn step_error(&mut self, error: crate::error::Error) -> Result<(), QueryResultBuilderError> {
+        self.builder.step_error(error)
     }
 
     fn cols_description(
         &mut self,
-        cols: &mut dyn Iterator<Item = crate::result_builder::Column>,
-    ) -> std::result::Result<(), crate::result_builder::QueryResultBuilderError> {
-        self.inner.cols_description(cols)
+        cols: &mut dyn Iterator<Item = Column>,
+    ) -> Result<(), QueryResultBuilderError> {
+        self.builder.cols_description(cols)
     }
 
-    fn begin_rows(
-        &mut self,
-    ) -> std::result::Result<(), crate::result_builder::QueryResultBuilderError> {
-        self.inner.begin_rows()
+    fn begin_rows(&mut self) -> Result<(), QueryResultBuilderError> {
+        self.builder.begin_rows()
     }
 
-    fn begin_row(
-        &mut self,
-    ) -> std::result::Result<(), crate::result_builder::QueryResultBuilderError> {
-        self.inner.begin_row()
+    fn begin_row(&mut self) -> Result<(), QueryResultBuilderError> {
+        self.builder.begin_row()
     }
 
     fn add_row_value(
         &mut self,
         v: rusqlite::types::ValueRef,
-    ) -> std::result::Result<(), crate::result_builder::QueryResultBuilderError> {
-        self.inner.add_row_value(v)
+    ) -> Result<(), QueryResultBuilderError> {
+        self.builder.add_row_value(v)
     }
 
-    fn finish_row(
-        &mut self,
-    ) -> std::result::Result<(), crate::result_builder::QueryResultBuilderError> {
-        self.inner.finish_row()
+    fn finish_row(&mut self) -> Result<(), QueryResultBuilderError> {
+        self.builder.finish_row()
     }
 
-    fn finish_rows(
-        &mut self,
-    ) -> std::result::Result<(), crate::result_builder::QueryResultBuilderError> {
-        self.inner.finish_rows()
+    fn finish_rows(&mut self) -> Result<(), QueryResultBuilderError> {
+        self.builder.finish_rows()
     }
 
-    fn finish(
-        &mut self,
+    fn finnalize(
+        self,
         is_txn: bool,
         frame_no: Option<FrameNo>,
-    ) -> std::result::Result<(), crate::result_builder::QueryResultBuilderError> {
-        self.frame_no = frame_no;
-        self.is_txn = is_txn;
-        self.inner.finish(is_txn, frame_no)
+    ) -> Result<bool, QueryResultBuilderError> {
+        self.state.last_frame_no = frame_no;
+        self.state.is_txn = is_txn;
+        self.builder.finnalize(is_txn, frame_no)
     }
 }
 
@@ -177,7 +236,7 @@ mod test {
         let write_db = MockDatabase::new().with_execute({
             let write_called = write_called.clone();
             move |_, b| {
-                b.finish(false, Some(42)).unwrap();
+                b.finnalize(false, Some(42)).unwrap();
                 write_called.set(true);
                 Ok(())
             }

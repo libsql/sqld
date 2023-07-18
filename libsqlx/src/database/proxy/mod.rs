@@ -5,6 +5,7 @@ use super::FrameNo;
 mod connection;
 mod database;
 
+pub use connection::WriteProxyConnection;
 pub use database::WriteProxyDatabase;
 
 // Waits until passed frameno has been replicated back to the database

@@ -3,13 +3,79 @@ use std::io;
 
 use bytes::Bytes;
 use libsqlx::{result_builder::*, FrameNo};
+use tokio::sync::oneshot;
 
 use crate::hrana::stmt::{proto_error_from_stmt_error, stmt_error_from_sqld_error};
 
 use super::proto;
 
-#[derive(Debug, Default)]
 pub struct SingleStatementBuilder {
+    builder: StatementBuilder,
+    ret: oneshot::Sender<Result<proto::StmtResult, libsqlx::error::Error>>,
+}
+
+impl SingleStatementBuilder {
+    pub fn new() -> (Self, oneshot::Receiver<Result<proto::StmtResult, libsqlx::error::Error>>) {
+        let (ret, rcv) = oneshot::channel();
+        (Self {
+            builder: StatementBuilder::default(),
+            ret,
+        }, rcv)
+    }
+}
+
+impl ResultBuilder for SingleStatementBuilder {
+    fn init(&mut self, config: &QueryBuilderConfig) -> Result<(), QueryResultBuilderError> {
+        self.builder.init(config)
+    }
+
+    fn begin_step(&mut self) -> Result<(), QueryResultBuilderError> {
+        self.builder.begin_step()
+    }
+
+    fn finish_step(
+        &mut self,
+        affected_row_count: u64,
+        last_insert_rowid: Option<i64>,
+    ) -> Result<(), QueryResultBuilderError> {
+        self.builder.finish_step(affected_row_count, last_insert_rowid)
+    }
+
+    fn step_error(&mut self, error: libsqlx::error::Error) -> Result<(), QueryResultBuilderError> {
+        self.builder.step_error(error)
+    }
+
+    fn cols_description(
+        &mut self,
+        cols: &mut dyn Iterator<Item = Column>,
+    ) -> Result<(), QueryResultBuilderError> {
+        self.builder.cols_description(cols)
+    }
+
+    fn begin_row(&mut self) -> Result<(), QueryResultBuilderError> {
+        self.builder.begin_row()
+    }
+
+    fn add_row_value(&mut self, v: ValueRef) -> Result<(), QueryResultBuilderError> {
+        self.builder.add_row_value(v)
+    }
+
+    fn finnalize(
+        self,
+        _is_txn: bool,
+        _frame_no: Option<FrameNo>,
+    ) -> Result<bool, QueryResultBuilderError>
+        where Self: Sized
+    {
+        let res = self.builder.into_ret();
+        let _ = self.ret.send(res);
+        Ok(true)
+    }
+}
+
+
+#[derive(Debug, Default)]
+struct StatementBuilder {
     has_step: bool,
     cols: Vec<proto::Col>,
     rows: Vec<Vec<proto::Value>>,
@@ -20,59 +86,7 @@ pub struct SingleStatementBuilder {
     max_response_size: u64,
 }
 
-impl SingleStatementBuilder {
-    pub fn into_ret(self) -> Result<proto::StmtResult, libsqlx::error::Error> {
-        match self.err {
-            Some(err) => Err(err),
-            None => Ok(proto::StmtResult {
-                cols: self.cols,
-                rows: self.rows,
-                affected_row_count: self.affected_row_count,
-                last_insert_rowid: self.last_insert_rowid,
-            }),
-        }
-    }
-}
-
-struct SizeFormatter(u64);
-
-impl io::Write for SizeFormatter {
-    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        self.0 += buf.len() as u64;
-        Ok(buf.len())
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        Ok(())
-    }
-}
-
-impl fmt::Write for SizeFormatter {
-    fn write_str(&mut self, s: &str) -> fmt::Result {
-        self.0 += s.len() as u64;
-        Ok(())
-    }
-}
-
-fn value_json_size(v: &ValueRef) -> u64 {
-    let mut f = SizeFormatter(0);
-    match v {
-        ValueRef::Null => write!(&mut f, r#"{{"type":"null"}}"#).unwrap(),
-        ValueRef::Integer(i) => write!(&mut f, r#"{{"type":"integer", "value": "{i}"}}"#).unwrap(),
-        ValueRef::Real(x) => write!(&mut f, r#"{{"type":"integer","value": {x}"}}"#).unwrap(),
-        ValueRef::Text(s) => {
-            // error will be caught later.
-            if let Ok(s) = std::str::from_utf8(s) {
-                write!(&mut f, r#"{{"type":"text","value":"{s}"}}"#).unwrap()
-            }
-        }
-        ValueRef::Blob(b) => return b.len() as u64,
-    }
-
-    f.0
-}
-
-impl ResultBuilder for SingleStatementBuilder {
+impl StatementBuilder {
     fn init(&mut self, config: &QueryBuilderConfig) -> Result<(), QueryResultBuilderError> {
         *self = Self {
             max_response_size: config.max_size.unwrap_or(u64::MAX),
@@ -138,12 +152,6 @@ impl ResultBuilder for SingleStatementBuilder {
         Ok(())
     }
 
-    fn begin_rows(&mut self) -> Result<(), QueryResultBuilderError> {
-        assert!(self.err.is_none());
-        assert!(self.rows.is_empty());
-        Ok(())
-    }
-
     fn begin_row(&mut self) -> Result<(), QueryResultBuilderError> {
         assert!(self.err.is_none());
         self.rows.push(Vec::with_capacity(self.cols.len()));
@@ -183,23 +191,55 @@ impl ResultBuilder for SingleStatementBuilder {
         Ok(())
     }
 
-    fn finish_row(&mut self) -> Result<(), QueryResultBuilderError> {
-        assert!(self.err.is_none());
-        Ok(())
+    pub fn into_ret(self) -> Result<proto::StmtResult, libsqlx::error::Error> {
+        match self.err {
+            Some(err) => Err(err),
+            None => Ok(proto::StmtResult {
+                cols: self.cols,
+                rows: self.rows,
+                affected_row_count: self.affected_row_count,
+                last_insert_rowid: self.last_insert_rowid,
+            }),
+        }
+    }
+}
+
+struct SizeFormatter(u64);
+
+impl io::Write for SizeFormatter {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.0 += buf.len() as u64;
+        Ok(buf.len())
     }
 
-    fn finish_rows(&mut self) -> Result<(), QueryResultBuilderError> {
-        assert!(self.err.is_none());
+    fn flush(&mut self) -> io::Result<()> {
         Ok(())
+    }
+}
+
+impl fmt::Write for SizeFormatter {
+    fn write_str(&mut self, s: &str) -> fmt::Result {
+        self.0 += s.len() as u64;
+        Ok(())
+    }
+}
+
+fn value_json_size(v: &ValueRef) -> u64 {
+    let mut f = SizeFormatter(0);
+    match v {
+        ValueRef::Null => write!(&mut f, r#"{{"type":"null"}}"#).unwrap(),
+        ValueRef::Integer(i) => write!(&mut f, r#"{{"type":"integer", "value": "{i}"}}"#).unwrap(),
+        ValueRef::Real(x) => write!(&mut f, r#"{{"type":"integer","value": {x}"}}"#).unwrap(),
+        ValueRef::Text(s) => {
+            // error will be caught later.
+            if let Ok(s) = std::str::from_utf8(s) {
+                write!(&mut f, r#"{{"type":"text","value":"{s}"}}"#).unwrap()
+            }
+        }
+        ValueRef::Blob(b) => return b.len() as u64,
     }
 
-    fn finish(
-        &mut self,
-        _is_txn: bool,
-        _frame_no: Option<FrameNo>,
-    ) -> Result<(), QueryResultBuilderError> {
-        Ok(())
-    }
+    f.0
 }
 
 fn estimate_cols_json_size(c: &Column) -> u64 {
@@ -214,17 +254,32 @@ fn estimate_cols_json_size(c: &Column) -> u64 {
     f.0
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct HranaBatchProtoBuilder {
     step_results: Vec<Option<proto::StmtResult>>,
     step_errors: Vec<Option<crate::hrana::proto::Error>>,
-    stmt_builder: SingleStatementBuilder,
+    stmt_builder: StatementBuilder,
     current_size: u64,
     max_response_size: u64,
     step_empty: bool,
+    ret: oneshot::Sender<proto::BatchResult>
 }
 
 impl HranaBatchProtoBuilder {
+    pub fn new() -> (Self, oneshot::Receiver<proto::BatchResult>) {
+        let (ret, rcv) = oneshot::channel();
+        (Self {
+            step_results: Vec::new(),
+            step_errors: Vec::new(),
+            stmt_builder: StatementBuilder::default(),
+            current_size: 0,
+            max_response_size: u64::MAX,
+            step_empty: false,
+            ret,
+        },
+        rcv)
+
+    }
     pub fn into_ret(self) -> proto::BatchResult {
         proto::BatchResult {
             step_results: self.step_results,
@@ -235,10 +290,7 @@ impl HranaBatchProtoBuilder {
 
 impl ResultBuilder for HranaBatchProtoBuilder {
     fn init(&mut self, config: &QueryBuilderConfig) -> Result<(), QueryResultBuilderError> {
-        *self = Self {
-            max_response_size: config.max_size.unwrap_or(u64::MAX),
-            ..Default::default()
-        };
+        self.max_response_size = config.max_size.unwrap_or(u64::MAX);
         self.stmt_builder.init(config)?;
         Ok(())
     }
@@ -257,7 +309,7 @@ impl ResultBuilder for HranaBatchProtoBuilder {
             .finish_step(affected_row_count, last_insert_rowid)?;
         self.current_size += self.stmt_builder.current_size;
 
-        let new_builder = SingleStatementBuilder {
+        let new_builder = StatementBuilder {
             current_size: 0,
             max_response_size: self.max_response_size - self.current_size,
             ..Default::default()
@@ -290,31 +342,11 @@ impl ResultBuilder for HranaBatchProtoBuilder {
         self.stmt_builder.cols_description(cols)
     }
 
-    fn begin_rows(&mut self) -> Result<(), QueryResultBuilderError> {
-        self.stmt_builder.begin_rows()
-    }
-
     fn begin_row(&mut self) -> Result<(), QueryResultBuilderError> {
         self.stmt_builder.begin_row()
     }
 
     fn add_row_value(&mut self, v: ValueRef) -> Result<(), QueryResultBuilderError> {
         self.stmt_builder.add_row_value(v)
-    }
-
-    fn finish_row(&mut self) -> Result<(), QueryResultBuilderError> {
-        self.stmt_builder.finish_row()
-    }
-
-    fn finish_rows(&mut self) -> Result<(), QueryResultBuilderError> {
-        Ok(())
-    }
-
-    fn finish(
-        &mut self,
-        _is_txn: bool,
-        _frame_no: Option<FrameNo>,
-    ) -> Result<(), QueryResultBuilderError> {
-        Ok(())
     }
 }
