@@ -62,8 +62,8 @@ The semantics of this endpoint is the same as the `batch` request in Hrana.
 
 ## Errors
 
-Successful responses are indicated by a HTTP status code in range [200, 300).
-Errors are indicated with HTTP status codes in range [400, 600), and the error
+Successful responses are indicated by a HTTP status code in range [200, 300].
+Errors are indicated with HTTP status codes in range [400, 600], and the error
 responses should have the format of `Error` from the Hrana protocol. However,
 the clients should be able to handle error responses that don't correspond to
 this format; in particular, the server may produce some error responses with the
