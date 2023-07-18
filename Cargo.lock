@@ -2519,6 +2519,7 @@ dependencies = [
  "bytesize",
  "crc",
  "crossbeam",
+ "either",
  "fallible-iterator 0.3.0",
  "itertools 0.11.0",
  "nix",
@@ -2533,6 +2534,7 @@ dependencies = [
  "sqlite3-parser 0.9.0",
  "tempfile",
  "thiserror",
+ "tokio",
  "tracing",
  "uuid",
 ]
@@ -2549,6 +2551,7 @@ dependencies = [
  "bytes 1.4.0",
  "clap",
  "color-eyre",
+ "either",
  "futures",
  "hmac",
  "hyper",

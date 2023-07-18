@@ -8,10 +8,12 @@ use super::stmt::{proto_stmt_to_query, stmt_error_from_sqld_error};
 use super::{proto, ProtocolError, Version};
 
 use color_eyre::eyre::anyhow;
+use libsqlx::Connection;
 use libsqlx::analysis::Statement;
 use libsqlx::program::{Cond, Program, Step};
 use libsqlx::query::{Params, Query};
 use libsqlx::result_builder::{StepResult, StepResultsBuilder};
+use tokio::sync::oneshot;
 
 fn proto_cond_to_cond(cond: &proto::BatchCond, max_step_i: usize) -> color_eyre::Result<Cond> {
     let try_convert_step = |step: i32| -> Result<usize, ProtocolError> {
@@ -73,15 +75,15 @@ pub async fn execute_batch(
     db: &ConnectionHandle,
     pgm: Program,
 ) -> color_eyre::Result<proto::BatchResult> {
-    let builder = db
+    let fut = db
         .exec(move |conn| -> color_eyre::Result<_> {
-            let mut builder = HranaBatchProtoBuilder::default();
-            conn.execute_program(pgm, &mut builder)?;
-            Ok(builder)
+            let (builder, ret) = HranaBatchProtoBuilder::new();
+            conn.execute_program(&pgm, builder)?;
+            Ok(ret)
         })
         .await??;
 
-    Ok(builder.into_ret())
+    Ok(fut.await?)
 }
 
 pub fn proto_sequence_to_program(sql: &str) -> color_eyre::Result<Program> {
@@ -110,17 +112,17 @@ pub fn proto_sequence_to_program(sql: &str) -> color_eyre::Result<Program> {
 }
 
 pub async fn execute_sequence(conn: &ConnectionHandle, pgm: Program) -> color_eyre::Result<()> {
-    let builder = conn
+    let fut = conn
         .exec(move |conn| -> color_eyre::Result<_> {
-            let mut builder = StepResultsBuilder::default();
-            conn.execute_program(pgm, &mut builder)?;
+            let (snd, rcv) = oneshot::channel();
+            let builder = StepResultsBuilder::new(snd);
+            conn.execute_program(&pgm, builder)?;
 
-            Ok(builder)
+            Ok(rcv)
         })
         .await??;
 
-    builder
-        .into_ret()
+    fut.await?
         .into_iter()
         .try_for_each(|result| match result {
             StepResult::Ok => Ok(()),

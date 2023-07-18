@@ -14,7 +14,7 @@ use crate::result_builder::{QueryBuilderConfig, ResultBuilder};
 use crate::seal::Seal;
 use crate::Result;
 
-use super::RowStatsHandler;
+use super::{LibsqlDbType, RowStatsHandler};
 
 pub struct RowStats {
     pub rows_read: u64,
@@ -49,23 +49,23 @@ where
     sqld_libsql_bindings::Connection::open(path, flags, wal_methods, hook_ctx)
 }
 
-pub struct LibsqlConnection<C> {
+pub struct LibsqlConnection<T: LibsqlDbType> {
     timeout_deadline: Option<Instant>,
     conn: sqld_libsql_bindings::Connection<'static>, // holds a ref to _context, must be dropped first.
     row_stats_handler: Option<Arc<dyn RowStatsHandler>>,
     builder_config: QueryBuilderConfig,
-    _context: Seal<Box<C>>,
+    _context: Seal<Box<<T::ConnectionHook as WalHook>::Context>>,
 }
 
-impl<C> LibsqlConnection<C> {
-    pub(crate) fn new<W: WalHook>(
+impl<T: LibsqlDbType> LibsqlConnection<T> {
+    pub(crate) fn new(
         path: &Path,
         extensions: Option<Arc<[PathBuf]>>,
-        wal_methods: &'static WalMethodsHook<W>,
-        hook_ctx: W::Context,
+        wal_methods: &'static WalMethodsHook<T::ConnectionHook>,
+        hook_ctx: <T::ConnectionHook as WalHook>::Context,
         row_stats_callback: Option<Arc<dyn RowStatsHandler>>,
         builder_config: QueryBuilderConfig,
-    ) -> Result<LibsqlConnection<W::Context>> {
+    ) -> Result<LibsqlConnection<T>> {
         let mut ctx = Box::new(hook_ctx);
         let this = LibsqlConnection {
             conn: open_db(
@@ -101,14 +101,14 @@ impl<C> LibsqlConnection<C> {
         &self.conn
     }
 
-    fn run(&mut self, pgm: Program, builder: &mut dyn ResultBuilder) -> Result<()> {
+    fn run<B: ResultBuilder>(&mut self, pgm: &Program, mut builder: B) -> Result<()> {
         let mut results = Vec::with_capacity(pgm.steps.len());
 
         builder.init(&self.builder_config)?;
         let is_autocommit_before = self.conn.is_autocommit();
 
         for step in pgm.steps() {
-            let res = self.execute_step(step, &results, builder)?;
+            let res = self.execute_step(step, &results, &mut builder)?;
             results.push(res);
         }
 
@@ -117,16 +117,19 @@ impl<C> LibsqlConnection<C> {
             self.timeout_deadline = Some(Instant::now() + TXN_TIMEOUT)
         }
 
-        builder.finish(!self.conn.is_autocommit(), None)?;
+        let is_txn = !self.conn.is_autocommit();
+        if !builder.finnalize(is_txn, None)? && is_txn {
+            let _ = self.conn.execute("ROLLBACK", ());
+        }
 
         Ok(())
     }
 
-    fn execute_step(
+    fn execute_step<B: ResultBuilder>(
         &mut self,
         step: &Step,
         results: &[bool],
-        builder: &mut dyn ResultBuilder,
+        builder: &mut B,
     ) -> Result<bool> {
         builder.begin_step()?;
         let mut enabled = match step.cond.as_ref() {
@@ -160,10 +163,10 @@ impl<C> LibsqlConnection<C> {
         Ok(enabled)
     }
 
-    fn execute_query(
+    fn execute_query<B: ResultBuilder>(
         &self,
         query: &Query,
-        builder: &mut dyn ResultBuilder,
+        builder: &mut B,
     ) -> Result<(u64, Option<i64>)> {
         tracing::trace!("executing query: {}", query.stmt.stmt);
 
@@ -236,11 +239,11 @@ fn eval_cond(cond: &Cond, results: &[bool]) -> Result<bool> {
     })
 }
 
-impl<C> Connection for LibsqlConnection<C> {
-    fn execute_program(
+impl<T: LibsqlDbType> Connection for LibsqlConnection<T> {
+    fn execute_program<B: ResultBuilder>(
         &mut self,
-        pgm: Program,
-        builder: &mut dyn ResultBuilder,
+        pgm: &Program,
+        builder: B,
     ) -> crate::Result<()> {
         self.run(pgm, builder)
     }
