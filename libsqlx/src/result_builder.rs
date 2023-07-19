@@ -80,7 +80,7 @@ pub struct QueryBuilderConfig {
     pub max_size: Option<u64>,
 }
 
-pub trait ResultBuilder {
+pub trait ResultBuilder: Send + 'static {
     /// (Re)initialize the builder. This method can be called multiple times.
     fn init(&mut self, _config: &QueryBuilderConfig) -> Result<(), QueryResultBuilderError> {
         Ok(())
@@ -132,13 +132,10 @@ pub trait ResultBuilder {
     /// finish the builder, and pass the transaction state.
     /// If false is returned, and is_txn is true, then the transaction is rolledback.
     fn finnalize(
-        self,
+        &mut self,
         _is_txn: bool,
         _frame_no: Option<FrameNo>,
-    ) -> Result<bool, QueryResultBuilderError>
-    where
-        Self: Sized,
-    {
+    ) -> Result<bool, QueryResultBuilderError> {
         Ok(true)
     }
 }
@@ -171,15 +168,15 @@ pub struct StepResultsBuilder<R> {
     current: Option<crate::error::Error>,
     step_results: Vec<StepResult>,
     is_skipped: bool,
-    ret: R
+    ret: Option<R>,
 }
 
-pub trait RetChannel<T> {
+pub trait RetChannel<T>: Send + 'static {
     fn send(self, t: T);
 }
 
 #[cfg(feature = "tokio")]
-impl<T> RetChannel<T> for tokio::sync::oneshot::Sender<T> {
+impl<T: Send + 'static> RetChannel<T> for tokio::sync::oneshot::Sender<T> {
     fn send(self, t: T) {
         let _ = self.send(t);
     }
@@ -191,7 +188,7 @@ impl<R> StepResultsBuilder<R> {
             current: None,
             step_results: Vec::new(),
             is_skipped: false,
-            ret,
+            ret: Some(ret),
         }
     }
 }
@@ -241,11 +238,14 @@ impl<R: RetChannel<Vec<StepResult>>> ResultBuilder for StepResultsBuilder<R> {
     }
 
     fn finnalize(
-        self,
+        &mut self,
         _is_txn: bool,
         _frame_no: Option<FrameNo>,
     ) -> Result<bool, QueryResultBuilderError> {
-        self.ret.send(self.step_results);
+        self.ret
+            .take()
+            .expect("finnalize called more than once")
+            .send(std::mem::take(&mut self.step_results));
         Ok(true)
     }
 }
@@ -353,7 +353,7 @@ impl<B: ResultBuilder> ResultBuilder for Take<B> {
     }
 
     fn finnalize(
-        self,
+        &mut self,
         is_txn: bool,
         frame_no: Option<FrameNo>,
     ) -> Result<bool, QueryResultBuilderError> {

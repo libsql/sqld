@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -19,10 +20,6 @@ pub struct Manager {
 }
 
 const MAX_ALLOC_MESSAGE_QUEUE_LEN: usize = 32;
-
-trait IsSync: Sync {}
-
-impl IsSync for Allocation {}
 
 impl Manager {
     pub fn new(db_path: PathBuf, meta_store: Arc<Store>, max_conccurent_allocs: u64) -> Self {
@@ -54,8 +51,9 @@ impl Manager {
                 next_conn_id: 0,
                 max_concurrent_connections: config.max_conccurent_connection,
                 hrana_server: Arc::new(hrana::http::Server::new(None)),
-                dispatcher: bus, // TODO: handle self URL?
+                bus, // TODO: handle self URL?
                 db_name: config.db_name,
+                connections: HashMap::new(),
             };
 
             tokio::spawn(alloc.run());

@@ -1,5 +1,7 @@
 use std::collections::hash_map::Entry;
 use std::collections::HashMap;
+use std::mem::size_of;
+use std::ops::Deref;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -7,12 +9,14 @@ use std::time::{Duration, Instant};
 use bytes::Bytes;
 use either::Either;
 use libsqlx::libsql::{LibsqlDatabase, LogCompactor, LogFile, PrimaryType, ReplicaType};
+use libsqlx::program::Program;
 use libsqlx::proxy::{WriteProxyConnection, WriteProxyDatabase};
-use libsqlx::result_builder::ResultBuilder;
+use libsqlx::result_builder::{Column, QueryBuilderConfig, ResultBuilder};
 use libsqlx::{
     Database as _, DescribeResponse, Frame, FrameNo, InjectableDatabase, Injector, LogReadError,
     ReplicationLogger,
 };
+use parking_lot::Mutex;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::{block_in_place, JoinSet};
 use tokio::time::timeout;
@@ -20,28 +24,26 @@ use tokio::time::timeout;
 use crate::hrana;
 use crate::hrana::http::handle_pipeline;
 use crate::hrana::http::proto::{PipelineRequestBody, PipelineResponseBody};
-use crate::linc::bus::Dispatch;
-use crate::linc::proto::{Enveloppe, Frames, Message};
+use crate::linc::bus::{Bus, Dispatch};
+use crate::linc::proto::{
+    BuilderStep, Enveloppe, Frames, Message, ProxyResponse, StepError, Value,
+};
 use crate::linc::{Inbound, NodeId, Outbound};
+use crate::manager::Manager;
 use crate::meta::DatabaseId;
 
 use self::config::{AllocConfig, DbConfig};
 
 pub mod config;
 
-type LibsqlConnection = Either<
-    libsqlx::libsql::LibsqlConnection<PrimaryType>,
-    WriteProxyConnection<libsqlx::libsql::LibsqlConnection<ReplicaType>, DummyConn>,
->;
-type ExecFn = Box<dyn FnOnce(&mut LibsqlConnection) + Send>;
+/// the maximum number of frame a Frame messahe is allowed to contain
+const FRAMES_MESSAGE_MAX_COUNT: usize = 5;
 
-#[derive(Clone)]
-pub struct ConnectionId {
-    id: u32,
-    close_sender: mpsc::Sender<()>,
-}
+type ProxyConnection =
+    WriteProxyConnection<libsqlx::libsql::LibsqlConnection<ReplicaType>, RemoteConn>;
+type ExecFn = Box<dyn FnOnce(&mut dyn libsqlx::Connection) + Send>;
+
 pub enum AllocationMessage {
-    NewConnection(oneshot::Sender<ConnectionHandle>),
     HranaPipelineReq {
         req: PipelineRequestBody,
         ret: oneshot::Sender<crate::Result<PipelineResponseBody>>,
@@ -49,43 +51,240 @@ pub enum AllocationMessage {
     Inbound(Inbound),
 }
 
-pub struct DummyDb;
-pub struct DummyConn;
+pub struct RemoteDb;
 
-impl libsqlx::Connection for DummyConn {
-    fn execute_program<B: ResultBuilder>(
+#[derive(Clone)]
+pub struct RemoteConn {
+    inner: Arc<RemoteConnInner>,
+}
+
+struct Request {
+    id: Option<u32>,
+    builder: Box<dyn ResultBuilder>,
+    pgm: Option<Program>,
+    next_seq_no: u32,
+}
+
+pub struct RemoteConnInner {
+    current_req: Mutex<Option<Request>>,
+}
+
+impl Deref for RemoteConn {
+    type Target = RemoteConnInner;
+
+    fn deref(&self) -> &Self::Target {
+        self.inner.as_ref()
+    }
+}
+
+impl libsqlx::Connection for RemoteConn {
+    fn execute_program(
         &mut self,
-        _pgm: &libsqlx::program::Program,
-        _result_builder: B,
+        program: &libsqlx::program::Program,
+        builder: Box<dyn ResultBuilder>,
     ) -> libsqlx::Result<()> {
-        todo!()
+        // When we need to proxy a query, we place it in the current request slot. When we are
+        // back in a async context, we'll send it to the primary, and asynchrously drive the
+        // builder.
+        let mut lock = self.inner.current_req.lock();
+        *lock = match *lock {
+            Some(_) => unreachable!("conccurent request on the same connection!"),
+            None => Some(Request {
+                id: None,
+                builder,
+                pgm: Some(program.clone()),
+                next_seq_no: 0,
+            }),
+        };
+
+        Ok(())
     }
 
     fn describe(&self, _sql: String) -> libsqlx::Result<DescribeResponse> {
-        todo!()
+        unreachable!("Describe request should not be proxied")
     }
 }
 
-impl libsqlx::Database for DummyDb {
-    type Connection = DummyConn;
+impl libsqlx::Database for RemoteDb {
+    type Connection = RemoteConn;
 
     fn connect(&self) -> Result<Self::Connection, libsqlx::error::Error> {
-        Ok(DummyConn)
+        Ok(RemoteConn {
+            inner: Arc::new(RemoteConnInner {
+                current_req: Default::default(),
+            }),
+        })
     }
 }
 
-type ProxyDatabase = WriteProxyDatabase<LibsqlDatabase<ReplicaType>, DummyDb>;
+pub type ProxyDatabase = WriteProxyDatabase<LibsqlDatabase<ReplicaType>, RemoteDb>;
+
+pub struct PrimaryDatabase {
+    pub db: LibsqlDatabase<PrimaryType>,
+    pub replica_streams: HashMap<NodeId, (u32, tokio::task::JoinHandle<()>)>,
+    pub frame_notifier: tokio::sync::watch::Receiver<FrameNo>,
+}
+
+struct ProxyResponseBuilder {
+    dispatcher: Arc<dyn Dispatch>,
+    buffer: Vec<BuilderStep>,
+    to: NodeId,
+    database_id: DatabaseId,
+    req_id: u32,
+    connection_id: u32,
+    next_seq_no: u32,
+}
+
+const MAX_STEP_BATCH_SIZE: usize = 100_000_000; // ~100kb
+
+impl ProxyResponseBuilder {
+    fn maybe_send(&mut self) {
+        // FIXME: this is stupid: compute current buffer size on the go instead
+        let size = self
+            .buffer
+            .iter()
+            .map(|s| match s {
+                BuilderStep::FinishStep(_, _) => 2 * 8,
+                BuilderStep::StepError(StepError(s)) => s.len(),
+                BuilderStep::ColsDesc(ref d) => d
+                    .iter()
+                    .map(|c| c.name.len() + c.decl_ty.as_ref().map(|t| t.len()).unwrap_or_default())
+                    .sum(),
+                BuilderStep::Finnalize { .. } => 9,
+                BuilderStep::AddRowValue(v) => match v {
+                    crate::linc::proto::Value::Text(s) | crate::linc::proto::Value::Blob(s) => {
+                        s.len()
+                    }
+                    _ => size_of::<Value>(),
+                },
+                _ => 8,
+            })
+            .sum::<usize>();
+
+        if size > MAX_STEP_BATCH_SIZE {
+            self.send()
+        }
+    }
+
+    fn send(&mut self) {
+        let msg = Outbound {
+            to: self.to,
+            enveloppe: Enveloppe {
+                database_id: Some(self.database_id),
+                message: Message::ProxyResponse(crate::linc::proto::ProxyResponse {
+                    connection_id: self.connection_id,
+                    req_id: self.req_id,
+                    row_steps: std::mem::take(&mut self.buffer),
+                    seq_no: self.next_seq_no,
+                }),
+            },
+        };
+
+        self.next_seq_no += 1;
+        tokio::runtime::Handle::current().block_on(self.dispatcher.dispatch(msg));
+    }
+}
+
+impl ResultBuilder for ProxyResponseBuilder {
+    fn init(
+        &mut self,
+        _config: &libsqlx::result_builder::QueryBuilderConfig,
+    ) -> Result<(), libsqlx::result_builder::QueryResultBuilderError> {
+        self.buffer.push(BuilderStep::Init);
+        self.maybe_send();
+        Ok(())
+    }
+
+    fn begin_step(&mut self) -> Result<(), libsqlx::result_builder::QueryResultBuilderError> {
+        self.buffer.push(BuilderStep::BeginStep);
+        self.maybe_send();
+        Ok(())
+    }
+
+    fn finish_step(
+        &mut self,
+        affected_row_count: u64,
+        last_insert_rowid: Option<i64>,
+    ) -> Result<(), libsqlx::result_builder::QueryResultBuilderError> {
+        self.buffer.push(BuilderStep::FinishStep(
+            affected_row_count,
+            last_insert_rowid,
+        ));
+        self.maybe_send();
+        Ok(())
+    }
+
+    fn step_error(
+        &mut self,
+        error: libsqlx::error::Error,
+    ) -> Result<(), libsqlx::result_builder::QueryResultBuilderError> {
+        self.buffer
+            .push(BuilderStep::StepError(StepError(error.to_string())));
+        self.maybe_send();
+        Ok(())
+    }
+
+    fn cols_description(
+        &mut self,
+        cols: &mut dyn Iterator<Item = libsqlx::result_builder::Column>,
+    ) -> Result<(), libsqlx::result_builder::QueryResultBuilderError> {
+        self.buffer
+            .push(BuilderStep::ColsDesc(cols.map(Into::into).collect()));
+        self.maybe_send();
+        Ok(())
+    }
+
+    fn begin_rows(&mut self) -> Result<(), libsqlx::result_builder::QueryResultBuilderError> {
+        self.buffer.push(BuilderStep::BeginRows);
+        self.maybe_send();
+        Ok(())
+    }
+
+    fn begin_row(&mut self) -> Result<(), libsqlx::result_builder::QueryResultBuilderError> {
+        self.buffer.push(BuilderStep::BeginRow);
+        self.maybe_send();
+        Ok(())
+    }
+
+    fn add_row_value(
+        &mut self,
+        v: libsqlx::result_builder::ValueRef,
+    ) -> Result<(), libsqlx::result_builder::QueryResultBuilderError> {
+        self.buffer.push(BuilderStep::AddRowValue(v.into()));
+        self.maybe_send();
+        Ok(())
+    }
+
+    fn finish_row(&mut self) -> Result<(), libsqlx::result_builder::QueryResultBuilderError> {
+        self.buffer.push(BuilderStep::FinishRow);
+        self.maybe_send();
+        Ok(())
+    }
+
+    fn finish_rows(&mut self) -> Result<(), libsqlx::result_builder::QueryResultBuilderError> {
+        self.buffer.push(BuilderStep::FinishRows);
+        self.maybe_send();
+        Ok(())
+    }
+
+    fn finnalize(
+        &mut self,
+        is_txn: bool,
+        frame_no: Option<FrameNo>,
+    ) -> Result<bool, libsqlx::result_builder::QueryResultBuilderError> {
+        self.buffer
+            .push(BuilderStep::Finnalize { is_txn, frame_no });
+        self.send();
+        Ok(true)
+    }
+}
 
 pub enum Database {
-    Primary {
-        db: LibsqlDatabase<PrimaryType>,
-        replica_streams: HashMap<NodeId, (u32, tokio::task::JoinHandle<()>)>,
-        frame_notifier: tokio::sync::watch::Receiver<FrameNo>,
-    },
+    Primary(PrimaryDatabase),
     Replica {
         db: ProxyDatabase,
         injector_handle: mpsc::Sender<Frames>,
-        primary_node_id: NodeId,
+        primary_id: NodeId,
         last_received_frame_ts: Option<Instant>,
     },
 }
@@ -194,9 +393,6 @@ struct FrameStreamer {
     buffer: Vec<Bytes>,
 }
 
-// the maximum number of frame a Frame messahe is allowed to contain
-const FRAMES_MESSAGE_MAX_COUNT: usize = 5;
-
 impl FrameStreamer {
     async fn run(mut self) {
         loop {
@@ -261,15 +457,15 @@ impl Database {
                 )
                 .unwrap();
 
-                Self::Primary {
+                Self::Primary(PrimaryDatabase {
                     db,
                     replica_streams: HashMap::new(),
                     frame_notifier: receiver,
-                }
+                })
             }
             DbConfig::Replica { primary_node_id } => {
                 let rdb = LibsqlDatabase::new_replica(path, MAX_INJECTOR_BUFFER_CAP, ()).unwrap();
-                let wdb = DummyDb;
+                let wdb = RemoteDb;
                 let mut db = WriteProxyDatabase::new(rdb, wdb, Arc::new(|_| ()));
                 let injector = db.injector().unwrap();
                 let (sender, receiver) = mpsc::channel(16);
@@ -291,17 +487,191 @@ impl Database {
                 Self::Replica {
                     db,
                     injector_handle: sender,
-                    primary_node_id,
+                    primary_id: primary_node_id,
                     last_received_frame_ts: None,
                 }
             }
         }
     }
 
-    fn connect(&self) -> LibsqlConnection {
+    fn connect(&self, connection_id: u32, alloc: &Allocation) -> impl ConnectionHandler {
         match self {
-            Database::Primary { db, .. } => Either::Left(db.connect().unwrap()),
-            Database::Replica { db, .. } => Either::Right(db.connect().unwrap()),
+            Database::Primary(PrimaryDatabase { db, .. }) => Either::Right(PrimaryConnection {
+                conn: db.connect().unwrap(),
+            }),
+            Database::Replica { db, primary_id, .. } => Either::Left(ReplicaConnection {
+                conn: db.connect().unwrap(),
+                connection_id,
+                next_req_id: 0,
+                primary_id: *primary_id,
+                database_id: DatabaseId::from_name(&alloc.db_name),
+                dispatcher: alloc.bus.clone(),
+            }),
+        }
+    }
+
+    pub fn is_primary(&self) -> bool {
+        matches!(self, Self::Primary(..))
+    }
+}
+
+struct PrimaryConnection {
+    conn: libsqlx::libsql::LibsqlConnection<PrimaryType>,
+}
+
+#[async_trait::async_trait]
+impl ConnectionHandler for PrimaryConnection {
+    fn exec_ready(&self) -> bool {
+        true
+    }
+
+    async fn handle_exec(&mut self, exec: ExecFn) {
+        block_in_place(|| exec(&mut self.conn));
+    }
+
+    async fn handle_inbound(&mut self, _msg: Inbound) {
+        tracing::debug!("primary connection received message, ignoring.")
+    }
+}
+
+struct ReplicaConnection {
+    conn: ProxyConnection,
+    connection_id: u32,
+    next_req_id: u32,
+    primary_id: NodeId,
+    database_id: DatabaseId,
+    dispatcher: Arc<dyn Dispatch>,
+}
+
+impl ReplicaConnection {
+    fn handle_proxy_response(&mut self, resp: ProxyResponse) {
+        let mut lock = self.conn.writer().inner.current_req.lock();
+        let finnalized = match *lock {
+            Some(ref mut req) if req.id == Some(resp.req_id) && resp.seq_no == req.next_seq_no => {
+                self.next_req_id += 1;
+                // TODO: pass actual config
+                let config = QueryBuilderConfig { max_size: None };
+                let mut finnalized = false;
+                for step in resp.row_steps.iter() {
+                    if finnalized { break };
+                    match step {
+                        BuilderStep::Init => req.builder.init(&config).unwrap(),
+                        BuilderStep::BeginStep => req.builder.begin_step().unwrap(),
+                        BuilderStep::FinishStep(affected_row_count, last_insert_rowid) => req
+                            .builder
+                            .finish_step(*affected_row_count, *last_insert_rowid)
+                            .unwrap(),
+                        BuilderStep::StepError(e) => req.builder.step_error(todo!()).unwrap(),
+                        BuilderStep::ColsDesc(cols) => req
+                            .builder
+                            .cols_description(&mut cols.iter().map(|c| Column {
+                                name: &c.name,
+                                decl_ty: c.decl_ty.as_deref(),
+                            }))
+                            .unwrap(),
+                        BuilderStep::BeginRows => req.builder.begin_rows().unwrap(),
+                        BuilderStep::BeginRow => req.builder.begin_row().unwrap(),
+                        BuilderStep::AddRowValue(v) => req.builder.add_row_value(v.into()).unwrap(),
+                        BuilderStep::FinishRow => req.builder.finish_row().unwrap(),
+                        BuilderStep::FinishRows => req.builder.finish_rows().unwrap(),
+                        BuilderStep::Finnalize { is_txn, frame_no } => {
+                            let _ = req.builder.finnalize(*is_txn, *frame_no).unwrap();
+                            finnalized = true;
+                        }
+                    }
+                }
+                finnalized
+            }
+            Some(_) => todo!("error processing response"),
+            None => {
+                tracing::error!("received builder message, but there is no pending request");
+                false
+            }
+        };
+
+        if finnalized {
+            *lock = None;
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl ConnectionHandler for ReplicaConnection {
+    fn exec_ready(&self) -> bool {
+        // we are currently handling a request on this connection
+        self.conn.writer().current_req.lock().is_none()
+    }
+
+    async fn handle_exec(&mut self, exec: ExecFn) {
+        block_in_place(|| exec(&mut self.conn));
+        let msg = {
+            let mut lock = self.conn.writer().inner.current_req.lock();
+            match *lock {
+                Some(ref mut req) if req.id.is_none() => {
+                    let program = req
+                        .pgm
+                        .take()
+                        .expect("unsent request should have a program");
+                    let req_id = self.next_req_id;
+                    self.next_req_id += 1;
+                    req.id = Some(req_id);
+
+                    let msg = Outbound {
+                        to: self.primary_id,
+                        enveloppe: Enveloppe {
+                            database_id: Some(self.database_id),
+                            message: Message::ProxyRequest {
+                                connection_id: self.connection_id,
+                                req_id,
+                                program,
+                            },
+                        },
+                    };
+
+                    Some(msg)
+                }
+                _ => None,
+            }
+        };
+
+        if let Some(msg) = msg {
+            self.dispatcher.dispatch(msg).await;
+        }
+    }
+
+    async fn handle_inbound(&mut self, msg: Inbound) {
+        match msg.enveloppe.message {
+            Message::ProxyResponse(resp) => {
+                self.handle_proxy_response(resp);
+            }
+            _ => (), // ignore anything else
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl<L, R> ConnectionHandler for Either<L, R>
+where
+    L: ConnectionHandler,
+    R: ConnectionHandler,
+{
+    fn exec_ready(&self) -> bool {
+        match self {
+            Either::Left(l) => l.exec_ready(),
+            Either::Right(r) => r.exec_ready(),
+        }
+    }
+
+    async fn handle_exec(&mut self, exec: ExecFn) {
+        match self {
+            Either::Left(l) => l.handle_exec(exec).await,
+            Either::Right(r) => r.handle_exec(exec).await,
+        }
+    }
+    async fn handle_inbound(&mut self, msg: Inbound) {
+        match self {
+            Either::Left(l) => l.handle_inbound(msg).await,
+            Either::Right(r) => r.handle_inbound(msg).await,
         }
     }
 }
@@ -310,29 +680,31 @@ pub struct Allocation {
     pub inbox: mpsc::Receiver<AllocationMessage>,
     pub database: Database,
     /// spawned connection futures, returning their connection id on completion.
-    pub connections_futs: JoinSet<u32>,
+    pub connections_futs: JoinSet<(NodeId, u32)>,
     pub next_conn_id: u32,
     pub max_concurrent_connections: u32,
+    pub connections: HashMap<NodeId, HashMap<u32, ConnectionHandle>>,
 
     pub hrana_server: Arc<hrana::http::Server>,
-    /// handle to the message bus, to send messages
-    pub dispatcher: Arc<dyn Dispatch>,
+    /// handle to the message bus
+    pub bus: Arc<Bus<Arc<Manager>>>,
     pub db_name: String,
 }
 
+#[derive(Clone)]
 pub struct ConnectionHandle {
     exec: mpsc::Sender<ExecFn>,
-    exit: oneshot::Sender<()>,
+    inbound: mpsc::Sender<Inbound>,
 }
 
 impl ConnectionHandle {
     pub async fn exec<F, R>(&self, f: F) -> crate::Result<R>
     where
-        F: for<'a> FnOnce(&'a mut LibsqlConnection) -> R + Send + 'static,
+        F: for<'a> FnOnce(&'a mut dyn libsqlx::Connection) -> R + Send + 'static,
         R: Send + 'static,
     {
         let (sender, ret) = oneshot::channel();
-        let cb = move |conn: &mut LibsqlConnection| {
+        let cb = move |conn: &mut dyn libsqlx::Connection| {
             let res = f(conn);
             let _ = sender.send(res);
         };
@@ -349,15 +721,12 @@ impl Allocation {
             tokio::select! {
                 Some(msg) = self.inbox.recv() => {
                     match msg {
-                        AllocationMessage::NewConnection(ret) => {
-                            let _ =ret.send(self.new_conn().await);
-                        },
-                        AllocationMessage::HranaPipelineReq { req, ret} => {
-                            let res = handle_pipeline(&self.hrana_server.clone(), req, || async {
-                                let conn= self.new_conn().await;
+                        AllocationMessage::HranaPipelineReq { req, ret } => {
+                            let server = self.hrana_server.clone();
+                            handle_pipeline(server, req, ret, || async {
+                                let conn = self.new_conn(None).await;
                                 Ok(conn)
-                            }).await;
-                            let _ = ret.send(res);
+                            }).await.unwrap();
                         }
                         AllocationMessage::Inbound(msg) => {
                             self.handle_inbound(msg).await;
@@ -388,11 +757,12 @@ impl Allocation {
                 req_no,
                 next_frame_no,
             } => match &mut self.database {
-                Database::Primary {
+                Database::Primary(PrimaryDatabase {
                     db,
                     replica_streams,
                     frame_notifier,
-                } => {
+                    ..
+                }) => {
                     let streamer = FrameStreamer {
                         logger: db.logger(),
                         database_id: DatabaseId::from_name(&self.db_name),
@@ -400,7 +770,7 @@ impl Allocation {
                         next_frame_no,
                         req_no,
                         seq_no: 0,
-                        dipatcher: self.dispatcher.clone(),
+                        dipatcher: self.bus.clone() as _,
                         notifier: frame_notifier.clone(),
                         buffer: Vec::new(),
                     };
@@ -435,62 +805,139 @@ impl Allocation {
                     *last_received_frame_ts = Some(Instant::now());
                     injector_handle.send(frames).await.unwrap();
                 }
-                Database::Primary { .. } => todo!("handle primary receiving txn"),
+                Database::Primary(PrimaryDatabase { .. }) => todo!("handle primary receiving txn"),
             },
-            Message::ProxyRequest { .. } => todo!(),
-            Message::ProxyResponse { .. } => todo!(),
+            Message::ProxyRequest {
+                connection_id,
+                req_id,
+                program,
+            } => {
+                self.handle_proxy(msg.from, connection_id, req_id, program)
+                    .await
+            }
+            Message::ProxyResponse(ref r) => {
+                if let Some(conn) = self
+                    .connections
+                    .get(&self.bus.node_id())
+                    .and_then(|m| m.get(&r.connection_id).cloned())
+                {
+                    conn.inbound.send(msg).await.unwrap();
+                }
+            }
             Message::CancelRequest { .. } => todo!(),
             Message::CloseConnection { .. } => todo!(),
             Message::Error(_) => todo!(),
         }
     }
 
-    async fn new_conn(&mut self) -> ConnectionHandle {
-        let id = self.next_conn_id();
-        let conn = block_in_place(|| self.database.connect());
-        let (close_sender, exit) = oneshot::channel();
+    async fn handle_proxy(
+        &mut self,
+        node_id: NodeId,
+        connection_id: u32,
+        req_id: u32,
+        program: Program,
+    ) {
+        let dispatcher = self.bus.clone();
+        let database_id = DatabaseId::from_name(&self.db_name);
+        let exec = |conn: ConnectionHandle| async move {
+            let _ = conn
+                .exec(move |conn| {
+                    let builder = ProxyResponseBuilder {
+                        dispatcher,
+                        req_id,
+                        buffer: Vec::new(),
+                        to: node_id,
+                        database_id,
+                        connection_id,
+                        next_seq_no: 0,
+                    };
+                    conn.execute_program(&program, Box::new(builder)).unwrap();
+                })
+            .await;
+        };
+
+        if self.database.is_primary() {
+            match self
+                .connections
+                .get(&node_id)
+                .and_then(|m| m.get(&connection_id).cloned())
+            {
+                Some(handle) => {
+                    tokio::spawn(exec(handle));
+                }
+                None => {
+                    let handle = self.new_conn(Some((node_id, connection_id))).await;
+                    tokio::spawn(exec(handle));
+                }
+            }
+        }
+    }
+
+    async fn new_conn(&mut self, remote: Option<(NodeId, u32)>) -> ConnectionHandle {
+        let conn_id = self.next_conn_id();
+        let conn = block_in_place(|| self.database.connect(conn_id, self));
         let (exec_sender, exec_receiver) = mpsc::channel(1);
+        let (inbound_sender, inbound_receiver) = mpsc::channel(1);
+        let id = remote.unwrap_or((self.bus.node_id(), conn_id));
         let conn = Connection {
             id,
             conn,
-            exit,
             exec: exec_receiver,
+            inbound: inbound_receiver,
         };
 
         self.connections_futs.spawn(conn.run());
-
-        ConnectionHandle {
+        let handle = ConnectionHandle {
             exec: exec_sender,
-            exit: close_sender,
-        }
+            inbound: inbound_sender,
+        };
+        self.connections
+            .entry(id.0)
+            .or_insert_with(HashMap::new)
+            .insert(id.1, handle.clone());
+        handle
     }
 
     fn next_conn_id(&mut self) -> u32 {
         loop {
             self.next_conn_id = self.next_conn_id.wrapping_add(1);
-            return self.next_conn_id;
-            // if !self.connections.contains_key(&self.next_conn_id) {
-            //     return self.next_conn_id;
-            // }
+            if self
+                .connections
+                .get(&self.bus.node_id())
+                .and_then(|m| m.get(&self.next_conn_id))
+                .is_none()
+            {
+                return self.next_conn_id;
+            }
         }
     }
 }
 
-struct Connection {
-    id: u32,
-    conn: LibsqlConnection,
-    exit: oneshot::Receiver<()>,
+struct Connection<C> {
+    id: (NodeId, u32),
+    conn: C,
     exec: mpsc::Receiver<ExecFn>,
+    inbound: mpsc::Receiver<Inbound>,
 }
 
-impl Connection {
-    async fn run(mut self) -> u32 {
+#[async_trait::async_trait]
+trait ConnectionHandler: Send {
+    fn exec_ready(&self) -> bool;
+    async fn handle_exec(&mut self, exec: ExecFn);
+    async fn handle_inbound(&mut self, msg: Inbound);
+}
+
+impl<C: ConnectionHandler> Connection<C> {
+    async fn run(mut self) -> (NodeId, u32) {
         loop {
             tokio::select! {
-                _ = &mut self.exit => break,
-                Some(exec) = self.exec.recv() => {
-                    tokio::task::block_in_place(|| exec(&mut self.conn));
+                Some(inbound) = self.inbound.recv() => {
+                    self.conn.handle_inbound(inbound).await;
                 }
+                Some(exec) = self.exec.recv(), if self.conn.exec_ready() => {
+                    self.conn.handle_exec(exec).await;
+                },
+                else => break,
             }
         }
 

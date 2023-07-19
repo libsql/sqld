@@ -8,7 +8,6 @@ use super::stmt::{proto_stmt_to_query, stmt_error_from_sqld_error};
 use super::{proto, ProtocolError, Version};
 
 use color_eyre::eyre::anyhow;
-use libsqlx::Connection;
 use libsqlx::analysis::Statement;
 use libsqlx::program::{Cond, Program, Step};
 use libsqlx::query::{Params, Query};
@@ -78,7 +77,7 @@ pub async fn execute_batch(
     let fut = db
         .exec(move |conn| -> color_eyre::Result<_> {
             let (builder, ret) = HranaBatchProtoBuilder::new();
-            conn.execute_program(&pgm, builder)?;
+            conn.execute_program(&pgm, Box::new(builder))?;
             Ok(ret)
         })
         .await??;
@@ -116,20 +115,18 @@ pub async fn execute_sequence(conn: &ConnectionHandle, pgm: Program) -> color_ey
         .exec(move |conn| -> color_eyre::Result<_> {
             let (snd, rcv) = oneshot::channel();
             let builder = StepResultsBuilder::new(snd);
-            conn.execute_program(&pgm, builder)?;
+            conn.execute_program(&pgm, Box::new(builder))?;
 
             Ok(rcv)
         })
         .await??;
 
-    fut.await?
-        .into_iter()
-        .try_for_each(|result| match result {
-            StepResult::Ok => Ok(()),
-            StepResult::Err(e) => match stmt_error_from_sqld_error(e) {
-                Ok(stmt_err) => Err(anyhow!(stmt_err)),
-                Err(sqld_err) => Err(anyhow!(sqld_err)),
-            },
-            StepResult::Skipped => Err(anyhow!("Statement in sequence was not executed")),
-        })
+    fut.await?.into_iter().try_for_each(|result| match result {
+        StepResult::Ok => Ok(()),
+        StepResult::Err(e) => match stmt_error_from_sqld_error(e) {
+            Ok(stmt_err) => Err(anyhow!(stmt_err)),
+            Err(sqld_err) => Err(anyhow!(sqld_err)),
+        },
+        StepResult::Skipped => Err(anyhow!("Statement in sequence was not executed")),
+    })
 }

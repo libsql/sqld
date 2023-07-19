@@ -3,7 +3,6 @@ use std::collections::HashMap;
 use color_eyre::eyre::{anyhow, bail};
 use libsqlx::analysis::Statement;
 use libsqlx::query::{Params, Query, Value};
-use libsqlx::Connection;
 
 use super::result_builder::SingleStatementBuilder;
 use super::{proto, ProtocolError, Version};
@@ -52,7 +51,7 @@ pub async fn execute_stmt(
         .exec(move |conn| -> color_eyre::Result<_> {
             let (builder, ret) = SingleStatementBuilder::new();
             let pgm = libsqlx::program::Program::from_queries(std::iter::once(query));
-            conn.execute_program(&pgm, builder)?;
+            conn.execute_program(&pgm, Box::new(builder))?;
 
             Ok(ret)
         })

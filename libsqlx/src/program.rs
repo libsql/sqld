@@ -1,8 +1,10 @@
 use std::sync::Arc;
 
+use serde::{Deserialize, Serialize};
+
 use crate::query::Query;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Program {
     pub steps: Arc<[Step]>,
 }
@@ -59,13 +61,13 @@ impl Program {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Step {
     pub cond: Option<Cond>,
     pub query: Query,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Cond {
     Ok { step: usize },
     Err { step: usize },

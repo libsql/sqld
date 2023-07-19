@@ -1,3 +1,7 @@
+use std::sync::Arc;
+
+use parking_lot::Mutex;
+
 use crate::connection::{Connection, DescribeResponse};
 use crate::database::FrameNo;
 use crate::program::Program;
@@ -14,31 +18,48 @@ pub(crate) struct ConnState {
 
 /// A connection that proxies write operations to the `WriteDb` and the read operations to the
 /// `ReadDb`
-pub struct WriteProxyConnection<ReadDb, WriteDb> {
-    pub(crate) read_db: ReadDb,
-    pub(crate) write_db: WriteDb,
+pub struct WriteProxyConnection<R, W> {
+    pub(crate) read_conn: R,
+    pub(crate) write_conn: W,
     pub(crate) wait_frame_no_cb: WaitFrameNoCb,
-    pub(crate) state: ConnState,
+    pub(crate) state: Arc<Mutex<ConnState>>,
 }
 
-struct MaybeRemoteExecBuilder<'a, 'b, B, W> {
-    builder: B,
-    conn: &'a mut W,
-    pgm: &'b Program,
-    state: &'a mut ConnState,
+impl<R, W> WriteProxyConnection<R, W> {
+    pub fn writer_mut(&mut self) -> &mut W {
+        &mut self.write_conn
+    }
+
+    pub fn writer(&self) -> &W {
+        &self.write_conn
+    }
+
+    pub fn reader_mut(&mut self) -> &mut R {
+        &mut self.read_conn
+    }
+
+    pub fn reader(&self) -> &R {
+        &self.read_conn
+    }
 }
 
-impl<'a, 'b, B, W> ResultBuilder for MaybeRemoteExecBuilder<'a, 'b, B, W>
+struct MaybeRemoteExecBuilder<W> {
+    builder: Option<Box<dyn ResultBuilder>>,
+    conn: W,
+    pgm: Program,
+    state: Arc<Mutex<ConnState>>,
+}
+
+impl<W> ResultBuilder for MaybeRemoteExecBuilder<W>
 where
-    W: Connection,
-    B: ResultBuilder,
+    W: Connection + Send + 'static,
 {
     fn init(&mut self, config: &QueryBuilderConfig) -> Result<(), QueryResultBuilderError> {
-        self.builder.init(config)
+        self.builder.as_mut().unwrap().init(config)
     }
 
     fn begin_step(&mut self) -> Result<(), QueryResultBuilderError> {
-        self.builder.begin_step()
+        self.builder.as_mut().unwrap().begin_step()
     }
 
     fn finish_step(
@@ -47,45 +68,47 @@ where
         last_insert_rowid: Option<i64>,
     ) -> Result<(), QueryResultBuilderError> {
         self.builder
+            .as_mut()
+            .unwrap()
             .finish_step(affected_row_count, last_insert_rowid)
     }
 
     fn step_error(&mut self, error: crate::error::Error) -> Result<(), QueryResultBuilderError> {
-        self.builder.step_error(error)
+        self.builder.as_mut().unwrap().step_error(error)
     }
 
     fn cols_description(
         &mut self,
         cols: &mut dyn Iterator<Item = Column>,
     ) -> Result<(), QueryResultBuilderError> {
-        self.builder.cols_description(cols)
+        self.builder.as_mut().unwrap().cols_description(cols)
     }
 
     fn begin_rows(&mut self) -> Result<(), QueryResultBuilderError> {
-        self.builder.begin_rows()
+        self.builder.as_mut().unwrap().begin_rows()
     }
 
     fn begin_row(&mut self) -> Result<(), QueryResultBuilderError> {
-        self.builder.begin_row()
+        self.builder.as_mut().unwrap().begin_row()
     }
 
     fn add_row_value(
         &mut self,
         v: rusqlite::types::ValueRef,
     ) -> Result<(), QueryResultBuilderError> {
-        self.builder.add_row_value(v)
+        self.builder.as_mut().unwrap().add_row_value(v)
     }
 
     fn finish_row(&mut self) -> Result<(), QueryResultBuilderError> {
-        self.builder.finish_row()
+        self.builder.as_mut().unwrap().finish_row()
     }
 
     fn finish_rows(&mut self) -> Result<(), QueryResultBuilderError> {
-        self.builder.finish_rows()
+        self.builder.as_mut().unwrap().finish_rows()
     }
 
     fn finnalize(
-        self,
+        &mut self,
         is_txn: bool,
         frame_no: Option<FrameNo>,
     ) -> Result<bool, QueryResultBuilderError> {
@@ -93,70 +116,75 @@ where
             // a read only connection is not allowed to leave an open transaction. We mispredicted the
             // final state of the connection, so we rollback, and execute again on the write proxy.
             let builder = ExtractFrameNoBuilder {
-                builder: self.builder,
-                state: self.state,
+                builder: self
+                    .builder
+                    .take()
+                    .expect("finnalize called more than once"),
+                state: self.state.clone(),
             };
 
-            self.conn.execute_program(self.pgm, builder).unwrap();
+            self.conn
+                .execute_program(&self.pgm, Box::new(builder))
+                .unwrap();
 
             Ok(false)
         } else {
-            self.builder.finnalize(is_txn, frame_no)
+            self.builder.as_mut().unwrap().finnalize(is_txn, frame_no)
         }
     }
 }
 
-impl<ReadDb, WriteDb> Connection for WriteProxyConnection<ReadDb, WriteDb>
+impl<R, W> Connection for WriteProxyConnection<R, W>
 where
-    ReadDb: Connection,
-    WriteDb: Connection,
+    R: Connection,
+    W: Connection + Clone + Send + 'static,
 {
-    fn execute_program<B: ResultBuilder>(
+    fn execute_program(
         &mut self,
         pgm: &Program,
-        builder: B,
+        builder: Box<dyn ResultBuilder>,
     ) -> crate::Result<()> {
-        if !self.state.is_txn && pgm.is_read_only() {
-            if let Some(frame_no) = self.state.last_frame_no {
+        if !self.state.lock().is_txn && pgm.is_read_only() {
+            if let Some(frame_no) = self.state.lock().last_frame_no {
                 (self.wait_frame_no_cb)(frame_no);
             }
 
             let builder = MaybeRemoteExecBuilder {
-                builder,
-                conn: &mut self.write_db,
-                state: &mut self.state,
-                pgm,
+                builder: Some(builder),
+                conn: self.write_conn.clone(),
+                state: self.state.clone(),
+                pgm: pgm.clone(),
             };
             // We know that this program won't perform any writes. We attempt to run it on the
             // replica. If it leaves an open transaction, then this program is an interactive
             // transaction, so we rollback the replica, and execute again on the primary.
-            self.read_db.execute_program(pgm, builder)?;
+            self.read_conn.execute_program(pgm, Box::new(builder))?;
             // rollback(&mut self.conn.read_db);
             Ok(())
         } else {
             let builder = ExtractFrameNoBuilder {
                 builder,
-                state: &mut self.state,
+                state: self.state.clone(),
             };
-            self.write_db.execute_program(pgm, builder)?;
+            self.write_conn.execute_program(pgm, Box::new(builder))?;
             Ok(())
         }
     }
 
     fn describe(&self, sql: String) -> crate::Result<DescribeResponse> {
-        if let Some(frame_no) = self.state.last_frame_no {
+        if let Some(frame_no) = self.state.lock().last_frame_no {
             (self.wait_frame_no_cb)(frame_no);
         }
-        self.read_db.describe(sql)
+        self.read_conn.describe(sql)
     }
 }
 
-struct ExtractFrameNoBuilder<'a, B> {
-    builder: B,
-    state: &'a mut ConnState,
+struct ExtractFrameNoBuilder {
+    builder: Box<dyn ResultBuilder>,
+    state: Arc<Mutex<ConnState>>,
 }
 
-impl<B: ResultBuilder> ResultBuilder for ExtractFrameNoBuilder<'_, B> {
+impl ResultBuilder for ExtractFrameNoBuilder {
     fn init(&mut self, config: &QueryBuilderConfig) -> Result<(), QueryResultBuilderError> {
         self.builder.init(config)
     }
@@ -209,12 +237,13 @@ impl<B: ResultBuilder> ResultBuilder for ExtractFrameNoBuilder<'_, B> {
     }
 
     fn finnalize(
-        self,
+        &mut self,
         is_txn: bool,
         frame_no: Option<FrameNo>,
     ) -> Result<bool, QueryResultBuilderError> {
-        self.state.last_frame_no = frame_no;
-        self.state.is_txn = is_txn;
+        let mut state = self.state.lock();
+        state.last_frame_no = frame_no;
+        state.is_txn = is_txn;
         self.builder.finnalize(is_txn, frame_no)
     }
 }
@@ -225,7 +254,6 @@ mod test {
     use std::rc::Rc;
     use std::sync::Arc;
 
-    use crate::connection::Connection;
     use crate::database::test_utils::MockDatabase;
     use crate::database::{proxy::database::WriteProxyDatabase, Database};
     use crate::program::Program;
