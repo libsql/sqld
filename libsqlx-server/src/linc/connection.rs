@@ -273,9 +273,9 @@ where
 mod test {
     use std::sync::Arc;
 
+    use futures::{future, pin_mut};
     use tokio::sync::Notify;
     use turmoil::net::{TcpListener, TcpStream};
-    use uuid::Uuid;
 
     use super::*;
 
@@ -283,151 +283,50 @@ mod test {
     fn invalid_handshake() {
         let mut sim = turmoil::Builder::new().build();
 
-        let host_node_id = NodeId::new_v4();
-        sim.host("host", move || async move {
-            let bus = Bus::new(host_node_id);
-            let listener = turmoil::net::TcpListener::bind("0.0.0.0:1234")
-                .await
-                .unwrap();
-            let (s, _) = listener.accept().await.unwrap();
-            let mut connection = Connection::new_acceptor(s, bus);
-            connection.tick().await;
+        let host_node_id = 0;
+        let done = Arc::new(Notify::new());
+        let done_clone = done.clone();
+        sim.host("host", move || {
+            let done_clone = done_clone.clone();
+            async move {
+                let bus = Arc::new(Bus::new(host_node_id, |_, _| async {}));
+                let listener = turmoil::net::TcpListener::bind("0.0.0.0:1234")
+                    .await
+                    .unwrap();
+                let (s, _) = listener.accept().await.unwrap();
+                let connection = Connection::new_acceptor(s, bus);
+                let done = done_clone.notified();
+                let run = connection.run();
+                pin_mut!(done);
+                pin_mut!(run);
+                future::select(run, done).await;
 
-            Ok(())
-        });
-
-        sim.client("client", async move {
-            let s = TcpStream::connect("host:1234").await.unwrap();
-            let mut s = AsyncBincodeStream::<_, Message, Message, _>::from(s).for_async();
-
-            s.send(Message::Node(NodeMessage::Handshake {
-                protocol_version: 1234,
-                node_id: Uuid::new_v4(),
-            }))
-            .await
-            .unwrap();
-            let m = s.next().await.unwrap().unwrap();
-
-            assert!(matches!(
-                m,
-                Message::Node(NodeMessage::Error(
-                    NodeError::HandshakeVersionMismatch { .. }
-                ))
-            ));
-
-            Ok(())
-        });
-
-        sim.run().unwrap();
-    }
-
-    #[test]
-    fn stream_closed() {
-        let mut sim = turmoil::Builder::new().build();
-
-        let database_id = DatabaseId::new_v4();
-        let host_node_id = NodeId::new_v4();
-        let notify = Arc::new(Notify::new());
-        sim.host("host", {
-            let notify = notify.clone();
-            move || {
-                let notify = notify.clone();
-                async move {
-                    let bus = Bus::new(host_node_id);
-                    let mut sub = bus.subscribe(database_id).unwrap();
-                    let listener = turmoil::net::TcpListener::bind("0.0.0.0:1234")
-                        .await
-                        .unwrap();
-                    let (s, _) = listener.accept().await.unwrap();
-                    let connection = Connection::new_acceptor(s, bus);
-                    tokio::task::spawn_local(connection.run());
-                    let mut streams = Vec::new();
-                    loop {
-                        tokio::select! {
-                            Some(mut stream) = sub.next() => {
-                                let m = stream.next().await.unwrap();
-                                stream.send(m).await.unwrap();
-                                streams.push(stream);
-                            }
-                            _ = notify.notified() => {
-                                break;
-                            }
-                        }
-                    }
-
-                    Ok(())
-                }
+                Ok(())
             }
         });
 
         sim.client("client", async move {
-            let stream_id = StreamId::new(1);
-            let node_id = NodeId::new_v4();
             let s = TcpStream::connect("host:1234").await.unwrap();
-            let mut s = AsyncBincodeStream::<_, Message, Message, _>::from(s).for_async();
+            let mut s = AsyncBincodeStream::<_, Enveloppe, Enveloppe, _>::from(s).for_async();
 
-            s.send(Message::Node(NodeMessage::Handshake {
-                protocol_version: CURRENT_PROTO_VERSION,
-                node_id,
-            }))
-            .await
-            .unwrap();
+            let msg = Enveloppe {
+                database_id: None,
+                message: Message::Handshake {
+                    protocol_version: 1234,
+                    node_id: 1,
+                },
+            };
+            s.send(msg).await.unwrap();
             let m = s.next().await.unwrap().unwrap();
-            assert!(matches!(m, Message::Node(NodeMessage::Handshake { .. })));
 
-            // send message to unexisting stream:
-            s.send(Message::Stream {
-                stream_id,
-                payload: StreamMessage::Dummy,
-            })
-            .await
-            .unwrap();
-            let m = s.next().await.unwrap().unwrap();
-            assert_eq!(
-                m,
-                Message::Node(NodeMessage::Error(NodeError::UnknownStream(stream_id)))
-            );
+            assert!(matches!(
+                m.message,
+                Message::Error(
+                    ProtoError::HandshakeVersionMismatch { .. }
+                )
+            ));
 
-            // open stream then send message
-            s.send(Message::Node(NodeMessage::OpenStream {
-                stream_id,
-                database_id,
-            }))
-            .await
-            .unwrap();
-            s.send(Message::Stream {
-                stream_id,
-                payload: StreamMessage::Dummy,
-            })
-            .await
-            .unwrap();
-            let m = s.next().await.unwrap().unwrap();
-            assert_eq!(
-                m,
-                Message::Stream {
-                    stream_id,
-                    payload: StreamMessage::Dummy
-                }
-            );
-
-            s.send(Message::Node(NodeMessage::CloseStream {
-                stream_id: StreamId::new(1),
-            }))
-            .await
-            .unwrap();
-            s.send(Message::Stream {
-                stream_id,
-                payload: StreamMessage::Dummy,
-            })
-            .await
-            .unwrap();
-            let m = s.next().await.unwrap().unwrap();
-            assert_eq!(
-                m,
-                Message::Node(NodeMessage::Error(NodeError::UnknownStream(stream_id)))
-            );
-
-            notify.notify_waiters();
+            done.notify_waiters();
 
             Ok(())
         });
@@ -459,7 +358,7 @@ mod test {
 
         sim.client("client", async move {
             let stream = TcpStream::connect("host:1234").await.unwrap();
-            let bus = Bus::new(NodeId::new_v4());
+            let bus = Arc::new(Bus::new(1, |_, _| async {}));
             let mut conn = Connection::new_acceptor(stream, bus);
 
             notify.notify_waiters();
@@ -467,59 +366,6 @@ mod test {
             conn.tick().await;
 
             assert!(matches!(conn.state, ConnectionState::CloseError(_)));
-
-            Ok(())
-        });
-
-        sim.run().unwrap();
-    }
-
-    #[test]
-    fn zero_stream_id() {
-        let mut sim = turmoil::Builder::new().build();
-
-        let notify = Arc::new(Notify::new());
-        sim.host("host", {
-            let notify = notify.clone();
-            move || {
-                let notify = notify.clone();
-                async move {
-                    let listener = TcpListener::bind("0.0.0.0:1234").await.unwrap();
-                    let (stream, _) = listener.accept().await.unwrap();
-                    let (connection_messages_sender, connection_messages) = mpsc::channel(1);
-                    let conn = Connection {
-                        peer: Some(NodeId::new_v4()),
-                        state: ConnectionState::Connected,
-                        conn: AsyncBincodeStream::from(stream).for_async(),
-                        streams: HashMap::new(),
-                        connection_messages,
-                        connection_messages_sender,
-                        is_initiator: false,
-                        bus: Bus::new(NodeId::new_v4()),
-                        stream_id_allocator: StreamIdAllocator::new(false),
-                        registration: None,
-                    };
-
-                    conn.run().await;
-
-                    Ok(())
-                }
-            }
-        });
-
-        sim.client("client", async move {
-            let stream = TcpStream::connect("host:1234").await.unwrap();
-            let mut stream = AsyncBincodeStream::<_, Message, Message, _>::from(stream).for_async();
-
-            stream
-                .send(Message::Stream {
-                    stream_id: StreamId::new_unchecked(0),
-                    payload: StreamMessage::Dummy,
-                })
-                .await
-                .unwrap();
-
-            assert!(stream.next().await.is_none());
 
             Ok(())
         });

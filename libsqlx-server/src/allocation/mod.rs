@@ -24,12 +24,11 @@ use tokio::time::timeout;
 use crate::hrana;
 use crate::hrana::http::handle_pipeline;
 use crate::hrana::http::proto::{PipelineRequestBody, PipelineResponseBody};
-use crate::linc::bus::{Bus, Dispatch};
+use crate::linc::bus::{Dispatch};
 use crate::linc::proto::{
     BuilderStep, Enveloppe, Frames, Message, ProxyResponse, StepError, Value,
 };
 use crate::linc::{Inbound, NodeId, Outbound};
-use crate::manager::Manager;
 use crate::meta::DatabaseId;
 
 use self::config::{AllocConfig, DbConfig};
@@ -505,7 +504,7 @@ impl Database {
                 next_req_id: 0,
                 primary_id: *primary_id,
                 database_id: DatabaseId::from_name(&alloc.db_name),
-                dispatcher: alloc.bus.clone(),
+                dispatcher: alloc.dispatcher.clone(),
             }),
         }
     }
@@ -687,7 +686,7 @@ pub struct Allocation {
 
     pub hrana_server: Arc<hrana::http::Server>,
     /// handle to the message bus
-    pub bus: Arc<Bus<Arc<Manager>>>,
+    pub dispatcher: Arc<dyn Dispatch>,
     pub db_name: String,
 }
 
@@ -770,7 +769,7 @@ impl Allocation {
                         next_frame_no,
                         req_no,
                         seq_no: 0,
-                        dipatcher: self.bus.clone() as _,
+                        dipatcher: self.dispatcher.clone() as _,
                         notifier: frame_notifier.clone(),
                         buffer: Vec::new(),
                     };
@@ -818,7 +817,7 @@ impl Allocation {
             Message::ProxyResponse(ref r) => {
                 if let Some(conn) = self
                     .connections
-                    .get(&self.bus.node_id())
+                    .get(&self.dispatcher.node_id())
                     .and_then(|m| m.get(&r.connection_id).cloned())
                 {
                     conn.inbound.send(msg).await.unwrap();
@@ -837,7 +836,7 @@ impl Allocation {
         req_id: u32,
         program: Program,
     ) {
-        let dispatcher = self.bus.clone();
+        let dispatcher = self.dispatcher.clone();
         let database_id = DatabaseId::from_name(&self.db_name);
         let exec = |conn: ConnectionHandle| async move {
             let _ = conn
@@ -878,7 +877,7 @@ impl Allocation {
         let conn = block_in_place(|| self.database.connect(conn_id, self));
         let (exec_sender, exec_receiver) = mpsc::channel(1);
         let (inbound_sender, inbound_receiver) = mpsc::channel(1);
-        let id = remote.unwrap_or((self.bus.node_id(), conn_id));
+        let id = remote.unwrap_or((self.dispatcher.node_id(), conn_id));
         let conn = Connection {
             id,
             conn,
@@ -903,7 +902,7 @@ impl Allocation {
             self.next_conn_id = self.next_conn_id.wrapping_add(1);
             if self
                 .connections
-                .get(&self.bus.node_id())
+                .get(&self.dispatcher.node_id())
                 .and_then(|m| m.get(&self.next_conn_id))
                 .is_none()
             {

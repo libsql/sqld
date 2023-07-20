@@ -10,16 +10,17 @@ use super::Database;
 
 pub struct MockDatabase {
     #[allow(clippy::type_complexity)]
-    describe_fn: Arc<dyn Fn(String) -> crate::Result<DescribeResponse>>,
+    describe_fn: Arc<dyn Fn(String) -> crate::Result<DescribeResponse> +Send +Sync>,
     #[allow(clippy::type_complexity)]
-    execute_fn: Arc<dyn Fn(Program, &mut dyn ResultBuilder) -> crate::Result<()>>,
+    execute_fn: Arc<dyn Fn(&Program, Box<dyn ResultBuilder>) -> crate::Result<()> +Send +Sync>,
 }
 
+#[derive(Clone)]
 pub struct MockConnection {
     #[allow(clippy::type_complexity)]
-    describe_fn: Arc<dyn Fn(String) -> crate::Result<DescribeResponse>>,
+    describe_fn: Arc<dyn Fn(String) -> crate::Result<DescribeResponse> + Send +Sync>,
     #[allow(clippy::type_complexity)]
-    execute_fn: Arc<dyn Fn(Program, &mut dyn ResultBuilder) -> crate::Result<()>>,
+    execute_fn: Arc<dyn Fn(&Program, Box<dyn ResultBuilder>) -> crate::Result<()> + Send +Sync>,
 }
 
 impl MockDatabase {
@@ -32,7 +33,7 @@ impl MockDatabase {
 
     pub fn with_execute(
         mut self,
-        f: impl Fn(Program, &mut dyn ResultBuilder) -> crate::Result<()> + 'static,
+        f: impl Fn(&Program, Box<dyn ResultBuilder>) -> crate::Result<()> + Send + Sync +'static,
     ) -> Self {
         self.execute_fn = Arc::new(f);
         self
@@ -53,8 +54,8 @@ impl Database for MockDatabase {
 impl Connection for MockConnection {
     fn execute_program(
         &mut self,
-        pgm: crate::program::Program,
-        reponse_builder: &mut dyn ResultBuilder,
+        pgm: &crate::program::Program,
+        reponse_builder: Box<dyn ResultBuilder>,
     ) -> crate::Result<()> {
         (self.execute_fn)(pgm, reponse_builder)?;
         Ok(())

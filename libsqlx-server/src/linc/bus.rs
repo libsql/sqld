@@ -50,6 +50,7 @@ impl<H: Handler> Bus<H> {
 #[async_trait::async_trait]
 pub trait Dispatch: Send + Sync + 'static {
     async fn dispatch(&self, msg: Outbound);
+    fn node_id(&self) -> NodeId;
 }
 
 #[async_trait::async_trait]
@@ -61,5 +62,9 @@ impl<H: Handler> Dispatch for Bus<H> {
         );
         // This message is outbound.
         self.send_queue.enqueue(msg).await;
+    }
+
+    fn node_id(&self) -> NodeId {
+        self.node_id
     }
 }

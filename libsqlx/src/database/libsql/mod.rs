@@ -196,6 +196,7 @@ mod test {
     use std::sync::atomic::AtomicBool;
     use std::sync::atomic::Ordering::Relaxed;
 
+    use parking_lot::Mutex;
     use rusqlite::types::Value;
 
     use crate::connection::Connection;
@@ -205,14 +206,14 @@ mod test {
 
     use super::*;
 
-    struct ReadRowBuilder(Vec<rusqlite::types::Value>);
+    struct ReadRowBuilder(Arc<Mutex<Vec<rusqlite::types::Value>>>);
 
     impl ResultBuilder for ReadRowBuilder {
         fn add_row_value(
             &mut self,
             v: rusqlite::types::ValueRef,
         ) -> Result<(), QueryResultBuilderError> {
-            self.0.push(v.into());
+            self.0.lock().push(v.into());
             Ok(())
         }
     }
@@ -227,22 +228,26 @@ mod test {
         let mut db = LibsqlDatabase::new(temp.path().to_path_buf(), replica);
 
         let mut conn = db.connect().unwrap();
-        let mut builder = ReadRowBuilder(Vec::new());
-        conn.execute_program(Program::seq(&["select count(*) from test"]), &mut builder)
+        let row: Arc<Mutex<Vec<Value>>> = Default::default();
+        let builder = Box::new(ReadRowBuilder(row.clone()));
+        conn.execute_program(&Program::seq(&["select count(*) from test"]), builder)
             .unwrap();
-        assert!(builder.0.is_empty());
+        assert!(row.lock().is_empty());
 
         let file = File::open("assets/test/simple_wallog").unwrap();
         let log = LogFile::new(file).unwrap();
         let mut injector = db.injector().unwrap();
         log.frames_iter()
             .unwrap()
-            .for_each(|f| injector.inject(f.unwrap()).unwrap());
+            .for_each(|f| {
+                injector.inject(f.unwrap()).unwrap();
+            });
 
-        let mut builder = ReadRowBuilder(Vec::new());
-        conn.execute_program(Program::seq(&["select count(*) from test"]), &mut builder)
+        let row: Arc<Mutex<Vec<Value>>> = Default::default();
+        let builder = Box::new(ReadRowBuilder(row.clone()));
+        conn.execute_program(&Program::seq(&["select count(*) from test"]), builder)
             .unwrap();
-        assert_eq!(builder.0[0], Value::Integer(5));
+        assert_eq!(row.lock()[0], Value::Integer(5));
     }
 
     #[test]
@@ -253,7 +258,7 @@ mod test {
         let primary = LibsqlDatabase::new(
             temp_primary.path().to_path_buf(),
             PrimaryType {
-                logger: Arc::new(ReplicationLogger::open(temp_primary.path(), false, ()).unwrap()),
+                logger: Arc::new(ReplicationLogger::open(temp_primary.path(), false, (), Box::new(|_| ())).unwrap()),
             },
         );
 
@@ -268,8 +273,8 @@ mod test {
         let mut primary_conn = primary.connect().unwrap();
         primary_conn
             .execute_program(
-                Program::seq(&["create table test (x)", "insert into test values (42)"]),
-                &mut (),
+                &Program::seq(&["create table test (x)", "insert into test values (42)"]),
+                Box::new(()),
             )
             .unwrap();
 
@@ -282,13 +287,14 @@ mod test {
         }
 
         let mut replica_conn = replica.connect().unwrap();
-        let mut builder = ReadRowBuilder(Vec::new());
+        let row: Arc<Mutex<Vec<Value>>> = Default::default();
+        let builder = Box::new(ReadRowBuilder(row.clone()));
         replica_conn
-            .execute_program(Program::seq(&["select * from test limit 1"]), &mut builder)
+            .execute_program(&Program::seq(&["select * from test limit 1"]), builder)
             .unwrap();
 
-        assert_eq!(builder.0.len(), 1);
-        assert_eq!(builder.0[0], Value::Integer(42));
+        assert_eq!(row.lock().len(), 1);
+        assert_eq!(row.lock()[0], Value::Integer(42));
     }
 
     #[test]
@@ -317,13 +323,14 @@ mod test {
             temp.path().to_path_buf(),
             Compactor(compactor_called.clone()),
             false,
+            Box::new(|_| ()),
         )
         .unwrap();
 
         let mut conn = db.connect().unwrap();
         conn.execute_program(
-            Program::seq(&["create table test (x)", "insert into test values (12)"]),
-            &mut (),
+            &Program::seq(&["create table test (x)", "insert into test values (12)"]),
+            Box::new(()),
         )
         .unwrap();
         assert!(compactor_called.load(Relaxed));
@@ -356,22 +363,23 @@ mod test {
             temp.path().to_path_buf(),
             Compactor(compactor_called.clone()),
             false,
+            Box::new(|_| ())
         )
         .unwrap();
 
         let mut conn = db.connect().unwrap();
         conn.execute_program(
-            Program::seq(&[
+            &Program::seq(&[
                 "begin",
                 "create table test (x)",
                 "insert into test values (12)",
             ]),
-            &mut (),
+            Box::new(())
         )
         .unwrap();
         conn.inner_connection().cache_flush().unwrap();
         assert!(!compactor_called.load(Relaxed));
-        conn.execute_program(Program::seq(&["commit"]), &mut ())
+        conn.execute_program(&Program::seq(&["commit"]), Box::new(()))
             .unwrap();
         assert!(compactor_called.load(Relaxed));
     }

@@ -8,7 +8,7 @@ use tokio::task::JoinSet;
 
 use crate::allocation::{Allocation, AllocationMessage, Database};
 use crate::hrana;
-use crate::linc::bus::Bus;
+use crate::linc::bus::Dispatch;
 use crate::linc::handler::Handler;
 use crate::linc::Inbound;
 use crate::meta::{DatabaseId, Store};
@@ -34,7 +34,7 @@ impl Manager {
     pub async fn alloc(
         self: &Arc<Self>,
         database_id: DatabaseId,
-        bus: Arc<Bus<Arc<Self>>>,
+        dispatcher: Arc<dyn Dispatch>,
     ) -> Option<mpsc::Sender<AllocationMessage>> {
         if let Some(sender) = self.cache.get(&database_id) {
             return Some(sender.clone());
@@ -46,12 +46,12 @@ impl Manager {
             let (alloc_sender, inbox) = mpsc::channel(MAX_ALLOC_MESSAGE_QUEUE_LEN);
             let alloc = Allocation {
                 inbox,
-                database: Database::from_config(&config, path, bus.clone()),
+                database: Database::from_config(&config, path, dispatcher.clone()),
                 connections_futs: JoinSet::new(),
                 next_conn_id: 0,
                 max_concurrent_connections: config.max_conccurent_connection,
                 hrana_server: Arc::new(hrana::http::Server::new(None)),
-                bus, // TODO: handle self URL?
+                dispatcher, // TODO: handle self URL?
                 db_name: config.db_name,
                 connections: HashMap::new(),
             };
@@ -69,7 +69,7 @@ impl Manager {
 
 #[async_trait::async_trait]
 impl Handler for Arc<Manager> {
-    async fn handle(&self, bus: Arc<Bus<Self>>, msg: Inbound) {
+    async fn handle(&self, bus: Arc<dyn Dispatch>, msg: Inbound) {
         if let Some(sender) = self
             .clone()
             .alloc(msg.enveloppe.database_id.unwrap(), bus.clone())
