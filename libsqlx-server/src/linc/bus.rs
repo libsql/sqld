@@ -2,9 +2,11 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use parking_lot::RwLock;
+use tokio::sync::mpsc;
 
 use super::connection::SendQueue;
 use super::handler::Handler;
+use super::proto::Enveloppe;
 use super::{Inbound, NodeId, Outbound};
 
 pub struct Bus<H> {
@@ -37,9 +39,10 @@ impl<H: Handler> Bus<H> {
         &self.send_queue
     }
 
-    pub fn connect(&self, node_id: NodeId) {
+    pub fn connect(&self, node_id: NodeId) -> mpsc::UnboundedReceiver<Enveloppe> {
         // TODO: handle peer already exists
         self.peers.write().insert(node_id);
+        self.send_queue.register(node_id)
     }
 
     pub fn disconnect(&self, node_id: NodeId) {

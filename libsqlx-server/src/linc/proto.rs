@@ -107,6 +107,7 @@ pub enum BuilderStep {
         is_txn: bool,
         frame_no: Option<FrameNo>,
     },
+    FinnalizeError(String),
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]

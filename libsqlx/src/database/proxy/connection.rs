@@ -15,7 +15,7 @@ enum State {
     Txn,
     #[default]
     Idle,
-    Unknown
+    Unknown,
 }
 
 impl State {
@@ -153,6 +153,10 @@ where
             self.builder.as_mut().unwrap().finnalize(is_txn, frame_no)
         }
     }
+
+    fn finnalize_error(&mut self, e: String) {
+        self.builder.take().unwrap().finnalize_error(e)
+    }
 }
 
 impl<R, W> Connection for WriteProxyConnection<R, W>
@@ -274,6 +278,10 @@ impl ResultBuilder for ExtractFrameNoBuilder {
         }
         self.builder.finnalize(is_txn, frame_no)
     }
+
+    fn finnalize_error(&mut self, e: String) {
+        self.builder.finnalize_error(e)
+    }
 }
 
 #[cfg(test)]
@@ -282,10 +290,10 @@ mod test {
 
     use parking_lot::Mutex;
 
-    use crate::Connection;
     use crate::database::test_utils::MockDatabase;
     use crate::database::{proxy::database::WriteProxyDatabase, Database};
     use crate::program::Program;
+    use crate::Connection;
 
     #[test]
     fn simple_write_proxied() {
@@ -294,7 +302,7 @@ mod test {
             let write_called = write_called.clone();
             move |_, mut b| {
                 b.finnalize(false, Some(42)).unwrap();
-                *write_called.lock() =true;
+                *write_called.lock() = true;
                 Ok(())
             }
         });
@@ -322,8 +330,11 @@ mod test {
         );
 
         let mut conn = db.connect().unwrap();
-        conn.execute_program(&Program::seq(&["insert into test values (12)"]), Box::new(()))
-            .unwrap();
+        conn.execute_program(
+            &Program::seq(&["insert into test values (12)"]),
+            Box::new(()),
+        )
+        .unwrap();
 
         assert!(!*wait_called.lock());
         assert!(!*read_called.lock());

@@ -76,6 +76,10 @@ impl ResultBuilder for SingleStatementBuilder {
         let _ = self.ret.take().unwrap().send(res);
         Ok(true)
     }
+
+    fn finnalize_error(&mut self, _e: String) {
+        todo!()
+    }
 }
 
 #[derive(Debug, Default)]
@@ -353,5 +357,9 @@ impl ResultBuilder for HranaBatchProtoBuilder {
 
     fn add_row_value(&mut self, v: ValueRef) -> Result<(), QueryResultBuilderError> {
         self.stmt_builder.add_row_value(v)
+    }
+
+    fn finnalize_error(&mut self, _e: String) {
+        todo!()
     }
 }
