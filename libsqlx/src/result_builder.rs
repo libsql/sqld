@@ -138,6 +138,9 @@ pub trait ResultBuilder: Send + 'static {
     ) -> Result<bool, QueryResultBuilderError> {
         Ok(true)
     }
+
+    /// There was a fatal error and the request was aborted
+    fn finnalize_error(&mut self, _e: String) {}
 }
 
 pub trait ResultBuilderExt: ResultBuilder {

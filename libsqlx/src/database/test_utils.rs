@@ -10,17 +10,17 @@ use super::Database;
 
 pub struct MockDatabase {
     #[allow(clippy::type_complexity)]
-    describe_fn: Arc<dyn Fn(String) -> crate::Result<DescribeResponse> +Send +Sync>,
+    describe_fn: Arc<dyn Fn(String) -> crate::Result<DescribeResponse> + Send + Sync>,
     #[allow(clippy::type_complexity)]
-    execute_fn: Arc<dyn Fn(&Program, Box<dyn ResultBuilder>) -> crate::Result<()> +Send +Sync>,
+    execute_fn: Arc<dyn Fn(&Program, Box<dyn ResultBuilder>) -> crate::Result<()> + Send + Sync>,
 }
 
 #[derive(Clone)]
 pub struct MockConnection {
     #[allow(clippy::type_complexity)]
-    describe_fn: Arc<dyn Fn(String) -> crate::Result<DescribeResponse> + Send +Sync>,
+    describe_fn: Arc<dyn Fn(String) -> crate::Result<DescribeResponse> + Send + Sync>,
     #[allow(clippy::type_complexity)]
-    execute_fn: Arc<dyn Fn(&Program, Box<dyn ResultBuilder>) -> crate::Result<()> + Send +Sync>,
+    execute_fn: Arc<dyn Fn(&Program, Box<dyn ResultBuilder>) -> crate::Result<()> + Send + Sync>,
 }
 
 impl MockDatabase {
@@ -33,7 +33,7 @@ impl MockDatabase {
 
     pub fn with_execute(
         mut self,
-        f: impl Fn(&Program, Box<dyn ResultBuilder>) -> crate::Result<()> + Send + Sync +'static,
+        f: impl Fn(&Program, Box<dyn ResultBuilder>) -> crate::Result<()> + Send + Sync + 'static,
     ) -> Self {
         self.execute_fn = Arc::new(f);
         self

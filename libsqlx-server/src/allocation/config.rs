@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use serde::{Deserialize, Serialize};
 
 use crate::linc::NodeId;
@@ -19,5 +21,8 @@ pub struct AllocConfig {
 #[derive(Debug, Serialize, Deserialize)]
 pub enum DbConfig {
     Primary {},
-    Replica { primary_node_id: NodeId },
+    Replica {
+        primary_node_id: NodeId,
+        proxy_request_timeout_duration: Duration,
+    },
 }

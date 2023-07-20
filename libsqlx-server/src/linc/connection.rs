@@ -227,8 +227,7 @@ where
 
                     self.peer = Some(node_id);
                     self.state = ConnectionState::Connected;
-                    self.send_queue = Some(self.bus.send_queue().register(node_id));
-                    self.bus.connect(node_id);
+                    self.send_queue = Some(self.bus.connect(node_id));
 
                     Ok(())
                 }
@@ -321,9 +320,7 @@ mod test {
 
             assert!(matches!(
                 m.message,
-                Message::Error(
-                    ProtoError::HandshakeVersionMismatch { .. }
-                )
+                Message::Error(ProtoError::HandshakeVersionMismatch { .. })
             ));
 
             done.notify_waiters();

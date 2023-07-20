@@ -237,11 +237,9 @@ mod test {
         let file = File::open("assets/test/simple_wallog").unwrap();
         let log = LogFile::new(file).unwrap();
         let mut injector = db.injector().unwrap();
-        log.frames_iter()
-            .unwrap()
-            .for_each(|f| {
-                injector.inject(f.unwrap()).unwrap();
-            });
+        log.frames_iter().unwrap().for_each(|f| {
+            injector.inject(f.unwrap()).unwrap();
+        });
 
         let row: Arc<Mutex<Vec<Value>>> = Default::default();
         let builder = Box::new(ReadRowBuilder(row.clone()));
@@ -258,7 +256,10 @@ mod test {
         let primary = LibsqlDatabase::new(
             temp_primary.path().to_path_buf(),
             PrimaryType {
-                logger: Arc::new(ReplicationLogger::open(temp_primary.path(), false, (), Box::new(|_| ())).unwrap()),
+                logger: Arc::new(
+                    ReplicationLogger::open(temp_primary.path(), false, (), Box::new(|_| ()))
+                        .unwrap(),
+                ),
             },
         );
 
@@ -363,7 +364,7 @@ mod test {
             temp.path().to_path_buf(),
             Compactor(compactor_called.clone()),
             false,
-            Box::new(|_| ())
+            Box::new(|_| ()),
         )
         .unwrap();
 
@@ -374,7 +375,7 @@ mod test {
                 "create table test (x)",
                 "insert into test values (12)",
             ]),
-            Box::new(())
+            Box::new(()),
         )
         .unwrap();
         conn.inner_connection().cache_flush().unwrap();

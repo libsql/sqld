@@ -17,6 +17,7 @@ color-eyre = "0.6.2"
 either = "1.8.1"
 futures = "0.3.28"
 hmac = "0.12.1"
+humantime = "2.1.0"
 hyper = { version = "0.14.27", features = ["h2", "server"] }
 itertools = "0.11.0"
 libsqlx = { version = "0.1.0", path = "../libsqlx", features = ["tokio"] }
@@ -30,6 +31,7 @@ serde_json = "1.0.100"
 sha2 = "0.10.7"
 sha3 = "0.10.8"
 sled = "0.34.7"
+tempfile = "3.6.0"
 thiserror = "1.0.43"
 tokio = { version = "1.29.1", features = ["full"] }
 tokio-stream = "0.1.14"

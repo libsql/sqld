@@ -11,8 +11,26 @@ use crate::Result;
 use super::WaitFrameNoCb;
 
 #[derive(Debug, Default)]
+enum State {
+    Txn,
+    #[default]
+    Idle,
+    Unknown,
+}
+
+impl State {
+    /// Returns `true` if the state is [`Idle`].
+    ///
+    /// [`Idle`]: State::Idle
+    #[must_use]
+    fn is_idle(&self) -> bool {
+        matches!(self, Self::Idle)
+    }
+}
+
+#[derive(Debug, Default)]
 pub(crate) struct ConnState {
-    is_txn: bool,
+    state: State,
     last_frame_no: Option<FrameNo>,
 }
 
@@ -123,6 +141,9 @@ where
                 state: self.state.clone(),
             };
 
+            // set the connection state to unknown before executing on the remote
+            self.state.lock().state = State::Unknown;
+
             self.conn
                 .execute_program(&self.pgm, Box::new(builder))
                 .unwrap();
@@ -131,6 +152,10 @@ where
         } else {
             self.builder.as_mut().unwrap().finnalize(is_txn, frame_no)
         }
+    }
+
+    fn finnalize_error(&mut self, e: String) {
+        self.builder.take().unwrap().finnalize_error(e)
     }
 }
 
@@ -144,7 +169,7 @@ where
         pgm: &Program,
         builder: Box<dyn ResultBuilder>,
     ) -> crate::Result<()> {
-        if !self.state.lock().is_txn && pgm.is_read_only() {
+        if self.state.lock().state.is_idle() && pgm.is_read_only() {
             if let Some(frame_no) = self.state.lock().last_frame_no {
                 (self.wait_frame_no_cb)(frame_no);
             }
@@ -162,6 +187,9 @@ where
             // rollback(&mut self.conn.read_db);
             Ok(())
         } else {
+            // we set the state to unknown because until we have received from the actual
+            // connection state from the primary.
+            self.state.lock().state = State::Unknown;
             let builder = ExtractFrameNoBuilder {
                 builder,
                 state: self.state.clone(),
@@ -243,8 +271,16 @@ impl ResultBuilder for ExtractFrameNoBuilder {
     ) -> Result<bool, QueryResultBuilderError> {
         let mut state = self.state.lock();
         state.last_frame_no = frame_no;
-        state.is_txn = is_txn;
+        if is_txn {
+            state.state = State::Txn;
+        } else {
+            state.state = State::Idle;
+        }
         self.builder.finnalize(is_txn, frame_no)
+    }
+
+    fn finnalize_error(&mut self, e: String) {
+        self.builder.finnalize_error(e)
     }
 }
 
@@ -254,10 +290,10 @@ mod test {
 
     use parking_lot::Mutex;
 
-    use crate::Connection;
     use crate::database::test_utils::MockDatabase;
     use crate::database::{proxy::database::WriteProxyDatabase, Database};
     use crate::program::Program;
+    use crate::Connection;
 
     #[test]
     fn simple_write_proxied() {
@@ -266,7 +302,7 @@ mod test {
             let write_called = write_called.clone();
             move |_, mut b| {
                 b.finnalize(false, Some(42)).unwrap();
-                *write_called.lock() =true;
+                *write_called.lock() = true;
                 Ok(())
             }
         });
@@ -294,8 +330,11 @@ mod test {
         );
 
         let mut conn = db.connect().unwrap();
-        conn.execute_program(&Program::seq(&["insert into test values (12)"]), Box::new(()))
-            .unwrap();
+        conn.execute_program(
+            &Program::seq(&["insert into test values (12)"]),
+            Box::new(()),
+        )
+        .unwrap();
 
         assert!(!*wait_called.lock());
         assert!(!*read_called.lock());

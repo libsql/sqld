@@ -1,16 +1,18 @@
 use std::sync::Arc;
+use std::str::FromStr;
+use std::time::Duration;
 
-use axum::{extract::State, routing::post, Json, Router};
+use axum::{Json, Router};
+use axum::routing::post;
+use axum::extract::State;
 use color_eyre::eyre::Result;
 use hyper::server::accept::Accept;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use tokio::io::{AsyncRead, AsyncWrite};
 
-use crate::{
-    allocation::config::{AllocConfig, DbConfig},
-    linc::NodeId,
-    meta::Store,
-};
+use crate::meta::Store;
+use crate::allocation::config::{AllocConfig, DbConfig};
+use crate::linc::NodeId;
 
 pub struct Config {
     pub meta_store: Arc<Store>,
@@ -52,11 +54,46 @@ struct AllocateReq {
     config: DbConfigReq,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum DbConfigReq {
     Primary {},
-    Replica { primary_node_id: NodeId },
+    Replica {
+        primary_node_id: NodeId,
+        #[serde(deserialize_with = "deserialize_duration", default = "default_proxy_timeout")]
+        proxy_request_timeout_duration: Duration,
+    },
+}
+
+const fn default_proxy_timeout() -> Duration {
+    Duration::from_secs(5)
+}
+
+fn deserialize_duration<'de, D>(deserializer: D) -> Result<Duration, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    struct Visitor;
+    impl serde::de::Visitor<'_> for Visitor {
+        type Value = Duration;
+
+        fn visit_str<E>(self, v: &str) -> std::result::Result<Self::Value, E>
+            where
+                E: serde::de::Error, 
+        {
+            match humantime::Duration::from_str(v) {
+                Ok(d) => Ok(*d),
+                Err(e) => Err(E::custom(e.to_string())),
+            }
+        }
+
+        fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+            f.write_str("a duration, in a string format")
+        }
+
+    }
+
+    deserializer.deserialize_str(Visitor)
 }
 
 async fn allocate(
@@ -68,7 +105,13 @@ async fn allocate(
         db_name: req.alloc_id.clone(),
         db_config: match req.config {
             DbConfigReq::Primary {} => DbConfig::Primary {},
-            DbConfigReq::Replica { primary_node_id } => DbConfig::Replica { primary_node_id },
+            DbConfigReq::Replica {
+                primary_node_id,
+                proxy_request_timeout_duration,
+            } => DbConfig::Replica {
+                primary_node_id,
+                proxy_request_timeout_duration,
+            },
         },
     };
     state.meta_store.allocate(&req.alloc_id, &config).await;

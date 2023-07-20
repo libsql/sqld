@@ -39,7 +39,6 @@ impl Program {
         Self { steps }
     }
 
-    #[cfg(test)]
     pub fn seq(stmts: &[&str]) -> Self {
         use crate::{analysis::Statement, query::Params};
 
