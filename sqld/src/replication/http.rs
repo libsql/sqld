@@ -134,6 +134,8 @@ async fn handle_query(
     _auth: crate::auth::Authenticated,
     logger: Arc<ReplicationLogger>,
 ) -> Result<Response<Body>> {
+    const MAX_FRAMES_IN_SINGLE_RESPONSE: usize = 256;
+
     let bytes = hyper::body::to_bytes(req.body_mut()).await?;
     let FramesRequest { next_offset } = match serde_json::from_slice(&bytes) {
         Ok(req) => req,
@@ -141,9 +143,13 @@ async fn handle_query(
     };
     tracing::trace!("Requested next offset: {next_offset}");
 
-    let current_frameno = next_offset.saturating_sub(1);
+    let next_offset = std::cmp::max(next_offset, 1); // Frames start from 1
+    let current_frameno = next_offset - 1;
     let mut frame_stream = FrameStream::new(logger, current_frameno);
-
+    tracing::trace!(
+        "Max available frame_no: {}",
+        frame_stream.max_available_frame_no
+    );
     if frame_stream.max_available_frame_no < next_offset {
         tracing::trace!("No frames available starting {next_offset}, returning 204 No Content");
         return Ok(Response::builder()
@@ -153,7 +159,7 @@ async fn handle_query(
     }
 
     let mut frames = Frames::new();
-    loop {
+    for _ in 0..MAX_FRAMES_IN_SINGLE_RESPONSE {
         use futures::StreamExt;
 
         match frame_stream.next().await {
@@ -171,7 +177,6 @@ async fn handle_query(
             None => break,
         }
 
-        // FIXME: also stop when we have enough frames to fill a large buffer
         if frame_stream.max_available_frame_no <= frame_stream.current_frame_no {
             break;
         }
