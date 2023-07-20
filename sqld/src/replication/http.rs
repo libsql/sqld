@@ -10,6 +10,23 @@ use tower_http::trace::DefaultOnResponse;
 use tower_http::{compression::CompressionLayer, cors};
 use tracing::{Level, Span};
 
+#[derive(Debug, serde::Deserialize, serde::Serialize)]
+pub struct FramesRequest {
+    pub next_offset: u64,
+}
+
+#[derive(Debug, serde::Deserialize, serde::Serialize)]
+pub struct Frames {
+    pub frames: Vec<Frame>,
+}
+
+#[derive(Debug, serde::Deserialize, serde::Serialize)]
+pub struct Hello {
+    pub generation_id: uuid::Uuid,
+    pub generation_start_index: u64,
+    pub database_id: uuid::Uuid,
+}
+
 pub(crate) async fn run(
     auth: Arc<Auth>,
     addr: SocketAddr,
@@ -70,19 +87,10 @@ async fn handle_request(
     };
 
     match (req.method(), req.uri().path()) {
+        (&Method::GET, "/hello") => handle_hello(logger).await,
         (&Method::POST, "/frames") => handle_query(req, auth, logger).await,
         _ => Ok(Response::builder().status(404).body(Body::empty()).unwrap()),
     }
-}
-
-#[derive(Debug, serde::Deserialize, serde::Serialize)]
-pub struct FramesRequest {
-    pub next_offset: u64,
-}
-
-#[derive(Debug, serde::Deserialize, serde::Serialize)]
-pub struct Frames {
-    pub frames: Vec<Frame>,
 }
 
 impl Frames {
@@ -105,6 +113,20 @@ fn error(msg: &str, code: hyper::StatusCode) -> Response<Body> {
         .status(code)
         .body(Body::from(serde_json::to_vec(&err).unwrap()))
         .unwrap()
+}
+
+async fn handle_hello(logger: Arc<ReplicationLogger>) -> Result<Response<Body>> {
+    let hello = Hello {
+        generation_id: logger.generation.id,
+        generation_start_index: logger.generation.start_index,
+        database_id: logger.database_id()?,
+    };
+
+    let resp = Response::builder()
+        .status(hyper::StatusCode::OK)
+        .body(Body::from(serde_json::to_vec(&hello)?))
+        .unwrap();
+    Ok(resp)
 }
 
 async fn handle_query(
