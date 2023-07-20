@@ -958,7 +958,7 @@ mod test {
     #[test]
     fn write_and_read_from_frame_log() {
         let dir = tempfile::tempdir().unwrap();
-        let logger = ReplicationLogger::open(dir.path(), false, ()).unwrap();
+        let logger = ReplicationLogger::open(dir.path(), false, (), Box::new(|_| ())).unwrap();
 
         let frames = (0..10)
             .map(|i| WalPage {
@@ -986,7 +986,7 @@ mod test {
     #[test]
     fn index_out_of_bounds() {
         let dir = tempfile::tempdir().unwrap();
-        let logger = ReplicationLogger::open(dir.path(), false, ()).unwrap();
+        let logger = ReplicationLogger::open(dir.path(), false, (), Box::new(|_| ())).unwrap();
         let log_file = logger.log_file.write();
         assert!(matches!(log_file.frame(1), Err(LogReadError::Ahead)));
     }
@@ -995,7 +995,7 @@ mod test {
     #[should_panic]
     fn incorrect_frame_size() {
         let dir = tempfile::tempdir().unwrap();
-        let logger = ReplicationLogger::open(dir.path(), false, ()).unwrap();
+        let logger = ReplicationLogger::open(dir.path(), false, (), Box::new(|_| ())).unwrap();
         let entry = WalPage {
             page_no: 0,
             size_after: 0,

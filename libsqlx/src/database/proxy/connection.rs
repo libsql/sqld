@@ -250,36 +250,37 @@ impl ResultBuilder for ExtractFrameNoBuilder {
 
 #[cfg(test)]
 mod test {
-    use std::cell::Cell;
-    use std::rc::Rc;
     use std::sync::Arc;
 
+    use parking_lot::Mutex;
+
+    use crate::Connection;
     use crate::database::test_utils::MockDatabase;
     use crate::database::{proxy::database::WriteProxyDatabase, Database};
     use crate::program::Program;
 
     #[test]
     fn simple_write_proxied() {
-        let write_called = Rc::new(Cell::new(false));
+        let write_called = Arc::new(Mutex::new(false));
         let write_db = MockDatabase::new().with_execute({
             let write_called = write_called.clone();
-            move |_, b| {
+            move |_, mut b| {
                 b.finnalize(false, Some(42)).unwrap();
-                write_called.set(true);
+                *write_called.lock() =true;
                 Ok(())
             }
         });
 
-        let read_called = Rc::new(Cell::new(false));
+        let read_called = Arc::new(Mutex::new(false));
         let read_db = MockDatabase::new().with_execute({
             let read_called = read_called.clone();
             move |_, _| {
-                read_called.set(true);
+                *read_called.lock() = true;
                 Ok(())
             }
         });
 
-        let wait_called = Rc::new(Cell::new(false));
+        let wait_called = Arc::new(Mutex::new(false));
         let db = WriteProxyDatabase::new(
             read_db,
             write_db,
@@ -287,23 +288,23 @@ mod test {
                 let wait_called = wait_called.clone();
                 move |fno| {
                     assert_eq!(fno, 42);
-                    wait_called.set(true);
+                    *wait_called.lock() = true;
                 }
             }),
         );
 
         let mut conn = db.connect().unwrap();
-        conn.execute_program(Program::seq(&["insert into test values (12)"]), &mut ())
+        conn.execute_program(&Program::seq(&["insert into test values (12)"]), Box::new(()))
             .unwrap();
 
-        assert!(!wait_called.get());
-        assert!(!read_called.get());
-        assert!(write_called.get());
+        assert!(!*wait_called.lock());
+        assert!(!*read_called.lock());
+        assert!(*write_called.lock());
 
-        conn.execute_program(Program::seq(&["select * from test"]), &mut ())
+        conn.execute_program(&Program::seq(&["select * from test"]), Box::new(()))
             .unwrap();
 
-        assert!(read_called.get());
-        assert!(wait_called.get());
+        assert!(*read_called.lock());
+        assert!(*wait_called.lock());
     }
 }

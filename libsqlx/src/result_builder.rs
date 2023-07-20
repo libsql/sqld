@@ -650,9 +650,10 @@ pub mod test {
             &mut self,
             _is_txn: bool,
             _frame_no: Option<FrameNo>,
-        ) -> Result<(), QueryResultBuilderError> {
+        ) -> Result<bool, QueryResultBuilderError> {
             self.maybe_inject_error()?;
-            self.transition(Finish)
+            self.transition(Finish)?;
+            Ok(true)
         }
     }
 

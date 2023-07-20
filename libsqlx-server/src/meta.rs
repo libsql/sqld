@@ -27,6 +27,11 @@ impl DatabaseId {
         reader.read(&mut out);
         Self(out)
     }
+
+    #[cfg(test)]
+    pub fn random() -> Self {
+        Self(uuid::Uuid::new_v4().into_bytes())
+    }
 }
 
 impl fmt::Display for DatabaseId {

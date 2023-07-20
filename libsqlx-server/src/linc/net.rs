@@ -74,6 +74,10 @@ mod test {
         fn accept(&self) -> Self::Future<'_> {
             Box::pin(self.accept())
         }
+
+        fn local_addr(&self) -> color_eyre::Result<SocketAddr> {
+            Ok(self.local_addr()?)
+        }
     }
 
     impl Connector for TcpStream {
