@@ -39,7 +39,7 @@ async fn spawn_admin_api(
 ) -> Result<()> {
     let admin_api_listener = TcpListener::bind(config.addr).await?;
     let fut = run_admin_api(
-        http::admin::Config { meta_store },
+        http::admin::Config { manager: meta_store },
         AddrIncoming::from_listener(admin_api_listener)?,
     );
     set.spawn(fut);

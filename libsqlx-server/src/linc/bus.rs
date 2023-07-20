@@ -31,6 +31,10 @@ impl<H: Handler> Bus<H> {
         self.node_id
     }
 
+    pub fn handler(&self) -> &H {
+        &self.handler
+    }
+
     pub async fn incomming(self: &Arc<Self>, incomming: Inbound) {
         self.handler.handle(self.clone(), incomming).await;
     }

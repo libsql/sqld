@@ -6,6 +6,7 @@ use moka::future::Cache;
 use tokio::sync::mpsc;
 use tokio::task::JoinSet;
 
+use crate::allocation::config::AllocConfig;
 use crate::allocation::{Allocation, AllocationMessage, Database};
 use crate::hrana;
 use crate::linc::bus::Dispatch;
@@ -31,7 +32,7 @@ impl Manager {
     }
 
     /// Returns a handle to an allocation, lazily initializing if it isn't already loaded.
-    pub async fn alloc(
+    pub async fn schedule(
         self: &Arc<Self>,
         database_id: DatabaseId,
         dispatcher: Arc<dyn Dispatch>,
@@ -65,6 +66,15 @@ impl Manager {
 
         None
     }
+
+    pub async fn allocate(self: &Arc<Self>, database_name: &str, meta: &AllocConfig, dispatcher: Arc<dyn Dispatch>) {
+        let id = self.store().allocate(database_name, meta).await;
+        self.schedule(id, dispatcher).await;
+    }
+
+    pub fn store(&self) -> &Store {
+        &self.meta_store
+    }
 }
 
 #[async_trait::async_trait]
@@ -72,7 +82,7 @@ impl Handler for Arc<Manager> {
     async fn handle(&self, bus: Arc<dyn Dispatch>, msg: Inbound) {
         if let Some(sender) = self
             .clone()
-            .alloc(msg.enveloppe.database_id.unwrap(), bus.clone())
+            .schedule(msg.enveloppe.database_id.unwrap(), bus.clone())
             .await
         {
             let _ = sender.send(AllocationMessage::Inbound(msg)).await;

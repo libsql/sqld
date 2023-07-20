@@ -10,16 +10,17 @@ use hyper::server::accept::Accept;
 use serde::{Deserialize, Deserializer, Serialize};
 use tokio::io::{AsyncRead, AsyncWrite};
 
-use crate::meta::Store;
+use crate::linc::bus::Bus;
+use crate::manager::Manager;
 use crate::allocation::config::{AllocConfig, DbConfig};
 use crate::linc::NodeId;
 
 pub struct Config {
-    pub meta_store: Arc<Store>,
+    pub bus: Arc<Bus<Arc<Manager>>>,
 }
 
 struct AdminServerState {
-    meta_store: Arc<Store>,
+    bus: Arc<Bus<Arc<Manager>>>,
 }
 
 pub async fn run_admin_api<I>(config: Config, listener: I) -> Result<()>
@@ -28,7 +29,7 @@ where
     I::Conn: AsyncRead + AsyncWrite + Send + Unpin + 'static,
 {
     let state = AdminServerState {
-        meta_store: config.meta_store,
+        bus: config.bus,
     };
 
     let app = Router::new()
@@ -114,7 +115,9 @@ async fn allocate(
             },
         },
     };
-    state.meta_store.allocate(&req.alloc_id, &config).await;
+
+    let dispatcher = state.bus.clone();
+    state.bus.handler().allocate(&req.alloc_id, &config, dispatcher).await;
 
     Ok(Json(AllocateResp {}))
 }
