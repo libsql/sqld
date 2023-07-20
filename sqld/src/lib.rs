@@ -497,14 +497,14 @@ async fn start_primary(
             config.rpc_server_key.clone(),
             config.rpc_server_ca_cert.clone(),
             db_factory.clone(),
-            logger,
+            logger.clone(),
             idle_shutdown_layer.clone(),
         ));
     }
 
     if let Some(ref addr) = config.http_replication_addr {
         let auth = get_auth(config)?;
-        join_set.spawn(replication::http::run(auth, *addr));
+        join_set.spawn(replication::http::run(auth, *addr, logger));
     }
 
     run_service(
