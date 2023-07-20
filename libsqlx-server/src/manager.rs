@@ -67,9 +67,21 @@ impl Manager {
         None
     }
 
-    pub async fn allocate(self: &Arc<Self>, database_name: &str, meta: &AllocConfig, dispatcher: Arc<dyn Dispatch>) {
-        let id = self.store().allocate(database_name, meta).await;
-        self.schedule(id, dispatcher).await;
+    pub async fn allocate(
+        self: &Arc<Self>,
+        database_id: DatabaseId,
+        meta: &AllocConfig,
+        dispatcher: Arc<dyn Dispatch>,
+    ) {
+        self.store().allocate(database_id, meta).await;
+        self.schedule(database_id, dispatcher).await;
+    }
+
+    pub async fn deallocate(&self, database_id: DatabaseId) {
+        self.meta_store.deallocate(database_id).await;
+        self.cache.remove(&database_id).await;
+        let db_path = self.db_path.join("dbs").join(database_id.to_string());
+        tokio::fs::remove_dir_all(db_path).await.unwrap();
     }
 
     pub fn store(&self) -> &Store {

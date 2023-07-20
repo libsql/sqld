@@ -35,11 +35,11 @@ struct Args {
 async fn spawn_admin_api(
     set: &mut JoinSet<Result<()>>,
     config: &AdminApiConfig,
-    meta_store: Arc<Store>,
+    bus: Arc<Bus<Arc<Manager>>>,
 ) -> Result<()> {
     let admin_api_listener = TcpListener::bind(config.addr).await?;
     let fut = run_admin_api(
-        http::admin::Config { manager: meta_store },
+        http::admin::Config { bus },
         AddrIncoming::from_listener(admin_api_listener)?,
     );
     set.spawn(fut);
@@ -98,7 +98,7 @@ async fn main() -> Result<()> {
     let bus = Arc::new(Bus::new(config.cluster.id, manager.clone()));
 
     spawn_cluster_networking(&mut join_set, &config.cluster, bus.clone()).await?;
-    spawn_admin_api(&mut join_set, &config.admin_api, store.clone()).await?;
+    spawn_admin_api(&mut join_set, &config.admin_api, bus.clone()).await?;
     spawn_user_api(&mut join_set, &config.user_api, manager, bus).await?;
 
     join_set.join_next().await;

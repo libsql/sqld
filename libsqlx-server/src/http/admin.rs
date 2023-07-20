@@ -1,19 +1,20 @@
-use std::sync::Arc;
 use std::str::FromStr;
+use std::sync::Arc;
 use std::time::Duration;
 
+use axum::extract::{Path, State};
+use axum::routing::{delete, post};
 use axum::{Json, Router};
-use axum::routing::post;
-use axum::extract::State;
 use color_eyre::eyre::Result;
 use hyper::server::accept::Accept;
 use serde::{Deserialize, Deserializer, Serialize};
 use tokio::io::{AsyncRead, AsyncWrite};
 
-use crate::linc::bus::Bus;
-use crate::manager::Manager;
 use crate::allocation::config::{AllocConfig, DbConfig};
+use crate::linc::bus::Bus;
 use crate::linc::NodeId;
+use crate::manager::Manager;
+use crate::meta::DatabaseId;
 
 pub struct Config {
     pub bus: Arc<Bus<Arc<Manager>>>,
@@ -28,12 +29,11 @@ where
     I: Accept<Error = std::io::Error>,
     I::Conn: AsyncRead + AsyncWrite + Send + Unpin + 'static,
 {
-    let state = AdminServerState {
-        bus: config.bus,
-    };
+    let state = AdminServerState { bus: config.bus };
 
     let app = Router::new()
         .route("/manage/allocation", post(allocate).get(list_allocs))
+        .route("/manage/allocation/:db_name", delete(deallocate))
         .with_state(Arc::new(state));
     axum::Server::builder(listener)
         .serve(app.into_make_service())
@@ -50,7 +50,7 @@ struct AllocateResp {}
 
 #[derive(Deserialize, Debug)]
 struct AllocateReq {
-    alloc_id: String,
+    database_name: String,
     max_conccurent_connection: Option<u32>,
     config: DbConfigReq,
 }
@@ -61,7 +61,10 @@ pub enum DbConfigReq {
     Primary {},
     Replica {
         primary_node_id: NodeId,
-        #[serde(deserialize_with = "deserialize_duration", default = "default_proxy_timeout")]
+        #[serde(
+            deserialize_with = "deserialize_duration",
+            default = "default_proxy_timeout"
+        )]
         proxy_request_timeout_duration: Duration,
     },
 }
@@ -79,8 +82,8 @@ where
         type Value = Duration;
 
         fn visit_str<E>(self, v: &str) -> std::result::Result<Self::Value, E>
-            where
-                E: serde::de::Error, 
+        where
+            E: serde::de::Error,
         {
             match humantime::Duration::from_str(v) {
                 Ok(d) => Ok(*d),
@@ -91,7 +94,6 @@ where
         fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
             f.write_str("a duration, in a string format")
         }
-
     }
 
     deserializer.deserialize_str(Visitor)
@@ -103,7 +105,7 @@ async fn allocate(
 ) -> Result<Json<AllocateResp>, Json<ErrorResponse>> {
     let config = AllocConfig {
         max_conccurent_connection: req.max_conccurent_connection.unwrap_or(16),
-        db_name: req.alloc_id.clone(),
+        db_name: req.database_name.clone(),
         db_config: match req.config {
             DbConfigReq::Primary {} => DbConfig::Primary {},
             DbConfigReq::Replica {
@@ -117,7 +119,18 @@ async fn allocate(
     };
 
     let dispatcher = state.bus.clone();
-    state.bus.handler().allocate(&req.alloc_id, &config, dispatcher).await;
+    let id = DatabaseId::from_name(&req.database_name);
+    state.bus.handler().allocate(id, &config, dispatcher).await;
+
+    Ok(Json(AllocateResp {}))
+}
+
+async fn deallocate(
+    State(state): State<Arc<AdminServerState>>,
+    Path(database_name): Path<String>,
+) -> Result<Json<AllocateResp>, Json<ErrorResponse>> {
+    let id = DatabaseId::from_name(&database_name);
+    state.bus.handler().deallocate(id).await;
 
     Ok(Json(AllocateResp {}))
 }
@@ -136,7 +149,9 @@ async fn list_allocs(
     State(state): State<Arc<AdminServerState>>,
 ) -> Result<Json<ListAllocResp>, Json<ErrorResponse>> {
     let allocs = state
-        .meta_store
+        .bus
+        .handler()
+        .store()
         .list_allocs()
         .await
         .into_iter()

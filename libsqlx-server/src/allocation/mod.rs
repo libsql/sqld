@@ -590,14 +590,16 @@ impl ReplicaConnection {
                             .unwrap(),
                         BuilderStep::BeginRows => req.builder.begin_rows().unwrap(),
                         BuilderStep::BeginRow => req.builder.begin_row().unwrap(),
-                        BuilderStep::AddRowValue(v) => req.builder.add_row_value((&v).into()).unwrap(),
+                        BuilderStep::AddRowValue(v) => {
+                            req.builder.add_row_value((&v).into()).unwrap()
+                        }
                         BuilderStep::FinishRow => req.builder.finish_row().unwrap(),
                         BuilderStep::FinishRows => req.builder.finish_rows().unwrap(),
                         BuilderStep::Finnalize { is_txn, frame_no } => {
                             let _ = req.builder.finnalize(is_txn, frame_no).unwrap();
                             finnalized = true;
-                        },
-                        BuilderStep::FinnalizeError(e) => { 
+                        }
+                        BuilderStep::FinnalizeError(e) => {
                             req.builder.finnalize_error(e);
                             finnalized = true;
                         }
@@ -625,15 +627,13 @@ impl ConnectionHandler for ReplicaConnection {
         // self.conn.writer().current_req.timeout.poll()
         let mut req = self.conn.writer().current_req.lock();
         let should_abort_query = match &mut *req {
-            Some(ref mut req) => {
-                match req.timeout.as_mut().poll(cx) {
-                    Poll::Ready(_) => {
-                        req.builder.finnalize_error("request timed out".to_string());
-                        true
-                    }
-                    Poll::Pending => return Poll::Pending,
+            Some(ref mut req) => match req.timeout.as_mut().poll(cx) {
+                Poll::Ready(_) => {
+                    req.builder.finnalize_error("request timed out".to_string());
+                    true
                 }
-            }
+                Poll::Pending => return Poll::Pending,
+            },
             None => return Poll::Ready(()),
         };
 

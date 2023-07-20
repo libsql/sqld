@@ -56,9 +56,8 @@ impl Store {
         Self { meta_store }
     }
 
-    pub async fn allocate(&self, database_name: &str, meta: &AllocConfig) -> DatabaseId {
+    pub async fn allocate(&self, id: DatabaseId, meta: &AllocConfig) {
         //TODO: Handle conflict
-        let id = DatabaseId::from_name(database_name);
         block_in_place(|| {
             let meta_bytes = bincode::serialize(meta).unwrap();
             self.meta_store
@@ -66,11 +65,10 @@ impl Store {
                 .unwrap()
                 .unwrap();
         });
-        id
     }
 
-    pub async fn deallocate(&self, _database_name: &str) {
-        todo!()
+    pub async fn deallocate(&self, id: DatabaseId) {
+        block_in_place(|| self.meta_store.remove(id).unwrap());
     }
 
     pub async fn meta(&self, database_id: &DatabaseId) -> Option<AllocConfig> {
