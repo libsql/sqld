@@ -143,11 +143,12 @@ unsafe impl WalHook for ReplicationLoggerHook {
                 std::process::abort();
             }
 
-            if let Err(e) = ctx.logger.log_file.write().maybe_compact(
-                &*ctx.logger.compactor,
-                ntruncate,
-                &ctx.logger.db_path,
-            ) {
+            if let Err(e) = ctx
+                .logger
+                .log_file
+                .write()
+                .maybe_compact(&*ctx.logger.compactor, &ctx.logger.db_path)
+            {
                 tracing::error!("fatal error: {e}, exiting");
                 std::process::abort()
             }
@@ -425,6 +426,10 @@ impl LogFile {
         }
     }
 
+    pub fn can_compact(&mut self) -> bool {
+        self.header.frame_count > 0 && self.uncommitted_frame_count == 0
+    }
+
     pub fn read_header(file: &File) -> crate::Result<LogFileHeader> {
         let mut buf = [0; size_of::<LogFileHeader>()];
         file.read_exact_at(&mut buf, 0)?;
@@ -563,27 +568,24 @@ impl LogFile {
         Ok(frame)
     }
 
-    fn maybe_compact(
-        &mut self,
-        compactor: &dyn LogCompactor,
-        size_after: u32,
-        path: &Path,
-    ) -> anyhow::Result<()> {
-        if compactor.should_compact(self) {
-            return self.do_compaction(compactor, size_after, path);
+    fn maybe_compact(&mut self, compactor: &dyn LogCompactor, path: &Path) -> anyhow::Result<()> {
+        if self.can_compact() && compactor.should_compact(self) {
+            return self.do_compaction(compactor, path);
         }
 
         Ok(())
     }
 
-    fn do_compaction(
-        &mut self,
-        compactor: &dyn LogCompactor,
-        size_after: u32,
-        path: &Path,
-    ) -> anyhow::Result<()> {
+    fn do_compaction(&mut self, compactor: &dyn LogCompactor, path: &Path) -> anyhow::Result<()> {
         tracing::info!("performing log compaction");
         let temp_log_path = path.join("temp_log");
+        let last_frame = self
+            .rev_frames_iter()?
+            .next()
+            .expect("there should be at least one frame to perform compaction")?;
+        let size_after = last_frame.header().size_after;
+        assert!(size_after != 0);
+
         let file = OpenOptions::new()
             .read(true)
             .write(true)
@@ -915,6 +917,15 @@ impl ReplicationLogger {
 
     pub fn get_frame(&self, frame_no: FrameNo) -> Result<Frame, LogReadError> {
         self.log_file.read().frame(frame_no)
+    }
+
+    pub fn compact(&self) {
+        let mut log_file = self.log_file.write();
+        if log_file.can_compact() {
+            log_file
+                .do_compaction(&*self.compactor, &self.db_path)
+                .unwrap();
+        }
     }
 }
 

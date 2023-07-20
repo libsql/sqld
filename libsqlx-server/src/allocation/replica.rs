@@ -1,7 +1,7 @@
 use std::ops::Deref;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::task::{Context, Poll};
+use std::task::{Context, Poll, ready};
 use std::time::Duration;
 
 use futures::Future;
@@ -11,22 +11,16 @@ use libsqlx::proxy::{WriteProxyConnection, WriteProxyDatabase};
 use libsqlx::result_builder::{Column, QueryBuilderConfig, ResultBuilder};
 use libsqlx::{DescribeResponse, Frame, FrameNo, Injector};
 use parking_lot::Mutex;
-use tokio::{
-    sync::mpsc,
-    task::block_in_place,
-    time::{timeout, Sleep},
-};
+use tokio::sync::mpsc;
+use tokio::task::block_in_place;
+use tokio::time::{timeout, Sleep};
 
+use crate::linc::bus::Dispatch;
 use crate::linc::proto::{BuilderStep, ProxyResponse};
+use crate::linc::proto::{Enveloppe, Frames, Message};
 use crate::linc::Inbound;
-use crate::{
-    linc::{
-        bus::Dispatch,
-        proto::{Enveloppe, Frames, Message},
-        NodeId, Outbound,
-    },
-    meta::DatabaseId,
-};
+use crate::linc::{NodeId, Outbound};
+use crate::meta::DatabaseId;
 
 use super::{ConnectionHandler, ExecFn};
 
@@ -227,7 +221,7 @@ impl ReplicaConnection {
                             .builder
                             .finish_step(affected_row_count, last_insert_rowid)
                             .unwrap(),
-                        BuilderStep::StepError(e) => req
+                        BuilderStep::StepError(_e) => req
                             .builder
                             .step_error(todo!("handle proxy step error"))
                             .unwrap(),
@@ -274,15 +268,15 @@ impl ReplicaConnection {
 impl ConnectionHandler for ReplicaConnection {
     fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<()> {
         // we are currently handling a request on this connection
-        // self.conn.writer().current_req.timeout.poll()
         let mut req = self.conn.writer().current_req.lock();
         let should_abort_query = match &mut *req {
-            Some(ref mut req) => match req.timeout.as_mut().poll(cx) {
-                Poll::Ready(_) => {
+            Some(ref mut req) => {
+                ready!(req.timeout.as_mut().poll(cx));
+                    // the request has timedout, we finalize the builder with a error, and clean the
+                    // current request.
                     req.builder.finnalize_error("request timed out".to_string());
                     true
-                }
-                Poll::Pending => return Poll::Pending,
+
             },
             None => return Poll::Ready(()),
         };
