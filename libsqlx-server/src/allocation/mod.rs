@@ -5,10 +5,10 @@ use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{ready, Context, Poll};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use either::Either;
-use libsqlx::libsql::{LibsqlDatabase, LogCompactor, LogFile};
+use libsqlx::libsql::LibsqlDatabase;
 use libsqlx::program::Program;
 use libsqlx::proxy::WriteProxyDatabase;
 use libsqlx::{Database as _, InjectableDatabase};
@@ -26,6 +26,7 @@ use crate::linc::{Inbound, NodeId};
 use crate::meta::DatabaseId;
 
 use self::config::{AllocConfig, DbConfig};
+use self::primary::compactor::Compactor;
 use self::primary::{PrimaryConnection, PrimaryDatabase, ProxyResponseBuilder};
 use self::replica::{ProxyDatabase, RemoteDb, ReplicaConnection, Replicator};
 
@@ -33,10 +34,10 @@ pub mod config;
 mod primary;
 mod replica;
 
-/// the maximum number of frame a Frame messahe is allowed to contain
+/// Maximum number of frame a Frame message is allowed to contain
 const FRAMES_MESSAGE_MAX_COUNT: usize = 5;
-const MAX_INJECTOR_BUFFER_CAP: usize = 32;
-const DEFAULT_MAX_LOG_SIZE: usize = 100 * 1024 * 1024; // 100Mb
+/// Maximum number of frames in the injector buffer
+const MAX_INJECTOR_BUFFER_CAPACITY: usize = 32;
 
 type ExecFn = Box<dyn FnOnce(&mut dyn libsqlx::Connection) + Send>;
 
@@ -79,35 +80,6 @@ impl Database {
     }
 }
 
-struct Compactor {
-    max_log_size: usize,
-    last_compacted_at: Instant,
-    compact_interval: Option<Duration>,
-}
-
-impl LogCompactor for Compactor {
-    fn should_compact(&self, log: &LogFile) -> bool {
-        let mut should_compact = false;
-        if let Some(compact_interval) = self.compact_interval {
-            should_compact |= self.last_compacted_at.elapsed() >= compact_interval
-        }
-
-        should_compact |= log.size() >= self.max_log_size;
-
-        should_compact
-    }
-
-    fn compact(
-        &mut self,
-        _log: LogFile,
-        _path: std::path::PathBuf,
-        _size_after: u32,
-    ) -> Result<(), Box<dyn std::error::Error + Sync + Send + 'static>> {
-        self.last_compacted_at = Instant::now();
-        todo!()
-    }
-}
-
 impl Database {
     pub fn from_config(config: &AllocConfig, path: PathBuf, dispatcher: Arc<dyn Dispatch>) -> Self {
         match config.db_config {
@@ -118,11 +90,7 @@ impl Database {
                 let (sender, receiver) = tokio::sync::watch::channel(0);
                 let db = LibsqlDatabase::new_primary(
                     path,
-                    Compactor {
-                        last_compacted_at: Instant::now(),
-                        max_log_size,
-                        compact_interval: replication_log_compact_interval,
-                    },
+                    Compactor::new(max_log_size, replication_log_compact_interval),
                     false,
                     Box::new(move |fno| {
                         let _ = sender.send(fno);
@@ -143,7 +111,8 @@ impl Database {
                 primary_node_id,
                 proxy_request_timeout_duration,
             } => {
-                let rdb = LibsqlDatabase::new_replica(path, MAX_INJECTOR_BUFFER_CAP, ()).unwrap();
+                let rdb =
+                    LibsqlDatabase::new_replica(path, MAX_INJECTOR_BUFFER_CAPACITY, ()).unwrap();
                 let wdb = RemoteDb {
                     proxy_request_timeout_duration,
                 };
