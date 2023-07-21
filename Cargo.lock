@@ -900,6 +900,9 @@ name = "bytesize"
 version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "38fcc2979eff34a4b84e1cf9a1e3da42a7d44b3b690a40cdcb23e3d556cfb2e5"
+dependencies = [
+ "serde",
+]
 
 [[package]]
 name = "camino"
@@ -2549,6 +2552,7 @@ dependencies = [
  "base64 0.21.2",
  "bincode",
  "bytes 1.4.0",
+ "bytesize",
  "clap",
  "color-eyre",
  "either",

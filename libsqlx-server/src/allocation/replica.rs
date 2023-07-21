@@ -1,7 +1,7 @@
 use std::ops::Deref;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::task::{Context, Poll, ready};
+use std::task::{ready, Context, Poll};
 use std::time::Duration;
 
 use futures::Future;
@@ -272,12 +272,11 @@ impl ConnectionHandler for ReplicaConnection {
         let should_abort_query = match &mut *req {
             Some(ref mut req) => {
                 ready!(req.timeout.as_mut().poll(cx));
-                    // the request has timedout, we finalize the builder with a error, and clean the
-                    // current request.
-                    req.builder.finnalize_error("request timed out".to_string());
-                    true
-
-            },
+                // the request has timedout, we finalize the builder with a error, and clean the
+                // current request.
+                req.builder.finnalize_error("request timed out".to_string());
+                true
+            }
             None => return Poll::Ready(()),
         };
 

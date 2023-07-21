@@ -4,8 +4,8 @@ use std::future::poll_fn;
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::task::{Context, Poll, ready};
-use std::time::{Instant, Duration};
+use std::task::{ready, Context, Poll};
+use std::time::{Duration, Instant};
 
 use either::Either;
 use libsqlx::libsql::{LibsqlDatabase, LogCompactor, LogFile};
@@ -36,6 +36,7 @@ mod replica;
 /// the maximum number of frame a Frame messahe is allowed to contain
 const FRAMES_MESSAGE_MAX_COUNT: usize = 5;
 const MAX_INJECTOR_BUFFER_CAP: usize = 32;
+const DEFAULT_MAX_LOG_SIZE: usize = 100 * 1024 * 1024; // 100Mb
 
 type ExecFn = Box<dyn FnOnce(&mut dyn libsqlx::Connection) + Send>;
 
@@ -62,7 +63,11 @@ pub enum Database {
 
 impl Database {
     fn poll(&mut self, cx: &mut Context<'_>) -> Poll<()> {
-        if let Self::Primary { compact_interval: Some(ref mut interval), db } = self {
+        if let Self::Primary {
+            compact_interval: Some(ref mut interval),
+            db,
+        } = self
+        {
             ready!(interval.poll_tick(cx));
             let db = db.db.clone();
             tokio::task::spawn_blocking(move || {
@@ -83,10 +88,10 @@ struct Compactor {
 impl LogCompactor for Compactor {
     fn should_compact(&self, log: &LogFile) -> bool {
         let mut should_compact = false;
-        if let Some(compact_interval)= self.compact_interval {
+        if let Some(compact_interval) = self.compact_interval {
             should_compact |= self.last_compacted_at.elapsed() >= compact_interval
         }
-         
+
         should_compact |= log.size() >= self.max_log_size;
 
         should_compact
@@ -106,14 +111,17 @@ impl LogCompactor for Compactor {
 impl Database {
     pub fn from_config(config: &AllocConfig, path: PathBuf, dispatcher: Arc<dyn Dispatch>) -> Self {
         match config.db_config {
-            DbConfig::Primary {} => {
+            DbConfig::Primary {
+                max_log_size,
+                replication_log_compact_interval,
+            } => {
                 let (sender, receiver) = tokio::sync::watch::channel(0);
                 let db = LibsqlDatabase::new_primary(
                     path,
                     Compactor {
-                        max_log_size: usize::MAX,
                         last_compacted_at: Instant::now(),
-                        compact_interval: None,
+                        max_log_size,
+                        compact_interval: replication_log_compact_interval,
                     },
                     false,
                     Box::new(move |fno| {
@@ -122,12 +130,12 @@ impl Database {
                 )
                 .unwrap();
 
-                Self::Primary{
+                Self::Primary {
                     db: PrimaryDatabase {
                         db: Arc::new(db),
                         replica_streams: HashMap::new(),
                         frame_notifier: receiver,
-                    } ,
+                    },
                     compact_interval: None,
                 }
             }
@@ -167,7 +175,10 @@ impl Database {
 
     fn connect(&self, connection_id: u32, alloc: &Allocation) -> impl ConnectionHandler {
         match self {
-            Database::Primary { db: PrimaryDatabase { db, .. }, .. } => Either::Right(PrimaryConnection {
+            Database::Primary {
+                db: PrimaryDatabase { db, .. },
+                ..
+            } => Either::Right(PrimaryConnection {
                 conn: db.connect().unwrap(),
             }),
             Database::Replica { db, primary_id, .. } => Either::Left(ReplicaConnection {
@@ -269,13 +280,15 @@ impl Allocation {
                 req_no,
                 next_frame_no,
             } => match &mut self.database {
-                Database::Primary{
-                    db: PrimaryDatabase {
-                        db,
-                        replica_streams,
-                        frame_notifier,
-                        ..
-                    }, ..
+                Database::Primary {
+                    db:
+                        PrimaryDatabase {
+                            db,
+                            replica_streams,
+                            frame_notifier,
+                            ..
+                        },
+                    ..
                 } => {
                     let streamer = FrameStreamer {
                         logger: db.logger(),
@@ -319,7 +332,10 @@ impl Allocation {
                     *last_received_frame_ts = Some(Instant::now());
                     injector_handle.send(frames).await.unwrap();
                 }
-                Database::Primary { db: PrimaryDatabase { .. }, .. } => todo!("handle primary receiving txn"),
+                Database::Primary {
+                    db: PrimaryDatabase { .. },
+                    ..
+                } => todo!("handle primary receiving txn"),
             },
             Message::ProxyRequest {
                 connection_id,

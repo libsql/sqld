@@ -9,7 +9,7 @@ use std::sync::Arc;
 use anyhow::{bail, ensure};
 use bytemuck::{bytes_of, pod_read_unaligned, Pod, Zeroable};
 use bytes::{Bytes, BytesMut};
-use parking_lot::{RwLock, Mutex};
+use parking_lot::{Mutex, RwLock};
 use rusqlite::ffi::{
     libsql_wal as Wal, sqlite3, PgHdr, SQLITE_CHECKPOINT_TRUNCATE, SQLITE_IOERR, SQLITE_OK,
 };
@@ -568,7 +568,11 @@ impl LogFile {
         Ok(frame)
     }
 
-    fn maybe_compact(&mut self, compactor: &mut dyn LogCompactor, path: &Path) -> anyhow::Result<()> {
+    fn maybe_compact(
+        &mut self,
+        compactor: &mut dyn LogCompactor,
+        path: &Path,
+    ) -> anyhow::Result<()> {
         if self.can_compact() && compactor.should_compact(self) {
             return self.do_compaction(compactor, path);
         }
@@ -576,7 +580,11 @@ impl LogFile {
         Ok(())
     }
 
-    fn do_compaction(&mut self, compactor: &mut dyn LogCompactor, path: &Path) -> anyhow::Result<()> {
+    fn do_compaction(
+        &mut self,
+        compactor: &mut dyn LogCompactor,
+        path: &Path,
+    ) -> anyhow::Result<()> {
         tracing::info!("performing log compaction");
         let temp_log_path = path.join("temp_log");
         let last_frame = self
