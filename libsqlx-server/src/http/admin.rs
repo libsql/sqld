@@ -1,3 +1,4 @@
+use std::ops::Deref;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -57,46 +58,69 @@ struct AllocateReq {
 
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
-pub enum DbConfigReq {
-    Primary {},
-    Replica {
-        primary_node_id: NodeId,
-        #[serde(
-            deserialize_with = "deserialize_duration",
-            default = "default_proxy_timeout"
-        )]
-        proxy_request_timeout_duration: Duration,
-    },
+pub struct Primary {
+    /// The maximum size the replication is allowed to grow. Expects a string like 200mb.
+    #[serde(default = "default_max_log_size")]
+    pub max_replication_log_size: bytesize::ByteSize,
+    pub replication_log_compact_interval: Option<HumanDuration>,
 }
 
-const fn default_proxy_timeout() -> Duration {
-    Duration::from_secs(5)
+#[derive(Debug)]
+pub struct HumanDuration(Duration);
+
+impl Deref for HumanDuration {
+    type Target = Duration;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
 }
 
-fn deserialize_duration<'de, D>(deserializer: D) -> Result<Duration, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    struct Visitor;
-    impl serde::de::Visitor<'_> for Visitor {
-        type Value = Duration;
+impl<'de> Deserialize<'de> for HumanDuration {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct DurationVisitor;
+        impl serde::de::Visitor<'_> for DurationVisitor {
+            type Value = HumanDuration;
 
-        fn visit_str<E>(self, v: &str) -> std::result::Result<Self::Value, E>
-        where
-            E: serde::de::Error,
-        {
-            match humantime::Duration::from_str(v) {
-                Ok(d) => Ok(*d),
-                Err(e) => Err(E::custom(e.to_string())),
+            fn visit_str<E>(self, v: &str) -> std::result::Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                match humantime::Duration::from_str(v) {
+                    Ok(d) => Ok(HumanDuration(*d)),
+                    Err(e) => Err(E::custom(e.to_string())),
+                }
+            }
+
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("a duration, in a string format")
             }
         }
 
-        fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-            f.write_str("a duration, in a string format")
-        }
+        deserializer.deserialize_str(DurationVisitor)
     }
+}
 
-    deserializer.deserialize_str(Visitor)
+#[derive(Debug, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum DbConfigReq {
+    Primary(Primary),
+    Replica {
+        primary_node_id: NodeId,
+        #[serde(default = "default_proxy_timeout")]
+        proxy_request_timeout_duration: HumanDuration,
+    },
+}
+
+const fn default_max_log_size() -> bytesize::ByteSize {
+    bytesize::ByteSize::mb(100)
+}
+
+const fn default_proxy_timeout() -> HumanDuration {
+    HumanDuration(Duration::from_secs(5))
 }
 
 async fn allocate(
@@ -107,13 +131,21 @@ async fn allocate(
         max_conccurent_connection: req.max_conccurent_connection.unwrap_or(16),
         db_name: req.database_name.clone(),
         db_config: match req.config {
-            DbConfigReq::Primary {} => DbConfig::Primary {},
+            DbConfigReq::Primary(Primary {
+                max_replication_log_size,
+                replication_log_compact_interval,
+            }) => DbConfig::Primary {
+                max_log_size: max_replication_log_size.as_u64() as usize,
+                replication_log_compact_interval: replication_log_compact_interval
+                    .as_deref()
+                    .copied(),
+            },
             DbConfigReq::Replica {
                 primary_node_id,
                 proxy_request_timeout_duration,
             } => DbConfig::Replica {
                 primary_node_id,
-                proxy_request_timeout_duration,
+                proxy_request_timeout_duration: *proxy_request_timeout_duration,
             },
         },
     };

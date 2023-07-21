@@ -16,10 +16,12 @@ use crate::meta::DatabaseId;
 
 use super::{ConnectionHandler, ExecFn, FRAMES_MESSAGE_MAX_COUNT};
 
+pub mod compactor;
+
 const MAX_STEP_BATCH_SIZE: usize = 100_000_000; // ~100kb
                                                 //
 pub struct PrimaryDatabase {
-    pub db: LibsqlDatabase<PrimaryType>,
+    pub db: Arc<LibsqlDatabase<PrimaryType>>,
     pub replica_streams: HashMap<NodeId, (u32, tokio::task::JoinHandle<()>)>,
     pub frame_notifier: tokio::sync::watch::Receiver<FrameNo>,
 }

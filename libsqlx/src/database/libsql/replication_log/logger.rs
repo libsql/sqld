@@ -9,7 +9,7 @@ use std::sync::Arc;
 use anyhow::{bail, ensure};
 use bytemuck::{bytes_of, pod_read_unaligned, Pod, Zeroable};
 use bytes::{Bytes, BytesMut};
-use parking_lot::RwLock;
+use parking_lot::{Mutex, RwLock};
 use rusqlite::ffi::{
     libsql_wal as Wal, sqlite3, PgHdr, SQLITE_CHECKPOINT_TRUNCATE, SQLITE_IOERR, SQLITE_OK,
 };
@@ -143,11 +143,12 @@ unsafe impl WalHook for ReplicationLoggerHook {
                 std::process::abort();
             }
 
-            if let Err(e) = ctx.logger.log_file.write().maybe_compact(
-                &*ctx.logger.compactor,
-                ntruncate,
-                &ctx.logger.db_path,
-            ) {
+            if let Err(e) = ctx
+                .logger
+                .log_file
+                .write()
+                .maybe_compact(&mut *ctx.logger.compactor.lock(), &ctx.logger.db_path)
+            {
                 tracing::error!("fatal error: {e}, exiting");
                 std::process::abort()
             }
@@ -425,6 +426,10 @@ impl LogFile {
         }
     }
 
+    pub fn can_compact(&mut self) -> bool {
+        self.header.frame_count > 0 && self.uncommitted_frame_count == 0
+    }
+
     pub fn read_header(file: &File) -> crate::Result<LogFileHeader> {
         let mut buf = [0; size_of::<LogFileHeader>()];
         file.read_exact_at(&mut buf, 0)?;
@@ -565,12 +570,11 @@ impl LogFile {
 
     fn maybe_compact(
         &mut self,
-        compactor: &dyn LogCompactor,
-        size_after: u32,
+        compactor: &mut dyn LogCompactor,
         path: &Path,
     ) -> anyhow::Result<()> {
-        if compactor.should_compact(self) {
-            return self.do_compaction(compactor, size_after, path);
+        if self.can_compact() && compactor.should_compact(self) {
+            return self.do_compaction(compactor, path);
         }
 
         Ok(())
@@ -578,12 +582,18 @@ impl LogFile {
 
     fn do_compaction(
         &mut self,
-        compactor: &dyn LogCompactor,
-        size_after: u32,
+        compactor: &mut dyn LogCompactor,
         path: &Path,
     ) -> anyhow::Result<()> {
         tracing::info!("performing log compaction");
         let temp_log_path = path.join("temp_log");
+        let last_frame = self
+            .rev_frames_iter()?
+            .next()
+            .expect("there should be at least one frame to perform compaction")?;
+        let size_after = last_frame.header().size_after;
+        assert!(size_after != 0);
+
         let file = OpenOptions::new()
             .read(true)
             .write(true)
@@ -628,6 +638,11 @@ impl LogFile {
         // truncate file
         self.file.set_len(0)?;
         Self::new(self.file)
+    }
+
+    /// return the size in bytes of the log
+    pub fn size(&self) -> usize {
+        size_of::<LogFileHeader>() + Frame::SIZE * self.header().frame_count as usize
     }
 }
 
@@ -728,7 +743,7 @@ pub trait LogCompactor: Sync + Send + 'static {
     fn should_compact(&self, log: &LogFile) -> bool;
     /// Compact the given snapshot
     fn compact(
-        &self,
+        &mut self,
         log: LogFile,
         path: PathBuf,
         size_after: u32,
@@ -738,7 +753,7 @@ pub trait LogCompactor: Sync + Send + 'static {
 #[cfg(test)]
 impl LogCompactor for () {
     fn compact(
-        &self,
+        &mut self,
         _file: LogFile,
         _path: PathBuf,
         _size_after: u32,
@@ -756,7 +771,7 @@ pub type FrameNotifierCb = Box<dyn Fn(FrameNo) + Send + Sync + 'static>;
 pub struct ReplicationLogger {
     pub generation: Generation,
     pub log_file: RwLock<LogFile>,
-    compactor: Box<dyn LogCompactor + Send>,
+    compactor: Box<Mutex<dyn LogCompactor + Send>>,
     db_path: PathBuf,
     /// a notifier channel other tasks can subscribe to, and get notified when new frames become
     /// available.
@@ -820,7 +835,7 @@ impl ReplicationLogger {
 
         Ok(Self {
             generation: Generation::new(generation_start_frame_no),
-            compactor: Box::new(compactor),
+            compactor: Box::new(Mutex::new(compactor)),
             log_file: RwLock::new(log_file),
             db_path,
             new_frame_notifier,
@@ -915,6 +930,15 @@ impl ReplicationLogger {
 
     pub fn get_frame(&self, frame_no: FrameNo) -> Result<Frame, LogReadError> {
         self.log_file.read().frame(frame_no)
+    }
+
+    pub fn compact(&self) {
+        let mut log_file = self.log_file.write();
+        if log_file.can_compact() {
+            log_file
+                .do_compaction(&mut *self.compactor.lock(), &self.db_path)
+                .unwrap();
+        }
     }
 }
 

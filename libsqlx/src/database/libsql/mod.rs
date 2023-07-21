@@ -132,6 +132,10 @@ impl LibsqlDatabase<PrimaryType> {
         Ok(Self::new(db_path, ty))
     }
 
+    pub fn compact_log(&self) {
+        self.ty.logger.compact();
+    }
+
     pub fn logger(&self) -> Arc<ReplicationLogger> {
         self.ty.logger.clone()
     }
