@@ -4,7 +4,7 @@ use std::future::poll_fn;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::task::{Context, Poll};
-use std::time::Instant;
+use std::time::{Instant, Duration};
 
 use either::Either;
 use libsqlx::libsql::{LibsqlDatabase, LogCompactor, LogFile};
@@ -55,19 +55,31 @@ pub enum Database {
     },
 }
 
-struct Compactor;
+struct Compactor {
+    max_log_size: usize,
+    last_compacted_at: Instant,
+    compact_interval: Option<Duration>,
+}
 
 impl LogCompactor for Compactor {
-    fn should_compact(&self, _log: &LogFile) -> bool {
-        false
+    fn should_compact(&self, log: &LogFile) -> bool {
+        let mut should_compact = false;
+        if let Some(compact_interval)= self.compact_interval {
+            should_compact |= self.last_compacted_at.elapsed() >= compact_interval
+        }
+         
+        should_compact |= log.size() >= self.max_log_size;
+
+        should_compact
     }
 
     fn compact(
-        &self,
+        &mut self,
         _log: LogFile,
         _path: std::path::PathBuf,
         _size_after: u32,
     ) -> Result<(), Box<dyn std::error::Error + Sync + Send + 'static>> {
+        self.last_compacted_at = Instant::now();
         todo!()
     }
 }
@@ -79,7 +91,11 @@ impl Database {
                 let (sender, receiver) = tokio::sync::watch::channel(0);
                 let db = LibsqlDatabase::new_primary(
                     path,
-                    Compactor,
+                    Compactor {
+                        max_log_size: usize::MAX,
+                        last_compacted_at: Instant::now(),
+                        compact_interval: None,
+                    },
                     false,
                     Box::new(move |fno| {
                         let _ = sender.send(fno);
