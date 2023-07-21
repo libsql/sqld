@@ -1,3 +1,4 @@
+use crate::replication::LogReadError;
 use crate::replication::{frame::Frame, primary::frame_stream::FrameStream, ReplicationLogger};
 use crate::Auth;
 use anyhow::{Context, Result};
@@ -145,7 +146,7 @@ async fn handle_query(
 
     let next_offset = std::cmp::max(next_offset, 1); // Frames start from 1
     let current_frameno = next_offset - 1;
-    let mut frame_stream = FrameStream::new(logger, current_frameno);
+    let mut frame_stream = FrameStream::new(logger.clone(), current_frameno);
     tracing::trace!(
         "Max available frame_no: {}",
         frame_stream.max_available_frame_no
@@ -166,6 +167,16 @@ async fn handle_query(
             Some(Ok(frame)) => {
                 tracing::trace!("Read frame {}", frame_stream.current_frame_no);
                 frames.push(frame);
+            }
+            Some(Err(LogReadError::SnapshotRequired)) => {
+                drop(frame_stream);
+                if frames.is_empty() {
+                    tracing::debug!("Snapshot required, switching to snapshot mode");
+                    frames = load_snapshot(logger, next_offset)?;
+                } else {
+                    tracing::debug!("Snapshot required, but some frames were read - returning.");
+                }
+                break;
             }
             Some(Err(e)) => {
                 tracing::error!("Error reading frame: {}", e);
@@ -193,4 +204,26 @@ async fn handle_query(
         .status(hyper::StatusCode::OK)
         .body(Body::from(serde_json::to_string(&frames)?))
         .unwrap())
+}
+
+// FIXME: In the HTTP stateless spirit, we just unconditionally send the whole snapshot
+// here, which is an obvious overcommit. We should instead stream in smaller parts
+// if the snapshot is large.
+fn load_snapshot(logger: Arc<ReplicationLogger>, from: u64) -> Result<Frames> {
+    let snapshot = match logger.get_snapshot_file(from) {
+        Ok(Some(snapshot)) => snapshot,
+        _ => {
+            tracing::trace!("No snapshot available, returning no frames");
+            return Ok(Frames { frames: Vec::new() });
+        }
+    };
+    let mut frames = Frames::new();
+    for bytes in snapshot.frames_iter_from(from) {
+        frames.push(Frame::try_from_bytes(bytes?)?);
+    }
+    tracing::trace!(
+        "Loaded {} frames from the snapshot file",
+        frames.frames.len()
+    );
+    Ok(frames)
 }
