@@ -1,15 +1,10 @@
 use crate::replication::LogReadError;
 use crate::replication::{frame::Frame, primary::frame_stream::FrameStream, ReplicationLogger};
-use crate::Auth;
 use anyhow::{Context, Result};
-use hyper::server::conn::AddrIncoming;
-use hyper::{Body, Method, Request, Response};
+use axum::extract::State;
+use hyper::{Body, Response};
 use std::net::SocketAddr;
 use std::sync::Arc;
-use tower::ServiceBuilder;
-use tower_http::trace::DefaultOnResponse;
-use tower_http::{compression::CompressionLayer, cors};
-use tracing::{Level, Span};
 
 #[derive(Debug, serde::Deserialize, serde::Serialize)]
 pub struct FramesRequest {
@@ -28,70 +23,42 @@ pub struct Hello {
     pub database_id: uuid::Uuid,
 }
 
-pub(crate) async fn run(
-    auth: Arc<Auth>,
-    addr: SocketAddr,
-    logger: Arc<ReplicationLogger>,
-) -> Result<()> {
-    tracing::info!("listening for HTTP requests on {addr}");
+// Thin wrapper to allow returning anyhow errors from axum
+struct AppError(anyhow::Error);
 
-    fn trace_request<B>(req: &Request<B>, _span: &Span) {
-        tracing::debug!("got request: {} {}", req.method(), req.uri());
+impl axum::response::IntoResponse for AppError {
+    fn into_response(self) -> axum::response::Response {
+        (
+            hyper::StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Replication failed: {}", self.0),
+        )
+            .into_response()
     }
-    let service = ServiceBuilder::new()
-        .layer(
-            tower_http::trace::TraceLayer::new_for_http()
-                .on_request(trace_request)
-                .on_response(
-                    DefaultOnResponse::new()
-                        .level(Level::DEBUG)
-                        .latency_unit(tower_http::LatencyUnit::Micros),
-                ),
-        )
-        .layer(CompressionLayer::new())
-        .layer(
-            cors::CorsLayer::new()
-                .allow_methods(cors::AllowMethods::any())
-                .allow_headers(cors::Any)
-                .allow_origin(cors::Any),
-        )
-        .service_fn(move |req| {
-            let auth = auth.clone();
-            let logger = logger.clone();
-            handle_request(auth, req, logger)
-        });
-
-    let listener = tokio::net::TcpListener::bind(&addr).await?;
-    let server = hyper::server::Server::builder(AddrIncoming::from_listener(listener)?)
-        .tcp_nodelay(true)
-        .serve(tower::make::Shared::new(service));
-
-    server.await.context("Http server exited with an error")?;
-
-    Ok(())
 }
 
-async fn handle_request(
-    auth: Arc<Auth>,
-    req: Request<Body>,
-    logger: Arc<ReplicationLogger>,
-) -> Result<Response<Body>> {
-    let auth_header = req.headers().get(hyper::header::AUTHORIZATION);
-    let auth = match auth.authenticate_http(auth_header) {
-        Ok(auth) => auth,
-        Err(err) => {
-            return Ok(Response::builder()
-                .status(hyper::StatusCode::UNAUTHORIZED)
-                .body(err.to_string().into())
-                .unwrap());
-        }
-    };
-
-    match (req.method(), req.uri().path()) {
-        (&Method::GET, "/hello") => handle_hello(logger).await,
-        (&Method::POST, "/frames") => handle_query(req, auth, logger).await,
-        _ => Ok(Response::builder().status(404).body(Body::empty()).unwrap()),
+impl<E: Into<anyhow::Error>> From<E> for AppError {
+    fn from(err: E) -> Self {
+        Self(err.into())
     }
+}
+
+pub async fn run(addr: SocketAddr, logger: Arc<ReplicationLogger>) -> Result<()> {
+    use axum::routing::{get, post};
+    let router = axum::Router::new()
+        .route("/hello", get(handle_hello))
+        .route("/frames", post(handle_frames))
+        .with_state(logger);
+
+    let server = hyper::Server::try_bind(&addr)
+        .context("Could not bind admin HTTP API server")?
+        .serve(router.into_make_service());
+
+    tracing::info!(
+        "Listening for replication HTTP API requests on {}",
+        server.local_addr()
+    );
+    server.await?;
+    Ok(())
 }
 
 impl Frames {
@@ -108,15 +75,9 @@ impl Frames {
     }
 }
 
-fn error(msg: &str, code: hyper::StatusCode) -> Response<Body> {
-    let err = serde_json::json!({ "error": msg });
-    Response::builder()
-        .status(code)
-        .body(Body::from(serde_json::to_vec(&err).unwrap()))
-        .unwrap()
-}
-
-async fn handle_hello(logger: Arc<ReplicationLogger>) -> Result<Response<Body>> {
+async fn handle_hello(
+    State(logger): State<Arc<ReplicationLogger>>,
+) -> std::result::Result<Response<Body>, AppError> {
     let hello = Hello {
         generation_id: logger.generation.id,
         generation_start_index: logger.generation.start_index,
@@ -130,15 +91,21 @@ async fn handle_hello(logger: Arc<ReplicationLogger>) -> Result<Response<Body>> 
     Ok(resp)
 }
 
-async fn handle_query(
-    mut req: Request<Body>,
-    _auth: crate::auth::Authenticated,
-    logger: Arc<ReplicationLogger>,
-) -> Result<Response<Body>> {
+fn error(msg: &str, code: hyper::StatusCode) -> Response<Body> {
+    let err = serde_json::json!({ "error": msg });
+    Response::builder()
+        .status(code)
+        .body(Body::from(serde_json::to_vec(&err).unwrap()))
+        .unwrap()
+}
+
+async fn handle_frames(
+    State(logger): State<Arc<ReplicationLogger>>,
+    req: String, // it's a JSON, but Axum errors-out if Content-Type isn't set to json, which is too strict
+) -> std::result::Result<Response<Body>, AppError> {
     const MAX_FRAMES_IN_SINGLE_RESPONSE: usize = 256;
 
-    let bytes = hyper::body::to_bytes(req.body_mut()).await?;
-    let FramesRequest { next_offset } = match serde_json::from_slice(&bytes) {
+    let FramesRequest { next_offset } = match serde_json::from_str(&req) {
         Ok(req) => req,
         Err(resp) => return Ok(error(&resp.to_string(), hyper::StatusCode::BAD_REQUEST)),
     };
@@ -155,8 +122,7 @@ async fn handle_query(
         tracing::trace!("No frames available starting {next_offset}, returning 204 No Content");
         return Ok(Response::builder()
             .status(hyper::StatusCode::NO_CONTENT)
-            .body(Body::empty())
-            .unwrap());
+            .body(Body::empty())?);
     }
 
     let mut frames = Frames::new();

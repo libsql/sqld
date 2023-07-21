@@ -503,8 +503,9 @@ async fn start_primary(
     }
 
     if let Some(ref addr) = config.http_replication_addr {
-        let auth = get_auth(config)?;
-        join_set.spawn(replication::http::run(auth, *addr, logger));
+        // FIXME: let's bring it back once I figure out how Axum works
+        // let auth = get_auth(config)?;
+        join_set.spawn(replication::http::run(*addr, logger));
     }
 
     run_service(
