@@ -2,8 +2,9 @@ use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 use std::future::poll_fn;
 use std::path::PathBuf;
+use std::pin::Pin;
 use std::sync::Arc;
-use std::task::{Context, Poll};
+use std::task::{Context, Poll, ready};
 use std::time::{Instant, Duration};
 
 use either::Either;
@@ -13,6 +14,7 @@ use libsqlx::proxy::WriteProxyDatabase;
 use libsqlx::{Database as _, InjectableDatabase};
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::{block_in_place, JoinSet};
+use tokio::time::Interval;
 
 use crate::allocation::primary::FrameStreamer;
 use crate::hrana;
@@ -46,13 +48,30 @@ pub enum AllocationMessage {
 }
 
 pub enum Database {
-    Primary(PrimaryDatabase),
+    Primary {
+        db: PrimaryDatabase,
+        compact_interval: Option<Pin<Box<Interval>>>,
+    },
     Replica {
         db: ProxyDatabase,
         injector_handle: mpsc::Sender<Frames>,
         primary_id: NodeId,
         last_received_frame_ts: Option<Instant>,
     },
+}
+
+impl Database {
+    fn poll(&mut self, cx: &mut Context<'_>) -> Poll<()> {
+        if let Self::Primary { compact_interval: Some(ref mut interval), db } = self {
+            ready!(interval.poll_tick(cx));
+            let db = db.db.clone();
+            tokio::task::spawn_blocking(move || {
+                db.compact_log();
+            });
+        }
+
+        Poll::Pending
+    }
 }
 
 struct Compactor {
@@ -103,11 +122,14 @@ impl Database {
                 )
                 .unwrap();
 
-                Self::Primary(PrimaryDatabase {
-                    db,
-                    replica_streams: HashMap::new(),
-                    frame_notifier: receiver,
-                })
+                Self::Primary{
+                    db: PrimaryDatabase {
+                        db: Arc::new(db),
+                        replica_streams: HashMap::new(),
+                        frame_notifier: receiver,
+                    } ,
+                    compact_interval: None,
+                }
             }
             DbConfig::Replica {
                 primary_node_id,
@@ -145,7 +167,7 @@ impl Database {
 
     fn connect(&self, connection_id: u32, alloc: &Allocation) -> impl ConnectionHandler {
         match self {
-            Database::Primary(PrimaryDatabase { db, .. }) => Either::Right(PrimaryConnection {
+            Database::Primary { db: PrimaryDatabase { db, .. }, .. } => Either::Right(PrimaryConnection {
                 conn: db.connect().unwrap(),
             }),
             Database::Replica { db, primary_id, .. } => Either::Left(ReplicaConnection {
@@ -160,7 +182,7 @@ impl Database {
     }
 
     pub fn is_primary(&self) -> bool {
-        matches!(self, Self::Primary(..))
+        matches!(self, Self::Primary { .. })
     }
 }
 
@@ -206,7 +228,9 @@ impl ConnectionHandle {
 impl Allocation {
     pub async fn run(mut self) {
         loop {
+            let fut = poll_fn(|cx| self.database.poll(cx));
             tokio::select! {
+                _ = fut => (),
                 Some(msg) = self.inbox.recv() => {
                     match msg {
                         AllocationMessage::HranaPipelineReq { req, ret } => {
@@ -245,12 +269,14 @@ impl Allocation {
                 req_no,
                 next_frame_no,
             } => match &mut self.database {
-                Database::Primary(PrimaryDatabase {
-                    db,
-                    replica_streams,
-                    frame_notifier,
-                    ..
-                }) => {
+                Database::Primary{
+                    db: PrimaryDatabase {
+                        db,
+                        replica_streams,
+                        frame_notifier,
+                        ..
+                    }, ..
+                } => {
                     let streamer = FrameStreamer {
                         logger: db.logger(),
                         database_id: DatabaseId::from_name(&self.db_name),
@@ -293,7 +319,7 @@ impl Allocation {
                     *last_received_frame_ts = Some(Instant::now());
                     injector_handle.send(frames).await.unwrap();
                 }
-                Database::Primary(PrimaryDatabase { .. }) => todo!("handle primary receiving txn"),
+                Database::Primary { db: PrimaryDatabase { .. }, .. } => todo!("handle primary receiving txn"),
             },
             Message::ProxyRequest {
                 connection_id,
