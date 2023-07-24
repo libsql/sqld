@@ -1,10 +1,10 @@
-use core::fmt;
-use std::path::Path;
+use std::fmt;
 
+use heed::bytemuck::{Pod, Zeroable};
+use heed::types::{SerdeBincode, OwnedType};
 use serde::{Deserialize, Serialize};
 use sha3::digest::{ExtendableOutput, Update, XofReader};
 use sha3::Shake128;
-use sled::Tree;
 use tokio::task::block_in_place;
 
 use crate::allocation::config::AllocConfig;
@@ -12,10 +12,12 @@ use crate::allocation::config::AllocConfig;
 type ExecFn = Box<dyn FnOnce(&mut libsqlx::libsql::LibsqlConnection<()>)>;
 
 pub struct Store {
-    meta_store: Tree,
+    env: heed::Env,
+    alloc_config_db: heed::Database<OwnedType<DatabaseId>, SerdeBincode<AllocConfig>>,
 }
 
-#[derive(Serialize, Deserialize, PartialEq, Eq, Debug, Hash, Clone, Copy)]
+#[derive(Serialize, Deserialize, PartialEq, Eq, Debug, Hash, Clone, Copy, Pod, Zeroable)]
+#[repr(transparent)]
 pub struct DatabaseId([u8; 16]);
 
 impl DatabaseId {
@@ -47,48 +49,63 @@ impl AsRef<[u8]> for DatabaseId {
 }
 
 impl Store {
-    pub fn new(path: &Path) -> Self {
-        std::fs::create_dir_all(&path).unwrap();
-        let path = path.join("store");
-        let db = sled::open(path).unwrap();
-        let meta_store = db.open_tree("meta_store").unwrap();
+    const ALLOC_CONFIG_DB_NAME: &'static str = "alloc_conf_db";
 
-        Self { meta_store }
+    pub fn new(env: heed::Env) -> Self {
+        let mut txn = env.write_txn().unwrap();
+        let alloc_config_db = env
+            .create_database(&mut txn, Some(Self::ALLOC_CONFIG_DB_NAME))
+            .unwrap();
+        txn.commit().unwrap();
+
+        Self {
+            env,
+            alloc_config_db,
+        }
     }
 
-    pub async fn allocate(&self, id: DatabaseId, meta: &AllocConfig) {
+    pub fn allocate(&self, id: &DatabaseId, meta: &AllocConfig) {
         //TODO: Handle conflict
         block_in_place(|| {
-            let meta_bytes = bincode::serialize(meta).unwrap();
-            self.meta_store
-                .compare_and_swap(id, None as Option<&[u8]>, Some(meta_bytes))
+            let mut txn = self.env.write_txn().unwrap();
+            if self
+                .alloc_config_db
+                .lazily_decode_data()
+                .get(&txn, id)
                 .unwrap()
-                .unwrap();
+                .is_some()
+            {
+                panic!("alloc already exists");
+            };
+            self.alloc_config_db.put(&mut txn, id, meta).unwrap();
+            txn.commit().unwrap();
         });
     }
 
-    pub async fn deallocate(&self, id: DatabaseId) {
-        block_in_place(|| self.meta_store.remove(id).unwrap());
+    pub fn deallocate(&self, id: &DatabaseId) {
+        block_in_place(|| {
+            let mut txn = self.env.write_txn().unwrap();
+            self.alloc_config_db.delete(&mut txn, id).unwrap();
+            txn.commit().unwrap();
+        });
     }
 
-    pub async fn meta(&self, database_id: &DatabaseId) -> Option<AllocConfig> {
+    pub fn meta(&self, id: &DatabaseId) -> Option<AllocConfig> {
         block_in_place(|| {
-            let config = self.meta_store.get(database_id).unwrap()?;
-            let config = bincode::deserialize(config.as_ref()).unwrap();
-            Some(config)
+            let txn = self.env.read_txn().unwrap();
+            self.alloc_config_db.get(&txn, id).unwrap()
         })
     }
 
-    pub async fn list_allocs(&self) -> Vec<AllocConfig> {
+    pub fn list_allocs(&self) -> Vec<AllocConfig> {
         block_in_place(|| {
-            let mut out = Vec::new();
-            for kv in self.meta_store.iter() {
-                let (_k, v) = kv.unwrap();
-                let alloc = bincode::deserialize(&v).unwrap();
-                out.push(alloc);
-            }
-
-            out
+            let txn = self.env.read_txn().unwrap();
+            self.alloc_config_db
+                .iter(&txn)
+                .unwrap()
+                .map(Result::unwrap)
+                .map(|x| x.1)
+                .collect()
         })
     }
 }

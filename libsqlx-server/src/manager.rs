@@ -41,7 +41,7 @@ impl Manager {
             return Some(sender.clone());
         }
 
-        if let Some(config) = self.meta_store.meta(&database_id).await {
+        if let Some(config) = self.meta_store.meta(&database_id) {
             let path = self.db_path.join("dbs").join(database_id.to_string());
             tokio::fs::create_dir_all(&path).await.unwrap();
             let (alloc_sender, inbox) = mpsc::channel(MAX_ALLOC_MESSAGE_QUEUE_LEN);
@@ -73,12 +73,12 @@ impl Manager {
         meta: &AllocConfig,
         dispatcher: Arc<dyn Dispatch>,
     ) {
-        self.store().allocate(database_id, meta).await;
+        self.store().allocate(&database_id, meta);
         self.schedule(database_id, dispatcher).await;
     }
 
     pub async fn deallocate(&self, database_id: DatabaseId) {
-        self.meta_store.deallocate(database_id).await;
+        self.meta_store.deallocate(&database_id);
         self.cache.remove(&database_id).await;
         let db_path = self.db_path.join("dbs").join(database_id.to_string());
         tokio::fs::remove_dir_all(db_path).await.unwrap();
