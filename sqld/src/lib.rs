@@ -22,6 +22,9 @@ use replication::{NamespacedSnapshotCallback, ReplicationLogger};
 use rpc::replication_log::ReplicationLogService;
 use rpc::{run_rpc_server, ReplicationLogServer};
 use tokio::sync::mpsc;
+use once_cell::sync::Lazy;
+use rusqlite::ffi::SQLITE_CHECKPOINT_TRUNCATE;
+use tokio::sync::{mpsc, Notify};
 use tokio::task::JoinSet;
 use tonic::body::BoxBody;
 use tonic::transport::Channel;
@@ -35,6 +38,7 @@ use crate::error::Error;
 use crate::stats::Stats;
 
 use sha256::try_digest;
+use tokio::time::{interval, sleep, Instant};
 
 pub use sqld_libsql_bindings as libsql;
 
@@ -107,6 +111,8 @@ pub struct Config {
     pub snapshot_exec: Option<String>,
     pub disable_default_namespace: bool,
     pub disable_namespaces: bool,
+    pub http_replication_addr: Option<SocketAddr>,
+    pub checkpoint_interval: Option<Duration>,
 }
 
 impl Default for Config {
@@ -148,6 +154,8 @@ impl Default for Config {
             snapshot_exec: None,
             disable_default_namespace: false,
             disable_namespaces: true,
+            http_replication_addr: None,
+            checkpoint_interval: None,
         }
     }
 }
@@ -563,6 +571,54 @@ async fn run_storage_monitor(db_path: PathBuf, stats: Stats) -> anyhow::Result<(
     Ok(())
 }
 
+async fn run_checkpoint_cron(db_path: PathBuf, period: Duration) -> anyhow::Result<()> {
+    const RETRY_INTERVAL: Duration = Duration::from_secs(60);
+    let data_path = db_path.join("data");
+    tracing::info!("setting checkpoint interval to {:?}", period);
+    let mut interval = interval(period);
+    let mut retry = None;
+    loop {
+        if let Some(retry) = retry.take() {
+            sleep(retry).await;
+        } else {
+            interval.tick().await;
+        }
+        retry = match rusqlite::Connection::open(&data_path) {
+            Ok(conn) => unsafe {
+                let start = Instant::now();
+                let mut num_checkpointed: std::ffi::c_int = 0;
+                let rc = rusqlite::ffi::sqlite3_wal_checkpoint_v2(
+                    conn.handle(),
+                    std::ptr::null(),
+                    SQLITE_CHECKPOINT_TRUNCATE,
+                    &mut num_checkpointed as *mut _,
+                    std::ptr::null_mut(),
+                );
+                if rc == 0 {
+                    if num_checkpointed == -1 {
+                        tracing::warn!(
+                            "database {:?} not in WAL mode. Stopping checkpoint calls.",
+                            data_path
+                        );
+                        return Ok(());
+                    } else {
+                        let elapsed = Instant::now() - start;
+                        tracing::info!("database checkpoint (took: {:?})", elapsed);
+                    }
+                    None
+                } else {
+                    tracing::warn!("failed to execute checkpoint - error code: {}", rc);
+                    Some(RETRY_INTERVAL)
+                }
+            },
+            Err(err) => {
+                tracing::warn!("couldn't connect to '{:?}': {}", data_path, err);
+                Some(RETRY_INTERVAL)
+            }
+        };
+    }
+}
+
 fn sentinel_file_path(path: &Path) -> PathBuf {
     path.join(".sentinel")
 }
@@ -685,6 +741,11 @@ pub async fn run_server(config: Config) -> anyhow::Result<()> {
             join_set.spawn(run_storage_monitor(config.db_path.clone(), stats));
         }
 
+        if let Some(interval) = config.checkpoint_interval {
+            join_set.spawn(run_checkpoint_cron(config.db_path.clone(), interval));
+        }
+
+        let reset = HARD_RESET.clone();
         loop {
             tokio::select! {
                 _ = shutdown_receiver.recv() => {

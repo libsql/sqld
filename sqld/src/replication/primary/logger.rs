@@ -6,7 +6,7 @@ use std::os::unix::prelude::FileExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use anyhow::{bail, ensure};
+use anyhow::{anyhow, bail, ensure};
 use bytemuck::{bytes_of, pod_read_unaligned, Pod, Zeroable};
 use bytes::{Bytes, BytesMut};
 use parking_lot::RwLock;
@@ -266,7 +266,7 @@ impl ReplicationLoggerHookCtx {
         logger: Arc<ReplicationLogger>,
         bottomless_replicator: Option<Arc<std::sync::Mutex<bottomless::replicator::Replicator>>>,
     ) -> Self {
-        tracing::trace!("bottomless replication enabled: {bottomless_replicator:?}");
+        tracing::trace!("bottomless replication enabled");
         Self {
             buffer: Default::default(),
             logger,
@@ -898,6 +898,14 @@ fn checkpoint_db(data_path: &Path) -> anyhow::Result<()> {
             );
             Ok(())
         })?;
+        // turn off auto_checkpointing - we'll use a fiber to checkpoint in time steps instead
+        let rc = rusqlite::ffi::sqlite3_wal_autocheckpoint(conn.handle(), 0);
+        if rc != 0 {
+            return Err(anyhow!(
+                "Failed to disable WAL autocheckpoint - error code: {}",
+                rc
+            ));
+        }
         let mut num_checkpointed: c_int = 0;
         let rc = rusqlite::ffi::sqlite3_wal_checkpoint_v2(
             conn.handle(),
@@ -906,21 +914,22 @@ fn checkpoint_db(data_path: &Path) -> anyhow::Result<()> {
             &mut num_checkpointed as *mut _,
             std::ptr::null_mut(),
         );
-
-        if num_checkpointed < 0 {
-            tracing::error!("could not checkpoint database, make sure the database is in WAL mode and try again");
+        if rc == 0 {
+            if num_checkpointed == -1 {
+                Err(anyhow!(
+                    "Checkpoint failed: database journal_mode is not WAL"
+                ))
+            } else {
+                conn.execute("VACUUM", ())?;
+                Ok(())
+            }
+        } else {
+            Err(anyhow!(
+                "Checkpoint failed: wal_checkpoint_v2 error code {}",
+                rc
+            ))
         }
-
-        // TODO: ensure correct page size
-        ensure!(
-            rc == 0 && num_checkpointed >= 0,
-            "failed to checkpoint database while recovering replication log"
-        );
-
-        conn.execute("VACUUM", ())?;
     }
-
-    Ok(())
 }
 
 #[cfg(test)]
