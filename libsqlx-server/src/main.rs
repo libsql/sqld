@@ -93,7 +93,14 @@ async fn main() -> Result<()> {
 
     let mut join_set = JoinSet::new();
 
-    let store = Arc::new(Store::new(&config.db_path));
+
+    let meta_path = config.db_path.join("meta");
+    tokio::fs::create_dir_all(&meta_path).await?;
+    let env = heed::EnvOpenOptions::new()
+        .max_dbs(1000)
+        .map_size(100 * 1024 * 1024)
+        .open(meta_path)?;
+    let store = Arc::new(Store::new(env.clone()));
     let manager = Arc::new(Manager::new(config.db_path.clone(), store.clone(), 100));
     let bus = Arc::new(Bus::new(config.cluster.id, manager.clone()));
 
