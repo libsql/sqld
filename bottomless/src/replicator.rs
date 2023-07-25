@@ -116,17 +116,16 @@ impl Options {
         if let Some(region) = self.region.as_deref() {
             loader = loader.region(Region::new(region.to_string()));
         }
-        match (&self.access_key_id, &self.secret_access_key) {
-            (Some(access_key_id), Some(secret_access_key)) => {
-                loader = loader.credentials_provider(Credentials::new(
-                    access_key_id,
-                    secret_access_key,
-                    None,
-                    None,
-                    "Static",
-                ));
-            }
-            _ => {}
+        if let (Some(access_key_id), Some(secret_access_key)) =
+            (&self.access_key_id, &self.secret_access_key)
+        {
+            loader = loader.credentials_provider(Credentials::new(
+                access_key_id,
+                secret_access_key,
+                None,
+                None,
+                "Static",
+            ));
         }
         if let Some(endpoint) = self.aws_endpoint.as_deref() {
             loader = loader.endpoint_url(endpoint);
