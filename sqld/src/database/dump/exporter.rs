@@ -3,9 +3,8 @@ use std::ffi::CString;
 use std::fmt::{Display, Write as _};
 use std::io::Write;
 
-use anyhow::bail;
-use rusqlite::types::ValueRef;
-use rusqlite::OptionalExtension;
+use anyhow::{bail, Context};
+use libsql::params::{Params, ValueRef};
 
 struct DumpState<W: Write> {
     /// true if db is in writable_schema mode
@@ -13,16 +12,16 @@ struct DumpState<W: Write> {
     writer: W,
 }
 
-use rusqlite::ffi::{sqlite3_keyword_check, sqlite3_table_column_metadata, SQLITE_OK};
+use sqld_libsql_bindings::ffi::{sqlite3_keyword_check, sqlite3_table_column_metadata, SQLITE_OK};
 
 impl<W: Write> DumpState<W> {
     fn run_schema_dump_query(
         &mut self,
-        txn: &rusqlite::Connection,
+        txn: &libsql::Connection,
         stmt: &str,
     ) -> anyhow::Result<()> {
-        let mut stmt = txn.prepare(stmt)?;
-        let mut rows = stmt.query(())?;
+        let stmt = txn.prepare(stmt)?;
+        let rows = stmt.execute(&Params::None).context("Empty response")?;
         while let Some(row) = rows.next()? {
             let ValueRef::Text(table) = row.get_ref(0)? else { bail!("invalid schema table") };
             let ValueRef::Text(ty) = row.get_ref(1)? else { bail!("invalid schema table") };
@@ -92,8 +91,8 @@ impl<W: Write> DumpState<W> {
 
                 write!(&mut select, " FROM {}", Quoted(table_str))?;
 
-                let mut stmt = txn.prepare(&select)?;
-                let mut rows = stmt.query(())?;
+                let stmt = txn.prepare(&select)?;
+                let rows = stmt.execute(&Params::None).context("Empty response")?;
                 while let Some(row) = rows.next()? {
                     write!(self.writer, "{insert}")?;
                     if row_id_col.is_some() {
@@ -105,7 +104,7 @@ impl<W: Write> DumpState<W> {
                         if i != 0 || row_id_col.is_some() {
                             write!(self.writer, ",")?;
                         }
-                        write_value_ref(&mut self.writer, row.get_ref(i)?)?;
+                        write_value_ref(&mut self.writer, row.get_ref(i as i32)?)?;
                     }
                     writeln!(self.writer, ");")?;
                 }
@@ -115,15 +114,15 @@ impl<W: Write> DumpState<W> {
         Ok(())
     }
 
-    fn run_table_dump_query(&mut self, txn: &rusqlite::Connection, q: &str) -> anyhow::Result<()> {
-        let mut stmt = txn.prepare(q)?;
+    fn run_table_dump_query(&mut self, txn: &libsql::Connection, q: &str) -> anyhow::Result<()> {
+        let stmt = txn.prepare(q)?;
         let col_count = stmt.column_count();
-        let mut rows = stmt.query(())?;
+        let rows = stmt.execute(&Params::None).context("Empty response")?;
         while let Some(row) = rows.next()? {
             let ValueRef::Text(sql) = row.get_ref(0)? else { bail!("the first row in a table dump query should be of type text") };
             self.writer.write_all(sql)?;
             for i in 1..col_count {
-                let ValueRef::Text(s) = row.get_ref(i)? else { bail!("row {i} in table dump query should be of type text") };
+                let ValueRef::Text(s) = row.get_ref(i as i32)? else { bail!("row {i} in table dump query should be of type text") };
                 let s = std::str::from_utf8(s)?;
                 write!(self.writer, ",{s}")?;
             }
@@ -134,7 +133,7 @@ impl<W: Write> DumpState<W> {
 
     fn list_table_columns(
         &self,
-        txn: &rusqlite::Connection,
+        txn: &libsql::Connection,
         table: &str,
     ) -> anyhow::Result<(Option<String>, Vec<String>)> {
         let mut cols = Vec::new();
@@ -143,18 +142,18 @@ impl<W: Write> DumpState<W> {
         let mut preserve_row_id = false;
         let mut row_id_col = None;
 
-        txn.pragma(None, "table_info", table, |row| {
-            let name: String = row.get_unwrap(1);
-            cols.push(name);
-            // this is a primary key col
-            if row.get_unwrap::<_, usize>(5) != 0 {
-                num_primary_keys += 1;
-                is_integer_primary_key = num_primary_keys == 1
-                    && matches!(row.get_ref_unwrap(2), ValueRef::Text(b"INTEGER"));
+        if let Some(results) = txn.execute("pragma table_info", ())? {
+            while let Ok(Some(row)) = results.next() {
+                let name: String = row.get(1).unwrap();
+                cols.push(name);
+                // this is a primary key col
+                if row.get::<i64>(5).unwrap() != 0 {
+                    num_primary_keys += 1;
+                    is_integer_primary_key = num_primary_keys == 1
+                        && matches!(row.get_ref(2).unwrap(), ValueRef::Text(b"INTEGER"));
+                }
             }
-
-            Ok(())
-        })?;
+        }
 
         // from sqlite:
         // > The decision of whether or not a rowid really needs to be preserved
@@ -171,16 +170,12 @@ impl<W: Write> DumpState<W> {
             // > there is a "pk" entry in "PRAGMA index_list".  There will be
             // > no "pk" index if the PRIMARY KEY really is an alias for the ROWID.
 
-            txn.query_row(
-                "SELECT 1 FROM pragma_index_list(?)  WHERE origin='pk'",
-                [table],
-                |_| {
-                    // re-set preserve_row_id iif there is a row
-                    preserve_row_id = true;
-                    Ok(())
-                },
-            )
-            .optional()?;
+            if let Ok(Some(rows)) = txn.execute(
+                "SELECT 1 FROM pragma_index_list(?) WHERE origin='pk'",
+                Params::Positional(vec![table.into()]),
+            ) {
+                preserve_row_id = rows.next()?.is_none();
+            }
         }
 
         if preserve_row_id {
@@ -206,7 +201,7 @@ impl<W: Write> DumpState<W> {
                         )
                     };
 
-                    if rc == SQLITE_OK {
+                    if rc == SQLITE_OK as i32 {
                         row_id_col = Some(row_id_name.to_owned());
                         break;
                     }
@@ -420,10 +415,11 @@ fn find_unused_str(haystack: &str, needle1: &str, needle2: &str) -> String {
     }
 }
 
-pub fn export_dump(mut db: rusqlite::Connection, writer: impl Write) -> anyhow::Result<()> {
-    let mut txn = db.transaction()?;
-    txn.execute("PRAGMA writable_schema=ON", ())?;
-    let savepoint = txn.savepoint_with_name("dump")?;
+pub fn export_dump(mut db: libsql::Connection, writer: impl Write) -> anyhow::Result<()> {
+    db.execute("BEGIN", ())?;
+    db.execute("PRAGMA writable_schema=ON", ())?;
+    // FIXME: savepoint logic is lost during the out-of-rusqlite migration, we need to restore it
+    db.execute("SAVEPOINT dump", ())?;
     let mut state = DumpState {
         writable_schema: false,
         writer,
@@ -441,12 +437,12 @@ pub fn export_dump(mut db: rusqlite::Connection, writer: impl Write) -> anyhow::
 WHERE type=='table' 
 AND sql NOT NULL 
 ORDER BY tbl_name='sqlite_sequence', rowid";
-    state.run_schema_dump_query(&savepoint, q)?;
+    state.run_schema_dump_query(&mut db, q)?;
 
     let q = "SELECT sql FROM sqlite_schema AS o 
 WHERE sql NOT NULL 
 AND type IN ('index','trigger','view')";
-    state.run_table_dump_query(&savepoint, q)?;
+    state.run_table_dump_query(&mut db, q)?;
 
     if state.writable_schema {
         writeln!(state.writer, "PRAGMA writable_schema=OFF;")?;
@@ -454,8 +450,8 @@ AND type IN ('index','trigger','view')";
 
     writeln!(state.writer, "COMMIT;")?;
 
-    let _ = savepoint.execute("PRAGMA writable_schema = OFF;", ());
-    let _ = savepoint.finish();
+    db.execute("PRAGMA writable_schema = OFF;", ())?;
+    db.execute("COMMIT", ())?;
 
     Ok(())
 }

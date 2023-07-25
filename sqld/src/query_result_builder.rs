@@ -3,9 +3,11 @@ use std::io::{self, ErrorKind};
 use std::ops::{Deref, DerefMut};
 
 use bytesize::ByteSize;
-use rusqlite::types::ValueRef;
+use libsql::params::ValueRef;
 use serde::Serialize;
 use serde_json::ser::Formatter;
+
+pub use libsql::Column;
 
 #[derive(Debug)]
 pub enum QueryResultBuilderError {
@@ -54,28 +56,6 @@ impl From<io::Error> for QueryResultBuilderError {
     }
 }
 
-/// Identical to rusqlite::Column, with visible fields.
-#[cfg_attr(test, derive(arbitrary::Arbitrary))]
-pub struct Column<'a> {
-    pub(crate) name: &'a str,
-    pub(crate) decl_ty: Option<&'a str>,
-}
-
-impl<'a> From<(&'a str, Option<&'a str>)> for Column<'a> {
-    fn from((name, decl_ty): (&'a str, Option<&'a str>)) -> Self {
-        Self { name, decl_ty }
-    }
-}
-
-impl<'a> From<&'a rusqlite::Column<'a>> for Column<'a> {
-    fn from(value: &'a rusqlite::Column<'a>) -> Self {
-        Self {
-            name: value.name(),
-            decl_ty: value.decl_type(),
-        }
-    }
-}
-
 #[derive(Debug, Clone, Copy, Default)]
 pub struct QueryBuilderConfig {
     pub max_size: Option<u64>,
@@ -107,7 +87,8 @@ pub trait QueryResultBuilder: Send + 'static {
     /// begin a new row for the current step
     fn begin_row(&mut self) -> Result<(), QueryResultBuilderError>;
     /// add value to current row
-    fn add_row_value(&mut self, v: ValueRef) -> Result<(), QueryResultBuilderError>;
+    fn add_row_value(&mut self, v: libsql::params::ValueRef)
+        -> Result<(), QueryResultBuilderError>;
     /// finish current row
     fn finish_row(&mut self) -> Result<(), QueryResultBuilderError>;
     /// end adding rows
@@ -588,14 +569,14 @@ pub mod test {
             Blob(&'a [u8]),
         }
 
-        impl<'a> From<ValueRef<'a>> for rusqlite::types::ValueRef<'a> {
+        impl<'a> From<ValueRef<'a>> for libsql::params::ValueRef<'a> {
             fn from(value: ValueRef<'a>) -> Self {
                 match value {
-                    ValueRef::Null => rusqlite::types::ValueRef::Null,
-                    ValueRef::Integer(i) => rusqlite::types::ValueRef::Integer(i),
-                    ValueRef::Real(x) => rusqlite::types::ValueRef::Real(x),
-                    ValueRef::Text(s) => rusqlite::types::ValueRef::Text(s.as_bytes()),
-                    ValueRef::Blob(b) => rusqlite::types::ValueRef::Blob(b),
+                    ValueRef::Null => libsql::params::Value::Null,
+                    ValueRef::Integer(i) => libsql::params::Value::Integer(i),
+                    ValueRef::Real(x) => libsql::params::Value::Float(x),
+                    ValueRef::Text(s) => libsql::params::Value::Text(s.as_bytes()),
+                    ValueRef::Blob(b) => libsql::params::Value::Blob(b),
                 }
             }
         }

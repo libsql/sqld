@@ -5,10 +5,10 @@ use std::sync::mpsc::RecvTimeoutError;
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::libsql::wal_hook::TRANSPARENT_METHODS;
 use anyhow::Context as AnyhowContext;
 use enclose::enclose;
 use futures::never::Never;
-use libsql::wal_hook::TRANSPARENT_METHODS;
 use once_cell::sync::Lazy;
 use rpc::run_rpc_server;
 use tokio::sync::{mpsc, Notify};
@@ -551,7 +551,7 @@ async fn run_storage_monitor(db_path: PathBuf, stats: Stats) -> anyhow::Result<(
             // initialize a connection here, and keep it alive for the entirety of the program. If we
             // fail to open it, we wait for `duration` and try again later.
             let ctx = &mut ();
-            let maybe_conn = match open_db(&db_path, &TRANSPARENT_METHODS, ctx, Some(rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)) {
+            let maybe_conn = match open_db(&db_path, &TRANSPARENT_METHODS, ctx, Some(sqld_libsql_bindings::ffi::SQLITE_OPEN_READONLY as i32)) {
                 Ok(conn) => Some(conn),
                 Err(e) => {
                     tracing::warn!("failed to open connection for storager monitor: {e}, trying again in {duration:?}");
@@ -561,12 +561,14 @@ async fn run_storage_monitor(db_path: PathBuf, stats: Stats) -> anyhow::Result<(
 
             loop {
                 if let Some(ref conn) = maybe_conn {
-                    if let Ok(storage_bytes_used) =
-                        conn.query_row("select sum(pgsize) from dbstat;", [], |row| {
-                            row.get::<usize, u64>(0)
-                        })
+                    if let Ok(Some(rows)) =
+                        conn.execute("select sum(pgsize) from dbstat;", ())
                     {
-                        stats.set_storage_bytes_used(storage_bytes_used);
+                        if let Ok(Some(storage_bytes_used)) = rows.next() {
+                            if let Ok(storage_bytes_used) = storage_bytes_used.get(0) {
+                                stats.set_storage_bytes_used(storage_bytes_used);
+                            }
+                        }
                     }
                 }
 

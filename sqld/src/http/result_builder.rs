@@ -1,7 +1,7 @@
+use libsql::params::ValueRef;
 use std::io;
 use std::ops::{Deref, DerefMut};
 
-use rusqlite::types::ValueRef;
 use serde::{Serialize, Serializer};
 use serde_json::ser::{CompactFormatter, Formatter};
 
@@ -70,7 +70,7 @@ impl io::Write for LimitBuffer {
     }
 }
 
-struct HttpJsonValueSerializer<'a>(&'a ValueRef<'a>);
+struct HttpJsonValueSerializer<'a>(&'a libsql::params::ValueRef<'a>);
 
 impl JsonHttpPayloadBuilder {
     pub fn new() -> Self {

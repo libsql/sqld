@@ -57,18 +57,18 @@ pub extern "C" fn xOpen(
     let rc = unsafe {
         (orig_methods.xOpen.unwrap())(vfs, db_file, wal_name, no_shm_mode, max_size, methods, wal)
     };
-    if rc != ffi::SQLITE_OK {
+    if rc != ffi::SQLITE_OK as i32 {
         return rc;
     }
 
     if !is_regular(vfs) {
         tracing::error!("Bottomless WAL is currently only supported for regular VFS");
-        return ffi::SQLITE_CANTOPEN;
+        return ffi::SQLITE_CANTOPEN as i32;
     }
 
     if is_local() {
         tracing::info!("Running in local-mode only, without any replication");
-        return ffi::SQLITE_OK;
+        return ffi::SQLITE_OK as i32;
     }
 
     let runtime = match tokio::runtime::Builder::new_current_thread()
@@ -78,7 +78,7 @@ pub extern "C" fn xOpen(
         Ok(runtime) => runtime,
         Err(e) => {
             tracing::error!("Failed to initialize async runtime: {}", e);
-            return ffi::SQLITE_CANTOPEN;
+            return ffi::SQLITE_CANTOPEN as i32;
         }
     };
 
@@ -88,7 +88,7 @@ pub extern "C" fn xOpen(
             Ok(path) => path,
             Err(e) => {
                 tracing::error!("Failed to parse the main database path: {}", e);
-                return ffi::SQLITE_CANTOPEN;
+                return ffi::SQLITE_CANTOPEN as i32;
             }
         }
     };
@@ -98,12 +98,12 @@ pub extern "C" fn xOpen(
         Ok(repl) => repl,
         Err(e) => {
             tracing::error!("Failed to initialize replicator: {}", e);
-            return ffi::SQLITE_CANTOPEN;
+            return ffi::SQLITE_CANTOPEN as i32;
         }
     };
 
     let rc = block_on!(runtime, try_restore(&mut replicator));
-    if rc != ffi::SQLITE_OK {
+    if rc != ffi::SQLITE_OK as i32 {
         return rc;
     }
 
@@ -114,7 +114,7 @@ pub extern "C" fn xOpen(
     let context_ptr = Box::into_raw(Box::new(context)) as *mut c_void;
     unsafe { (*(*wal)).pMethodsData = context_ptr };
 
-    ffi::SQLITE_OK
+    ffi::SQLITE_OK as i32
 }
 
 fn get_orig_methods(wal: *mut Wal) -> &'static libsql_wal_methods {
@@ -138,7 +138,7 @@ pub extern "C" fn xClose(
     let orig_methods = get_orig_methods(wal);
     let methods_data = unsafe { (*wal).pMethodsData as *mut replicator::Context };
     let rc = unsafe { (orig_methods.xClose.unwrap())(wal, db, sync_flags, n_buf, z_buf) };
-    if rc != ffi::SQLITE_OK {
+    if rc != ffi::SQLITE_OK as i32 {
         return rc;
     }
     if !is_local() && !methods_data.is_null() {
@@ -194,7 +194,7 @@ pub extern "C" fn xUndo(
 ) -> i32 {
     let orig_methods = get_orig_methods(wal);
     let rc = unsafe { (orig_methods.xUndo.unwrap())(wal, func, ctx) };
-    if is_local() || rc != ffi::SQLITE_OK {
+    if is_local() || rc != ffi::SQLITE_OK as i32 {
         return rc;
     }
 
@@ -207,7 +207,7 @@ pub extern "C" fn xUndo(
     );
     ctx.replicator.rollback_to_frame(last_valid_frame);
 
-    ffi::SQLITE_OK
+    ffi::SQLITE_OK as i32
 }
 
 pub extern "C" fn xSavepoint(wal: *mut Wal, wal_data: *mut u32) {
@@ -218,7 +218,7 @@ pub extern "C" fn xSavepoint(wal: *mut Wal, wal_data: *mut u32) {
 pub extern "C" fn xSavepointUndo(wal: *mut Wal, wal_data: *mut u32) -> i32 {
     let orig_methods = get_orig_methods(wal);
     let rc = unsafe { (orig_methods.xSavepointUndo.unwrap())(wal, wal_data) };
-    if is_local() || rc != ffi::SQLITE_OK {
+    if is_local() || rc != ffi::SQLITE_OK as i32 {
         return rc;
     }
 
@@ -231,7 +231,7 @@ pub extern "C" fn xSavepointUndo(wal: *mut Wal, wal_data: *mut u32) -> i32 {
     );
     ctx.replicator.rollback_to_frame(last_valid_frame);
 
-    ffi::SQLITE_OK
+    ffi::SQLITE_OK as i32
 }
 
 pub extern "C" fn xFrames(
@@ -253,7 +253,7 @@ pub extern "C" fn xFrames(
         // supported by bottomless storage.
         if let Err(e) = ctx.replicator.set_page_size(page_size as usize) {
             tracing::error!("{}", e);
-            return ffi::SQLITE_IOERR_WRITE;
+            return ffi::SQLITE_IOERR_WRITE as i32;
         }
         let frame_count = ffi::PageHdrIter::new(page_headers, page_size as usize).count();
         if size_after != 0 {
@@ -273,11 +273,11 @@ pub extern "C" fn xFrames(
             sync_flags,
         )
     };
-    if is_local() || rc != ffi::SQLITE_OK {
+    if is_local() || rc != ffi::SQLITE_OK as i32 {
         return rc;
     }
 
-    ffi::SQLITE_OK
+    ffi::SQLITE_OK as i32
 }
 
 extern "C" fn always_wait(_busy_param: *mut c_void) -> i32 {
@@ -307,9 +307,9 @@ pub extern "C" fn xCheckpoint(
      ** In order to avoid autocheckpoint on close (that's too often),
      ** checkpoint attempts weaker than TRUNCATE are ignored.
      */
-    if emode < ffi::SQLITE_CHECKPOINT_TRUNCATE {
+    if emode < ffi::SQLITE_CHECKPOINT_TRUNCATE as i32 {
         tracing::trace!("Ignoring a checkpoint request weaker than TRUNCATE");
-        return ffi::SQLITE_OK;
+        return ffi::SQLITE_OK as i32;
     }
     /* If there's no busy handler, let's provide a default one,
      ** since we auto-upgrade the passive checkpoint
@@ -335,14 +335,14 @@ pub extern "C" fn xCheckpoint(
         )
     };
 
-    if is_local() || rc != ffi::SQLITE_OK {
+    if is_local() || rc != ffi::SQLITE_OK as i32 {
         return rc;
     }
 
     let ctx = get_replicator_context(wal);
     if ctx.replicator.commits_in_current_generation() == 0 {
         tracing::debug!("No commits happened in this generation, not snapshotting");
-        return ffi::SQLITE_OK;
+        return ffi::SQLITE_OK as i32;
     }
 
     let last_known_frame = ctx.replicator.last_known_frame();
@@ -352,7 +352,7 @@ pub extern "C" fn xCheckpoint(
         ctx.replicator.wait_until_committed(last_known_frame)
     ) {
         tracing::error!("Failed to finalize replication: {}", e);
-        return ffi::SQLITE_IOERR_WRITE;
+        return ffi::SQLITE_IOERR_WRITE as i32;
     }
 
     ctx.replicator.new_generation();
@@ -363,10 +363,10 @@ pub extern "C" fn xCheckpoint(
             "Failed to snapshot the main db file during checkpoint: {}",
             e
         );
-        return ffi::SQLITE_IOERR_WRITE;
+        return ffi::SQLITE_IOERR_WRITE as i32;
     }
 
-    ffi::SQLITE_OK
+    ffi::SQLITE_OK as i32
 }
 
 pub extern "C" fn xCallback(wal: *mut Wal) -> i32 {
@@ -416,13 +416,13 @@ async fn try_restore(replicator: &mut replicator::Replicator) -> i32 {
             replicator.new_generation();
             if let Err(e) = replicator.snapshot_main_db_file().await {
                 tracing::error!("Failed to snapshot the main db file: {}", e);
-                return ffi::SQLITE_CANTOPEN;
+                return ffi::SQLITE_CANTOPEN as i32;
             }
             // Restoration process only leaves the local WAL file if it was
             // detected to be newer than its remote counterpart.
             if let Err(e) = replicator.maybe_replicate_wal().await {
                 tracing::error!("Failed to replicate local WAL: {}", e);
-                return ffi::SQLITE_CANTOPEN;
+                return ffi::SQLITE_CANTOPEN as i32;
             }
         }
         Ok(replicator::RestoreAction::ReuseGeneration(gen)) => {
@@ -430,28 +430,28 @@ async fn try_restore(replicator: &mut replicator::Replicator) -> i32 {
         }
         Err(e) => {
             tracing::error!("Failed to restore the database: {}", e);
-            return ffi::SQLITE_CANTOPEN;
+            return ffi::SQLITE_CANTOPEN as i32;
         }
     }
 
-    ffi::SQLITE_OK
+    ffi::SQLITE_OK as i32
 }
 
 pub extern "C" fn xPreMainDbOpen(_methods: *mut libsql_wal_methods, path: *const c_char) -> i32 {
     if is_local() {
         tracing::info!("Running in local-mode only, without any replication");
-        return ffi::SQLITE_OK;
+        return ffi::SQLITE_OK as i32;
     }
 
     if path.is_null() {
-        return ffi::SQLITE_OK;
+        return ffi::SQLITE_OK as i32;
     }
     let path = unsafe {
         match std::ffi::CStr::from_ptr(path).to_str() {
             Ok(path) => path,
             Err(e) => {
                 tracing::error!("Failed to parse the main database path: {}", e);
-                return ffi::SQLITE_CANTOPEN;
+                return ffi::SQLITE_CANTOPEN as i32;
             }
         }
     };
@@ -464,7 +464,7 @@ pub extern "C" fn xPreMainDbOpen(_methods: *mut libsql_wal_methods, path: *const
         Ok(runtime) => runtime,
         Err(e) => {
             tracing::error!("Failed to initialize async runtime: {}", e);
-            return ffi::SQLITE_CANTOPEN;
+            return ffi::SQLITE_CANTOPEN as i32;
         }
     };
 
@@ -472,7 +472,7 @@ pub extern "C" fn xPreMainDbOpen(_methods: *mut libsql_wal_methods, path: *const
         Ok(options) => options,
         Err(e) => {
             tracing::error!("Failed to parse replicator options: {}", e);
-            return ffi::SQLITE_CANTOPEN;
+            return ffi::SQLITE_CANTOPEN as i32;
         }
     };
     let replicator = block_on!(runtime, replicator::Replicator::with_options(path, options));
@@ -480,7 +480,7 @@ pub extern "C" fn xPreMainDbOpen(_methods: *mut libsql_wal_methods, path: *const
         Ok(repl) => repl,
         Err(e) => {
             tracing::error!("Failed to initialize replicator: {}", e);
-            return ffi::SQLITE_CANTOPEN;
+            return ffi::SQLITE_CANTOPEN as i32;
         }
     };
     block_on!(runtime, try_restore(&mut replicator))
@@ -561,7 +561,7 @@ pub mod static_init {
             if orig_methods.is_null() {}
             let methods = crate::bottomless_methods(orig_methods);
             let rc = unsafe { libsql_wal_methods_register(methods) };
-            if rc != crate::ffi::SQLITE_OK {
+            if rc != crate::ffi::SQLITE_OK as i32 {
                 let _box = unsafe { Box::from_raw(methods as *mut libsql_wal_methods) };
                 tracing::warn!("Failed to instantiate bottomless WAL methods");
             }

@@ -86,7 +86,7 @@ unsafe impl WalHook for ReplicationLoggerHook {
         if let Err(e) = ctx.flush(ntruncate) {
             tracing::error!("error writing to replication log: {e}");
             // returning IO_ERR ensure that xUndo will be called by sqlite.
-            return SQLITE_IOERR;
+            return SQLITE_IOERR as c_int;
         }
 
         let rc = unsafe {
@@ -149,7 +149,7 @@ unsafe impl WalHook for ReplicationLoggerHook {
 
     fn on_savepoint_undo(wal: &mut Wal, wal_data: *mut u32, orig: XWalSavePointUndoFn) -> i32 {
         let rc = unsafe { orig(wal, wal_data) };
-        if rc != SQLITE_OK {
+        if rc != SQLITE_OK as i32 {
             return rc;
         };
 
@@ -193,9 +193,9 @@ unsafe impl WalHook for ReplicationLoggerHook {
              ** In order to avoid autocheckpoint on close (that's too often),
              ** checkpoint attempts weaker than TRUNCATE are ignored.
              */
-            if emode < SQLITE_CHECKPOINT_TRUNCATE {
+            if emode < SQLITE_CHECKPOINT_TRUNCATE as i32 {
                 tracing::trace!("Ignoring a checkpoint request weaker than TRUNCATE");
-                return SQLITE_OK;
+                return SQLITE_OK as i32;
             }
         }
         let rc = unsafe {
@@ -213,7 +213,7 @@ unsafe impl WalHook for ReplicationLoggerHook {
             )
         };
 
-        if rc != SQLITE_OK {
+        if rc != SQLITE_OK as i32 {
             return rc;
         }
 
@@ -226,7 +226,7 @@ unsafe impl WalHook for ReplicationLoggerHook {
                 let mut replicator = replicator.lock().unwrap();
                 if replicator.commits_in_current_generation() == 0 {
                     tracing::debug!("No commits happened in this generation, not snapshotting");
-                    return SQLITE_OK;
+                    return SQLITE_OK as i32;
                 }
                 let last_known_frame = replicator.last_known_frame();
                 replicator.request_flush();
@@ -237,18 +237,18 @@ unsafe impl WalHook for ReplicationLoggerHook {
                         last_known_frame,
                         e
                     );
-                    return SQLITE_IOERR_WRITE;
+                    return SQLITE_IOERR_WRITE as i32;
                 }
                 replicator.new_generation();
                 if let Err(e) =
                     runtime.block_on(async move { replicator.snapshot_main_db_file().await })
                 {
                     tracing::error!("Failed to snapshot the main db file during checkpoint: {e}");
-                    return SQLITE_IOERR_WRITE;
+                    return SQLITE_IOERR_WRITE as i32;
                 }
             }
         }
-        SQLITE_OK
+        SQLITE_OK as i32
     }
 }
 
@@ -887,21 +887,24 @@ impl ReplicationLogger {
 
 fn checkpoint_db(data_path: &Path) -> anyhow::Result<()> {
     unsafe {
-        let conn = rusqlite::Connection::open(data_path)?;
-        conn.pragma_query(None, "page_size", |row| {
-            let page_size = row.get::<_, i32>(0).unwrap();
+        // unwrap: data_path is expected to be a validated path
+        let conn = libsql::Database::open(data_path.to_str().unwrap())?.connect()?;
+        if let Ok(row) = conn
+            .prepare("pragma page_size")?
+            .query_row(&libsql::Params::None)
+        {
+            let page_size: i32 = row.get(0).unwrap();
             assert_eq!(
                 page_size, WAL_PAGE_SIZE,
                 "invalid database file, expected page size to be {}, but found {} instead",
                 WAL_PAGE_SIZE, page_size
             );
-            Ok(())
-        })?;
+        }
         let mut num_checkpointed: c_int = 0;
-        let rc = rusqlite::ffi::sqlite3_wal_checkpoint_v2(
+        let rc = sqld_libsql_bindings::ffi::sqlite3_wal_checkpoint_v2(
             conn.handle(),
             std::ptr::null(),
-            SQLITE_CHECKPOINT_TRUNCATE,
+            SQLITE_CHECKPOINT_TRUNCATE as i32,
             &mut num_checkpointed as *mut _,
             std::ptr::null_mut(),
         );
