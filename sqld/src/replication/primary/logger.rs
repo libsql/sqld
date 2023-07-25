@@ -6,7 +6,7 @@ use std::os::unix::prelude::FileExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use anyhow::{anyhow, bail, ensure};
+use anyhow::{bail, ensure};
 use bytemuck::{bytes_of, pod_read_unaligned, Pod, Zeroable};
 use bytes::{Bytes, BytesMut};
 use parking_lot::RwLock;
@@ -720,6 +720,7 @@ impl ReplicationLogger {
         max_log_size: u64,
         max_log_duration: Option<Duration>,
         dirty: bool,
+        disable_auto_checkpoint: bool,
         callback: SnapshotCallback,
     ) -> anyhow::Result<Self> {
         let log_path = db_path.join("wallog");
@@ -751,7 +752,7 @@ impl ReplicationLogger {
         };
 
         if should_recover {
-            Self::recover(log_file, data_path, callback)
+            Self::recover(log_file, data_path, callback, disable_auto_checkpoint)
         } else {
             Self::from_log_file(db_path.to_path_buf(), log_file, callback)
         }
@@ -780,10 +781,11 @@ impl ReplicationLogger {
         log_file: LogFile,
         mut data_path: PathBuf,
         callback: SnapshotCallback,
+        disable_auto_checkpoint: bool,
     ) -> anyhow::Result<Self> {
         // It is necessary to checkpoint before we restore the replication log, since the WAL may
         // contain pages that are not in the database file.
-        checkpoint_db(&data_path)?;
+        checkpoint_db(&data_path, disable_auto_checkpoint)?;
         let mut log_file = log_file.reset()?;
         let snapshot_path = data_path.parent().unwrap().join("snapshots");
         // best effort, there may be no snapshots
@@ -886,7 +888,7 @@ impl ReplicationLogger {
     }
 }
 
-fn checkpoint_db(data_path: &Path) -> anyhow::Result<()> {
+fn checkpoint_db(data_path: &Path, disable_auto_checkpoint: bool) -> anyhow::Result<()> {
     unsafe {
         let conn = rusqlite::Connection::open(data_path)?;
         conn.query_row("PRAGMA journal_mode=WAL", (), |_| Ok(()))?;
@@ -901,12 +903,13 @@ fn checkpoint_db(data_path: &Path) -> anyhow::Result<()> {
             Ok(())
         })?;
         // turn off auto_checkpointing - we'll use a fiber to checkpoint in time steps instead
-        let rc = rusqlite::ffi::sqlite3_wal_autocheckpoint(conn.handle(), 0);
-        if rc != 0 {
-            return Err(anyhow!(
-                "Failed to disable WAL autocheckpoint - error code: {}",
-                rc
-            ));
+        if disable_auto_checkpoint {
+            let rc = rusqlite::ffi::sqlite3_wal_autocheckpoint(conn.handle(), 0);
+            if rc != 0 {
+                bail!("Failed to disable WAL autocheckpoint - error code: {}", rc)
+            } else {
+                tracing::info!("SQLite autocheckpoint disabled");
+            }
         }
         let mut num_checkpointed: c_int = 0;
         let rc = rusqlite::ffi::sqlite3_wal_checkpoint_v2(
@@ -918,18 +921,13 @@ fn checkpoint_db(data_path: &Path) -> anyhow::Result<()> {
         );
         if rc == 0 {
             if num_checkpointed == -1 {
-                Err(anyhow!(
-                    "Checkpoint failed: database journal_mode is not WAL"
-                ))
+                bail!("Checkpoint failed: database journal_mode is not WAL")
             } else {
                 conn.execute("VACUUM", ())?;
                 Ok(())
             }
         } else {
-            Err(anyhow!(
-                "Checkpoint failed: wal_checkpoint_v2 error code {}",
-                rc
-            ))
+            bail!("Checkpoint failed: wal_checkpoint_v2 error code {}", rc)
         }
     }
 }
@@ -942,7 +940,8 @@ mod test {
     fn write_and_read_from_frame_log() {
         let dir = tempfile::tempdir().unwrap();
         let logger =
-            ReplicationLogger::open(dir.path(), 0, None, false, Box::new(|_| Ok(()))).unwrap();
+            ReplicationLogger::open(dir.path(), 0, None, false, false, Box::new(|_| Ok(())))
+                .unwrap();
 
         let frames = (0..10)
             .map(|i| WalPage {
@@ -971,7 +970,8 @@ mod test {
     fn index_out_of_bounds() {
         let dir = tempfile::tempdir().unwrap();
         let logger =
-            ReplicationLogger::open(dir.path(), 0, None, false, Box::new(|_| Ok(()))).unwrap();
+            ReplicationLogger::open(dir.path(), 0, None, false, false, Box::new(|_| Ok(())))
+                .unwrap();
         let log_file = logger.log_file.write();
         assert!(matches!(log_file.frame(1), Err(LogReadError::Ahead)));
     }
@@ -981,7 +981,8 @@ mod test {
     fn incorrect_frame_size() {
         let dir = tempfile::tempdir().unwrap();
         let logger =
-            ReplicationLogger::open(dir.path(), 0, None, false, Box::new(|_| Ok(()))).unwrap();
+            ReplicationLogger::open(dir.path(), 0, None, false, false, Box::new(|_| Ok(())))
+                .unwrap();
         let entry = WalPage {
             page_no: 0,
             size_after: 0,

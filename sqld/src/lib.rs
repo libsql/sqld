@@ -38,7 +38,7 @@ use crate::error::Error;
 use crate::stats::Stats;
 
 use sha256::try_digest;
-use tokio::time::{interval, sleep, Instant};
+use tokio::time::{interval, sleep, Instant, MissedTickBehavior};
 
 pub use sqld_libsql_bindings as libsql;
 
@@ -576,14 +576,20 @@ async fn run_checkpoint_cron(db_path: PathBuf, period: Duration) -> anyhow::Resu
     let data_path = db_path.join("data");
     tracing::info!("setting checkpoint interval to {:?}", period);
     let mut interval = interval(period);
-    let mut retry = None;
+    interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    let mut retry: Option<Duration> = None;
     loop {
         if let Some(retry) = retry.take() {
+            if retry.is_zero() {
+                tracing::warn!("database was not set in WAL journal mode");
+                return Ok(());
+            }
             sleep(retry).await;
         } else {
             interval.tick().await;
         }
-        retry = match rusqlite::Connection::open(&data_path) {
+        let data_path = data_path.clone();
+        retry = tokio::task::spawn_blocking(move || match rusqlite::Connection::open(&data_path) {
             Ok(conn) => unsafe {
                 let start = Instant::now();
                 let mut num_checkpointed: std::ffi::c_int = 0;
@@ -596,11 +602,7 @@ async fn run_checkpoint_cron(db_path: PathBuf, period: Duration) -> anyhow::Resu
                 );
                 if rc == 0 {
                     if num_checkpointed == -1 {
-                        tracing::warn!(
-                            "database {:?} not in WAL mode. Stopping checkpoint calls.",
-                            data_path
-                        );
-                        return Ok(());
+                        return Some(Duration::default());
                     } else {
                         let elapsed = Instant::now() - start;
                         tracing::info!("database checkpoint (took: {:?})", elapsed);
@@ -615,7 +617,8 @@ async fn run_checkpoint_cron(db_path: PathBuf, period: Duration) -> anyhow::Resu
                 tracing::warn!("couldn't connect to '{:?}': {}", data_path, err);
                 Some(RETRY_INTERVAL)
             }
-        };
+        })
+        .await?;
     }
 }
 

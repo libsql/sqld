@@ -154,7 +154,6 @@ where
             | OpenFlags::SQLITE_OPEN_URI
             | OpenFlags::SQLITE_OPEN_NO_MUTEX,
     );
-
     sqld_libsql_bindings::Connection::open(path, flags, wal_methods, hook_ctx)
 }
 
