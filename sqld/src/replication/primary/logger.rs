@@ -889,6 +889,8 @@ impl ReplicationLogger {
 fn checkpoint_db(data_path: &Path) -> anyhow::Result<()> {
     unsafe {
         let conn = rusqlite::Connection::open(data_path)?;
+        conn.query_row("PRAGMA journal_mode=WAL", (), |_| Ok(()))?;
+        tracing::info!("initialized journal_mode=WAL");
         conn.pragma_query(None, "page_size", |row| {
             let page_size = row.get::<_, i32>(0).unwrap();
             assert_eq!(
