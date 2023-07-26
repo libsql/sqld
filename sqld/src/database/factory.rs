@@ -196,7 +196,8 @@ mod test {
 
     #[tokio::test]
     async fn throttle_db_creation() {
-        let factory = (|| async { Ok(DummyDb) }).throttled(10, Some(Duration::from_millis(100)));
+        let factory =
+            (|| async { Ok(DummyDb) }).throttled(10, Some(Duration::from_millis(100)), u64::MAX);
 
         let mut conns = Vec::with_capacity(10);
         for _ in 0..10 {
