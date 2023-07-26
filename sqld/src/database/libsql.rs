@@ -46,6 +46,7 @@ where
     W: WalHook + 'static + Sync + Send,
     W::Context: Send + 'static,
 {
+    #[allow(clippy::too_many_arguments)]
     pub async fn new<F>(
         db_path: PathBuf,
         hook: &'static WalMethodsHook<W>,
