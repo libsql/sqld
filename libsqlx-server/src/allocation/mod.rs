@@ -76,7 +76,7 @@ impl Database {
             tokio::task::spawn_blocking(move || {
                 db.compact_log();
             });
-            return Poll::Ready(())
+            return Poll::Ready(());
         }
 
         Poll::Pending
