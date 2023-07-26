@@ -17,6 +17,7 @@ use tokio::task::{block_in_place, JoinSet};
 use tokio::time::Interval;
 
 use crate::allocation::primary::FrameStreamer;
+use crate::compactor::CompactionQueue;
 use crate::hrana;
 use crate::hrana::http::handle_pipeline;
 use crate::hrana::http::proto::{PipelineRequestBody, PipelineResponseBody};
@@ -70,10 +71,12 @@ impl Database {
         } = self
         {
             ready!(interval.poll_tick(cx));
+            tracing::debug!("attempting periodic log compaction");
             let db = db.db.clone();
             tokio::task::spawn_blocking(move || {
                 db.compact_log();
             });
+            return Poll::Ready(())
         }
 
         Poll::Pending
@@ -81,7 +84,14 @@ impl Database {
 }
 
 impl Database {
-    pub fn from_config(config: &AllocConfig, path: PathBuf, dispatcher: Arc<dyn Dispatch>) -> Self {
+    pub fn from_config(
+        config: &AllocConfig,
+        path: PathBuf,
+        dispatcher: Arc<dyn Dispatch>,
+        compaction_queue: Arc<CompactionQueue>,
+    ) -> Self {
+        let database_id = DatabaseId::from_name(&config.db_name);
+
         match config.db_config {
             DbConfig::Primary {
                 max_log_size,
@@ -90,7 +100,12 @@ impl Database {
                 let (sender, receiver) = tokio::sync::watch::channel(0);
                 let db = LibsqlDatabase::new_primary(
                     path,
-                    Compactor::new(max_log_size, replication_log_compact_interval),
+                    Compactor::new(
+                        max_log_size,
+                        replication_log_compact_interval,
+                        compaction_queue,
+                        database_id,
+                    ),
                     false,
                     Box::new(move |fno| {
                         let _ = sender.send(fno);
@@ -98,13 +113,19 @@ impl Database {
                 )
                 .unwrap();
 
+                let compact_interval = replication_log_compact_interval.map(|d| { 
+                    let mut i = tokio::time::interval(d / 2);
+                    i.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+                    Box::pin(i)
+                });
+
                 Self::Primary {
                     db: PrimaryDatabase {
                         db: Arc::new(db),
                         replica_streams: HashMap::new(),
                         frame_notifier: receiver,
                     },
-                    compact_interval: None,
+                    compact_interval,
                 }
             }
             DbConfig::Replica {
@@ -119,7 +140,6 @@ impl Database {
                 let mut db = WriteProxyDatabase::new(rdb, wdb, Arc::new(|_| ()));
                 let injector = db.injector().unwrap();
                 let (sender, receiver) = mpsc::channel(16);
-                let database_id = DatabaseId::from_name(&config.db_name);
 
                 let replicator = Replicator::new(
                     dispatcher,
@@ -208,9 +228,10 @@ impl ConnectionHandle {
 impl Allocation {
     pub async fn run(mut self) {
         loop {
+            dbg!();
             let fut = poll_fn(|cx| self.database.poll(cx));
             tokio::select! {
-                _ = fut => (),
+                _ = fut => dbg!(),
                 Some(msg) = self.inbox.recv() => {
                     match msg {
                         AllocationMessage::HranaPipelineReq { req, ret } => {
@@ -225,12 +246,16 @@ impl Allocation {
                         }
                     }
                 },
-                maybe_id = self.connections_futs.join_next() => {
+                maybe_id = self.connections_futs.join_next(), if !self.connections_futs.is_empty() => {
+                    dbg!();
                     if let Some(Ok(_id)) = maybe_id {
                         // self.connections.remove_entry(&id);
                     }
                 },
-                else => break,
+                else => {
+                    dbg!();
+                    break 
+                },
             }
         }
     }

@@ -55,8 +55,11 @@ impl Frame {
         Self { data: buf.freeze() }
     }
 
-    pub fn try_from_bytes(data: Bytes) -> anyhow::Result<Self> {
-        anyhow::ensure!(data.len() == Self::SIZE, "invalid frame size");
+    pub fn try_from_bytes(data: Bytes) -> crate::Result<Self> {
+        if data.len() != Self::SIZE {
+            return Err(crate::error::Error::InvalidFrame);
+        }
+
         Ok(Self { data })
     }
 

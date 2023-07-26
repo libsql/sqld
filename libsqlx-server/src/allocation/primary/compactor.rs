@@ -1,19 +1,38 @@
-use std::time::{Duration, Instant};
+use std::{
+    path::PathBuf,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use libsqlx::libsql::{LogCompactor, LogFile};
+use uuid::Uuid;
+
+use crate::{
+    compactor::{CompactionJob, CompactionQueue},
+    meta::DatabaseId,
+};
 
 pub struct Compactor {
     max_log_size: usize,
     last_compacted_at: Instant,
     compact_interval: Option<Duration>,
+    queue: Arc<CompactionQueue>,
+    database_id: DatabaseId,
 }
 
 impl Compactor {
-    pub fn new(max_log_size: usize, compact_interval: Option<Duration>) -> Self {
+    pub fn new(
+        max_log_size: usize,
+        compact_interval: Option<Duration>,
+        queue: Arc<CompactionQueue>,
+        database_id: DatabaseId,
+    ) -> Self {
         Self {
             max_log_size,
             last_compacted_at: Instant::now(),
             compact_interval,
+            queue,
+            database_id,
         }
     }
 }
@@ -32,11 +51,18 @@ impl LogCompactor for Compactor {
 
     fn compact(
         &mut self,
-        _log: LogFile,
-        _path: std::path::PathBuf,
-        _size_after: u32,
+        log_id: Uuid,
     ) -> Result<(), Box<dyn std::error::Error + Sync + Send + 'static>> {
         self.last_compacted_at = Instant::now();
-        todo!()
+        self.queue.push(&CompactionJob {
+            database_id: self.database_id,
+            log_id,
+        });
+
+        Ok(())
+    }
+
+    fn snapshot_dir(&self) -> PathBuf {
+        self.queue.snapshot_queue_dir()
     }
 }

@@ -1,9 +1,10 @@
 use std::fs::read_to_string;
-use std::path::PathBuf;
+use std::path::{PathBuf, Path};
 use std::sync::Arc;
 
 use clap::Parser;
 use color_eyre::eyre::Result;
+use compactor::{CompactionQueue, run_compactor_loop};
 use config::{AdminApiConfig, ClusterConfig, UserApiConfig};
 use http::admin::run_admin_api;
 use http::user::run_user_api;
@@ -11,12 +12,15 @@ use hyper::server::conn::AddrIncoming;
 use linc::bus::Bus;
 use manager::Manager;
 use meta::Store;
+use snapshot_store::SnapshotStore;
+use tokio::fs::create_dir_all;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::task::JoinSet;
 use tracing::metadata::LevelFilter;
 use tracing_subscriber::prelude::*;
 
 mod allocation;
+mod compactor;
 mod config;
 mod database;
 mod hrana;
@@ -24,6 +28,7 @@ mod http;
 mod linc;
 mod manager;
 mod meta;
+mod snapshot_store;
 
 #[derive(Debug, Parser)]
 struct Args {
@@ -83,6 +88,17 @@ async fn spawn_cluster_networking(
     Ok(())
 }
 
+async fn init_dirs(db_path: &Path) -> color_eyre::Result<()> {
+    create_dir_all(&db_path).await?;
+    create_dir_all(db_path.join("tmp")).await?;
+    create_dir_all(db_path.join("snapshot_queue")).await?;
+    create_dir_all(db_path.join("snapshots")).await?;
+    create_dir_all(db_path.join("dbs")).await?;
+    create_dir_all(db_path.join("meta")).await?;
+
+    Ok(())
+}
+
 #[tokio::main(flavor = "multi_thread", worker_threads = 10)]
 async fn main() -> Result<()> {
     init();
@@ -93,17 +109,29 @@ async fn main() -> Result<()> {
 
     let mut join_set = JoinSet::new();
 
+    init_dirs(&config.db_path).await?;
 
-    let meta_path = config.db_path.join("meta");
-    tokio::fs::create_dir_all(&meta_path).await?;
     let env = heed::EnvOpenOptions::new()
         .max_dbs(1000)
         .map_size(100 * 1024 * 1024)
-        .open(meta_path)?;
+        .open(config.db_path.join("meta"))?;
+
+    let snapshot_store = Arc::new(SnapshotStore::new(config.db_path.clone(), &env)?);
+    let compaction_queue = Arc::new(CompactionQueue::new(
+        env.clone(),
+        config.db_path.clone(),
+        snapshot_store,
+    )?);
     let store = Arc::new(Store::new(env.clone()));
-    let manager = Arc::new(Manager::new(config.db_path.clone(), store.clone(), 100));
+    let manager = Arc::new(Manager::new(
+        config.db_path.clone(),
+        store.clone(),
+        100,
+        compaction_queue.clone(),
+    ));
     let bus = Arc::new(Bus::new(config.cluster.id, manager.clone()));
 
+    join_set.spawn(run_compactor_loop(compaction_queue));
     spawn_cluster_networking(&mut join_set, &config.cluster, bus.clone()).await?;
     spawn_admin_api(&mut join_set, &config.admin_api, bus.clone()).await?;
     spawn_user_api(&mut join_set, &config.user_api, manager, bus).await?;

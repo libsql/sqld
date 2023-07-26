@@ -1,7 +1,8 @@
 use std::fmt;
+use std::mem::size_of;
 
 use heed::bytemuck::{Pod, Zeroable};
-use heed::types::{SerdeBincode, OwnedType};
+use heed_types::{OwnedType, SerdeBincode};
 use serde::{Deserialize, Serialize};
 use sha3::digest::{ExtendableOutput, Update, XofReader};
 use sha3::Shake128;
@@ -28,6 +29,11 @@ impl DatabaseId {
         let mut out = [0; 16];
         reader.read(&mut out);
         Self(out)
+    }
+
+    pub fn from_bytes(bytes: &[u8]) -> Self {
+        assert_eq!(bytes.len(), size_of::<Self>());
+        Self(bytes.try_into().unwrap())
     }
 
     #[cfg(test)]

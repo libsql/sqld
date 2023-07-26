@@ -118,7 +118,7 @@ impl SnapshotFile {
     }
 
     /// Iterator on the frames contained in the snapshot file, in reverse frame_no order.
-    pub fn frames_iter(&self) -> impl Iterator<Item = anyhow::Result<Bytes>> + '_ {
+    pub fn frames_iter(&self) -> impl Iterator<Item = crate::Result<Bytes>> + '_ {
         let mut current_offset = 0;
         std::iter::from_fn(move || {
             if current_offset >= self.header.frame_count {
@@ -139,7 +139,7 @@ impl SnapshotFile {
     pub fn frames_iter_from(
         &self,
         frame_no: u64,
-    ) -> impl Iterator<Item = anyhow::Result<Bytes>> + '_ {
+    ) -> impl Iterator<Item = crate::Result<Bytes>> + '_ {
         let mut iter = self.frames_iter();
         std::iter::from_fn(move || match iter.next() {
             Some(Ok(bytes)) => match Frame::try_from_bytes(bytes.clone()) {
@@ -197,7 +197,7 @@ impl SnapshotBuilder {
     /// append frames to the snapshot. Frames must be in decreasing frame_no order.
     pub fn append_frames(
         &mut self,
-        frames: impl Iterator<Item = anyhow::Result<Frame>>,
+        frames: impl Iterator<Item = crate::Result<Frame>>,
     ) -> anyhow::Result<()> {
         // We iterate on the frames starting from the end of the log and working our way backward. We
         // make sure that only the most recent version of each file is present in the resulting

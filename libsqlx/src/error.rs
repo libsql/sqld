@@ -45,4 +45,6 @@ pub enum Error {
     },
     #[error(transparent)]
     LexerError(#[from] sqlite3_parser::lexer::sql::Error),
+    #[error("invalid frame")]
+    InvalidFrame,
 }
