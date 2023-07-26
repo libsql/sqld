@@ -1,10 +1,10 @@
 use std::fs::read_to_string;
-use std::path::{PathBuf, Path};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use clap::Parser;
 use color_eyre::eyre::Result;
-use compactor::{CompactionQueue, run_compactor_loop};
+use compactor::{run_compactor_loop, CompactionQueue};
 use config::{AdminApiConfig, ClusterConfig, UserApiConfig};
 use http::admin::run_admin_api;
 use http::user::run_user_api;
@@ -116,7 +116,7 @@ async fn main() -> Result<()> {
         .map_size(100 * 1024 * 1024)
         .open(config.db_path.join("meta"))?;
 
-    let snapshot_store = Arc::new(SnapshotStore::new(config.db_path.clone(), &env)?);
+    let snapshot_store = Arc::new(SnapshotStore::new(config.db_path.clone(), env.clone())?);
     let compaction_queue = Arc::new(CompactionQueue::new(
         env.clone(),
         config.db_path.clone(),
