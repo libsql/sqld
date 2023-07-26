@@ -1632,8 +1632,8 @@ message BatchStep {
 
 message BatchCond {
   oneof cond {
-    uint32 step_ok = 1;
-    uint32 step_error = 2;
+    int32 step_ok = 1;
+    int32 step_error = 2;
     BatchCond not = 3;
     CondList and = 4;
     CondList or = 5;
@@ -1686,7 +1686,7 @@ message DescribeResult {
 }
 
 message DescribeParam {
-  string name = 1;
+  optional string name = 1;
 }
 
 message DescribeCol {

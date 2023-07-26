@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, bail, Result};
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -37,6 +37,9 @@ fn proto_cond_to_cond(cond: &proto::BatchCond, max_step_i: usize) -> Result<Cond
     };
 
     let cond = match cond {
+        proto::BatchCond::None => {
+            bail!(ProtocolError::NoneBatchCond)
+        }
         proto::BatchCond::Ok { step } => Cond::Ok {
             step: try_convert_step(*step)?,
         },
@@ -58,6 +61,7 @@ fn proto_cond_to_cond(cond: &proto::BatchCond, max_step_i: usize) -> Result<Cond
                 .map(|cond| proto_cond_to_cond(cond, max_step_i))
                 .collect::<Result<_>>()?,
         },
+        proto::BatchCond::IsAutocommit {} => Cond::IsAutocommit,
     };
 
     Ok(cond)

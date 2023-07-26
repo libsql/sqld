@@ -16,7 +16,7 @@ use super::proto;
 pub struct SingleStatementBuilder {
     has_step: bool,
     cols: Vec<proto::Col>,
-    rows: Vec<Vec<proto::Value>>,
+    rows: Vec<proto::Row>,
     err: Option<crate::error::Error>,
     affected_row_count: u64,
     last_insert_rowid: Option<i64>,
@@ -163,7 +163,9 @@ impl QueryResultBuilder for SingleStatementBuilder {
 
     fn begin_row(&mut self) -> Result<(), QueryResultBuilderError> {
         assert!(self.err.is_none());
-        self.rows.push(Vec::with_capacity(self.cols.len()));
+        self.rows.push(proto::Row {
+            values: Vec::with_capacity(self.cols.len()),
+        });
         Ok(())
     }
 
@@ -195,6 +197,7 @@ impl QueryResultBuilder for SingleStatementBuilder {
         self.rows
             .last_mut()
             .expect("row must be initialized")
+            .values
             .push(val);
 
         Ok(())

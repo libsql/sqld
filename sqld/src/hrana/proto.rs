@@ -4,57 +4,82 @@ use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
-#[derive(Serialize, Debug)]
+#[derive(Serialize, prost::Message)]
 pub struct Error {
+    #[prost(string, tag = "1")]
     pub message: String,
+    #[prost(string, tag = "2")]
     pub code: String,
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, prost::Message)]
 pub struct Stmt {
     #[serde(default)]
+    #[prost(string, optional, tag = "1")]
     pub sql: Option<String>,
     #[serde(default)]
+    #[prost(int32, optional, tag = "2")]
     pub sql_id: Option<i32>,
     #[serde(default)]
+    #[prost(message, repeated, tag = "3")]
     pub args: Vec<Value>,
     #[serde(default)]
+    #[prost(message, repeated, tag = "4")]
     pub named_args: Vec<NamedArg>,
     #[serde(default)]
+    #[prost(bool, optional, tag = "5")]
     pub want_rows: Option<bool>,
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, prost::Message)]
 pub struct NamedArg {
+    #[prost(string, tag = "1")]
     pub name: String,
+    #[prost(message, required, tag = "2")]
     pub value: Value,
 }
 
-#[derive(Serialize, Debug)]
+#[derive(Serialize, prost::Message)]
 pub struct StmtResult {
+    #[prost(message, repeated, tag = "1")]
     pub cols: Vec<Col>,
-    pub rows: Vec<Vec<Value>>,
+    #[prost(message, repeated, tag = "2")]
+    pub rows: Vec<Row>,
+    #[prost(uint64, tag = "3")]
     pub affected_row_count: u64,
     #[serde(with = "option_i64_as_str")]
+    #[prost(sint64, optional, tag = "4")]
     pub last_insert_rowid: Option<i64>,
 }
 
-#[derive(Serialize, Debug)]
+#[derive(Serialize, prost::Message)]
 pub struct Col {
+    #[prost(string, optional, tag = "1")]
     pub name: Option<String>,
+    #[prost(string, optional, tag = "2")]
     pub decltype: Option<String>,
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Serialize, prost::Message)]
+#[serde(transparent)]
+pub struct Row {
+    #[prost(message, repeated, tag = "1")]
+    pub values: Vec<Value>,
+}
+
+#[derive(Deserialize, prost::Message)]
 pub struct Batch {
+    #[prost(message, repeated, tag = "1")]
     pub steps: Vec<BatchStep>,
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, prost::Message)]
 pub struct BatchStep {
-    pub stmt: Stmt,
     #[serde(default)]
+    #[prost(message, optional, tag = "1")]
     pub condition: Option<BatchCond>,
+    #[prost(message, required, tag = "2")]
+    pub stmt: Stmt,
 }
 
 #[derive(Serialize, Debug)]
@@ -63,38 +88,62 @@ pub struct BatchResult {
     pub step_errors: Vec<Option<Error>>,
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Default)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum BatchCond {
-    Ok { step: i32 },
-    Error { step: i32 },
-    Not { cond: Box<BatchCond> },
-    And { conds: Vec<BatchCond> },
-    Or { conds: Vec<BatchCond> },
+    #[serde(skip_deserializing)]
+    #[default]
+    None,
+    Ok {
+        step: i32,
+    },
+    Error {
+        step: i32,
+    },
+    Not {
+        cond: Box<BatchCond>,
+    },
+    And {
+        conds: Vec<BatchCond>,
+    },
+    Or {
+        conds: Vec<BatchCond>,
+    },
+    IsAutocommit {},
 }
 
-#[derive(Serialize, Debug)]
+#[derive(Serialize, prost::Message)]
 pub struct DescribeResult {
+    #[prost(message, repeated, tag = "1")]
     pub params: Vec<DescribeParam>,
+    #[prost(message, repeated, tag = "2")]
     pub cols: Vec<DescribeCol>,
+    #[prost(bool, tag = "3")]
     pub is_explain: bool,
+    #[prost(bool, tag = "4")]
     pub is_readonly: bool,
 }
 
-#[derive(Serialize, Debug)]
+#[derive(Serialize, prost::Message)]
 pub struct DescribeParam {
+    #[prost(string, optional, tag = "1")]
     pub name: Option<String>,
 }
 
-#[derive(Serialize, Debug)]
+#[derive(Serialize, prost::Message)]
 pub struct DescribeCol {
+    #[prost(string, tag = "1")]
     pub name: String,
+    #[prost(string, optional, tag = "2")]
     pub decltype: Option<String>,
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Default, Clone, Debug)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Value {
+    #[serde(skip_deserializing)]
+    #[default]
+    None,
     Null,
     Integer {
         #[serde(with = "i64_as_str")]

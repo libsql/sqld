@@ -304,8 +304,9 @@ impl<'a> Connection<'a> {
         builder: &mut impl QueryResultBuilder,
     ) -> Result<bool> {
         builder.begin_step()?;
+
         let mut enabled = match step.cond.as_ref() {
-            Some(cond) => match eval_cond(cond, results) {
+            Some(cond) => match eval_cond(cond, results, self.is_autocommit()) {
                 Ok(enabled) => enabled,
                 Err(e) => {
                     builder.step_error(e).unwrap();
@@ -443,25 +444,29 @@ impl<'a> Connection<'a> {
             is_readonly,
         })
     }
+
+    fn is_autocommit(&self) -> bool {
+        self.conn.is_autocommit()
+    }
 }
 
-fn eval_cond(cond: &Cond, results: &[bool]) -> Result<bool> {
+fn eval_cond(cond: &Cond, results: &[bool], is_autocommit: bool) -> Result<bool> {
     let get_step_res = |step: usize| -> Result<bool> {
         let res = results.get(step).ok_or(Error::InvalidBatchStep(step))?;
-
         Ok(*res)
     };
 
     Ok(match cond {
         Cond::Ok { step } => get_step_res(*step)?,
         Cond::Err { step } => !get_step_res(*step)?,
-        Cond::Not { cond } => !eval_cond(cond, results)?,
-        Cond::And { conds } => conds
-            .iter()
-            .try_fold(true, |x, cond| eval_cond(cond, results).map(|y| x & y))?,
-        Cond::Or { conds } => conds
-            .iter()
-            .try_fold(false, |x, cond| eval_cond(cond, results).map(|y| x | y))?,
+        Cond::Not { cond } => !eval_cond(cond, results, is_autocommit)?,
+        Cond::And { conds } => conds.iter().try_fold(true, |x, cond| {
+            eval_cond(cond, results, is_autocommit).map(|y| x & y)
+        })?,
+        Cond::Or { conds } => conds.iter().try_fold(false, |x, cond| {
+            eval_cond(cond, results, is_autocommit).map(|y| x | y)
+        })?,
+        Cond::IsAutocommit => is_autocommit,
     })
 }
 

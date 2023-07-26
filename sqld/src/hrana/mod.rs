@@ -3,6 +3,7 @@ use std::fmt;
 pub mod batch;
 pub mod http;
 pub mod proto;
+mod protobuf;
 mod result_builder;
 pub mod stmt;
 pub mod ws;
@@ -65,4 +66,9 @@ pub enum ProtocolError {
 
     #[error("{0}")]
     ResponseTooLarge(String),
+
+    #[error("BatchCond variant not recognized")]
+    NoneBatchCond,
+    #[error("Value variant not recognized")]
+    NoneValue,
 }
