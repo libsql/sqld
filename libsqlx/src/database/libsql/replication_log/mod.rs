@@ -1,8 +1,7 @@
 use crc::Crc;
 
 pub mod logger;
-pub mod merger;
-pub mod snapshot;
+// pub mod merger;
 
 pub const WAL_PAGE_SIZE: i32 = 4096;
 pub const WAL_MAGIC: u64 = u64::from_le_bytes(*b"SQLDWAL\0");

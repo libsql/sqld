@@ -2619,6 +2619,7 @@ dependencies = [
  "tracing-subscriber",
  "turmoil",
  "uuid",
+ "walkdir",
 ]
 
 [[package]]
