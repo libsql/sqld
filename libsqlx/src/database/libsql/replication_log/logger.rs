@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::ffi::{c_int, c_void, CStr};
 use std::fs::{remove_dir_all, File, OpenOptions};
 use std::io::Write;
@@ -25,7 +26,6 @@ use crate::database::frame::{Frame, FrameHeader};
 #[cfg(feature = "bottomless")]
 use crate::libsql::ffi::SQLITE_IOERR_WRITE;
 
-use super::snapshot::{find_snapshot_file, SnapshotFile};
 use super::{FrameNo, CRC_64_GO_ISO, WAL_MAGIC, WAL_PAGE_SIZE};
 
 init_static_wal_method!(REPLICATION_METHODS, ReplicationLoggerHook);
@@ -147,7 +147,7 @@ unsafe impl WalHook for ReplicationLoggerHook {
                 .logger
                 .log_file
                 .write()
-                .maybe_compact(&mut *ctx.logger.compactor.lock(), &ctx.logger.db_path)
+                .maybe_compact(&mut *ctx.logger.compactor.lock())
             {
                 tracing::error!("fatal error: {e}, exiting");
                 std::process::abort()
@@ -345,6 +345,8 @@ impl ReplicationLoggerHookCtx {
 #[derive(Debug)]
 pub struct LogFile {
     file: File,
+    /// Path of the LogFile
+    path: PathBuf,
     pub header: LogFileHeader,
     /// number of frames in the log that have not been commited yet. On commit the header's frame
     /// count is incremented by that ammount. New pages are written after the last
@@ -365,16 +367,22 @@ pub enum LogReadError {
     #[error("requested entry is ahead of log")]
     Ahead,
     #[error(transparent)]
-    Error(#[from] anyhow::Error),
+    Error(#[from] crate::error::Error),
 }
 
 impl LogFile {
     /// size of a single frame
     pub const FRAME_SIZE: usize = size_of::<FrameHeader>() + WAL_PAGE_SIZE as usize;
 
-    pub fn new(file: File) -> crate::Result<Self> {
+    pub fn new(path: PathBuf) -> crate::Result<Self> {
         // FIXME: we should probably take a lock on this file, to prevent anybody else to write to
         // it.
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .open(&path)?;
+
         let file_end = file.metadata()?.len();
 
         if file_end == 0 {
@@ -391,6 +399,7 @@ impl LogFile {
             };
 
             let mut this = Self {
+                path,
                 file,
                 header,
                 uncommitted_frame_count: 0,
@@ -409,6 +418,7 @@ impl LogFile {
                 uncommitted_frame_count: 0,
                 uncommitted_checksum: 0,
                 commited_checksum: 0,
+                path,
             };
 
             if let Some(last_commited) = this.last_commited_frame_no() {
@@ -467,7 +477,7 @@ impl LogFile {
     }
 
     /// Returns an iterator over the WAL frame headers
-    pub fn frames_iter(&self) -> anyhow::Result<impl Iterator<Item = anyhow::Result<Frame>> + '_> {
+    pub fn frames_iter(&self) -> anyhow::Result<impl Iterator<Item = crate::Result<Frame>> + '_> {
         let mut current_frame_offset = 0;
         Ok(std::iter::from_fn(move || {
             if current_frame_offset >= self.header.frame_count {
@@ -480,12 +490,10 @@ impl LogFile {
     }
 
     /// Returns an iterator over the WAL frame headers
-    pub fn rev_frames_iter(
-        &self,
-    ) -> anyhow::Result<impl Iterator<Item = anyhow::Result<Frame>> + '_> {
+    pub fn rev_frames_iter(&self) -> impl Iterator<Item = crate::Result<Frame>> + '_ {
         let mut current_frame_offset = self.header.frame_count;
 
-        Ok(std::iter::from_fn(move || {
+        std::iter::from_fn(move || {
             if current_frame_offset == 0 {
                 return None;
             }
@@ -493,7 +501,24 @@ impl LogFile {
             let read_byte_offset = Self::absolute_byte_offset(current_frame_offset);
             let frame = self.read_frame_byte_offset(read_byte_offset);
             Some(frame)
-        }))
+        })
+    }
+
+    /// Return a reversed iterator over the deduplicated frames in the log file.
+    pub fn rev_deduped(&self) -> impl Iterator<Item = crate::Result<Frame>> + '_ {
+        let mut iter = self.rev_frames_iter();
+        let mut seen = HashSet::new();
+        std::iter::from_fn(move || loop {
+            match iter.next()? {
+                Ok(frame) => {
+                    if !seen.contains(&frame.header().page_no) {
+                        seen.insert(frame.header().page_no);
+                        return Some(Ok(frame));
+                    }
+                }
+                Err(e) => return Some(Err(e)),
+            }
+        })
     }
 
     fn compute_checksum(&self, page: &WalPage) -> u64 {
@@ -541,7 +566,7 @@ impl LogFile {
         std::mem::size_of::<LogFileHeader>() as u64 + nth * Self::FRAME_SIZE as u64
     }
 
-    fn byte_offset(&self, id: FrameNo) -> anyhow::Result<Option<u64>> {
+    fn byte_offset(&self, id: FrameNo) -> crate::Result<Option<u64>> {
         if id < self.header.start_frame_no
             || id > self.header.start_frame_no + self.header.frame_count
         {
@@ -550,7 +575,7 @@ impl LogFile {
         Ok(Self::absolute_byte_offset(id - self.header.start_frame_no).into())
     }
 
-    /// Returns bytes represening a WalFrame for frame `frame_no`
+    /// Returns bytes representing a WalFrame for frame `frame_no`
     ///
     /// If the requested frame is before the first frame in the log, or after the last frame,
     /// Ok(None) is returned.
@@ -568,38 +593,26 @@ impl LogFile {
         Ok(frame)
     }
 
-    fn maybe_compact(
-        &mut self,
-        compactor: &mut dyn LogCompactor,
-        path: &Path,
-    ) -> anyhow::Result<()> {
+    fn maybe_compact(&mut self, compactor: &mut dyn LogCompactor) -> anyhow::Result<()> {
         if self.can_compact() && compactor.should_compact(self) {
-            return self.do_compaction(compactor, path);
+            return self.do_compaction(compactor);
         }
 
         Ok(())
     }
 
-    fn do_compaction(
-        &mut self,
-        compactor: &mut dyn LogCompactor,
-        path: &Path,
-    ) -> anyhow::Result<()> {
+    fn do_compaction(&mut self, compactor: &mut dyn LogCompactor) -> anyhow::Result<()> {
         tracing::info!("performing log compaction");
-        let temp_log_path = path.join("temp_log");
+        let log_id = Uuid::new_v4();
+        let temp_log_path = compactor.snapshot_dir().join(log_id.to_string());
         let last_frame = self
-            .rev_frames_iter()?
+            .rev_frames_iter()
             .next()
             .expect("there should be at least one frame to perform compaction")?;
         let size_after = last_frame.header().size_after;
         assert!(size_after != 0);
 
-        let file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .open(&temp_log_path)?;
-        let mut new_log_file = LogFile::new(file)?;
+        let mut new_log_file = LogFile::new(temp_log_path.clone())?;
         let new_header = LogFileHeader {
             start_frame_no: self.header.start_frame_no + self.header.frame_count,
             frame_count: 0,
@@ -609,16 +622,15 @@ impl LogFile {
         new_log_file.header = new_header;
         new_log_file.write_header().unwrap();
         // swap old and new snapshot
-        atomic_rename(&temp_log_path, path.join("wallog")).unwrap();
-        let old_log_file = std::mem::replace(self, new_log_file);
-        compactor
-            .compact(old_log_file, temp_log_path, size_after)
-            .unwrap();
+        atomic_rename(dbg!(&temp_log_path), dbg!(&self.path)).unwrap();
+        std::mem::swap(&mut new_log_file.path, &mut self.path);
+        let _ = std::mem::replace(self, new_log_file);
+        compactor.compact(log_id).unwrap();
 
         Ok(())
     }
 
-    fn read_frame_byte_offset(&self, offset: u64) -> anyhow::Result<Frame> {
+    fn read_frame_byte_offset(&self, offset: u64) -> crate::Result<Frame> {
         let mut buffer = BytesMut::zeroed(LogFile::FRAME_SIZE);
         self.file.read_exact_at(&mut buffer, offset)?;
         let buffer = buffer.freeze();
@@ -637,7 +649,7 @@ impl LogFile {
     fn reset(self) -> crate::Result<Self> {
         // truncate file
         self.file.set_len(0)?;
-        Self::new(self.file)
+        Self::new(self.path)
     }
 
     /// return the size in bytes of the log
@@ -744,25 +756,27 @@ pub trait LogCompactor: Sync + Send + 'static {
     /// Compact the given snapshot
     fn compact(
         &mut self,
-        log: LogFile,
-        path: PathBuf,
-        size_after: u32,
+        log_id: Uuid,
     ) -> Result<(), Box<dyn std::error::Error + Sync + Send + 'static>>;
+
+    fn snapshot_dir(&self) -> PathBuf;
 }
 
 #[cfg(test)]
 impl LogCompactor for () {
     fn compact(
         &mut self,
-        _file: LogFile,
-        _path: PathBuf,
-        _size_after: u32,
+        _log_id: Uuid,
     ) -> Result<(), Box<dyn std::error::Error + Sync + Send + 'static>> {
         Ok(())
     }
 
     fn should_compact(&self, _file: &LogFile) -> bool {
         false
+    }
+
+    fn snapshot_dir(&self) -> PathBuf {
+        todo!()
     }
 }
 
@@ -772,7 +786,6 @@ pub struct ReplicationLogger {
     pub generation: Generation,
     pub log_file: RwLock<LogFile>,
     compactor: Box<Mutex<dyn LogCompactor + Send>>,
-    db_path: PathBuf,
     /// a notifier channel other tasks can subscribe to, and get notified when new frames become
     /// available.
     pub new_frame_notifier: FrameNotifierCb,
@@ -790,13 +803,7 @@ impl ReplicationLogger {
 
         let fresh = !log_path.exists();
 
-        let file = OpenOptions::new()
-            .create(true)
-            .write(true)
-            .read(true)
-            .open(log_path)?;
-
-        let log_file = LogFile::new(file)?;
+        let log_file = LogFile::new(log_path)?;
         let header = log_file.header();
 
         let should_recover = if dirty {
@@ -815,17 +822,11 @@ impl ReplicationLogger {
         if should_recover {
             Self::recover(log_file, data_path, compactor, new_frame_notifier)
         } else {
-            Self::from_log_file(
-                db_path.to_path_buf(),
-                log_file,
-                compactor,
-                new_frame_notifier,
-            )
+            Self::from_log_file(log_file, compactor, new_frame_notifier)
         }
     }
 
     fn from_log_file(
-        db_path: PathBuf,
         log_file: LogFile,
         compactor: impl LogCompactor,
         new_frame_notifier: FrameNotifierCb,
@@ -837,7 +838,6 @@ impl ReplicationLogger {
             generation: Generation::new(generation_start_frame_no),
             compactor: Box::new(Mutex::new(compactor)),
             log_file: RwLock::new(log_file),
-            db_path,
             new_frame_notifier,
         })
     }
@@ -879,7 +879,7 @@ impl ReplicationLogger {
 
         assert!(data_path.pop());
 
-        Self::from_log_file(data_path, log_file, compactor, new_frame_notifier)
+        Self::from_log_file(log_file, compactor, new_frame_notifier)
     }
 
     pub fn database_id(&self) -> anyhow::Result<Uuid> {
@@ -924,10 +924,6 @@ impl ReplicationLogger {
             .expect("there should be at least one frame after commit"))
     }
 
-    pub fn get_snapshot_file(&self, from: FrameNo) -> anyhow::Result<Option<SnapshotFile>> {
-        find_snapshot_file(&self.db_path, from)
-    }
-
     pub fn get_frame(&self, frame_no: FrameNo) -> Result<Frame, LogReadError> {
         self.log_file.read().frame(frame_no)
     }
@@ -935,9 +931,7 @@ impl ReplicationLogger {
     pub fn compact(&self) {
         let mut log_file = self.log_file.write();
         if log_file.can_compact() {
-            log_file
-                .do_compaction(&mut *self.compactor.lock(), &self.db_path)
-                .unwrap();
+            log_file.do_compaction(&mut *self.compactor.lock()).unwrap();
         }
     }
 }
@@ -1032,8 +1026,8 @@ mod test {
 
     #[test]
     fn log_file_test_rollback() {
-        let f = tempfile::tempfile().unwrap();
-        let mut log_file = LogFile::new(f).unwrap();
+        let f = tempfile::NamedTempFile::new().unwrap();
+        let mut log_file = LogFile::new(f.path().to_path_buf()).unwrap();
         (0..5)
             .map(|i| WalPage {
                 page_no: i,

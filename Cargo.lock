@@ -2030,8 +2030,7 @@ checksum = "95505c38b4572b2d910cecb0281560f54b440a19336cbbcb27bf6ce6adc6f5a8"
 [[package]]
 name = "heed"
 version = "0.20.0-alpha.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2ae92e0d788e4b5608cddd89bec1128ad9f424e365025bd2454915aab450d7a2"
+source = "git+https://github.com/MarinPostma/heed.git?rev=2ae9a14#2ae9a14ce2270118e23f069ba6999212353d94aa"
 dependencies = [
  "bytemuck",
  "byteorder",
@@ -2049,14 +2048,12 @@ dependencies = [
 [[package]]
 name = "heed-traits"
 version = "0.20.0-alpha.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "44055e6d049fb62b58671059045fe4a8a083d78ef04347818cc8a87a62d6fa1f"
+source = "git+https://github.com/MarinPostma/heed.git?rev=2ae9a14#2ae9a14ce2270118e23f069ba6999212353d94aa"
 
 [[package]]
 name = "heed-types"
 version = "0.20.0-alpha.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9d419e64e429f0bbe6d8ef3507bf137105c8cebee0e5fba59cf556de93c8ab57"
+source = "git+https://github.com/MarinPostma/heed.git?rev=2ae9a14#2ae9a14ce2270118e23f069ba6999212353d94aa"
 dependencies = [
  "bincode",
  "bytemuck",
@@ -2622,6 +2619,7 @@ dependencies = [
  "tracing-subscriber",
  "turmoil",
  "uuid",
+ "walkdir",
 ]
 
 [[package]]
@@ -2645,8 +2643,7 @@ checksum = "09fc20d2ca12cb9f044c93e3bd6d32d523e6e2ec3db4f7b2939cd99026ecd3f0"
 [[package]]
 name = "lmdb-master-sys"
 version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "629c123f5321b48fa4f8f4d3b868165b748d9ba79c7103fb58e3a94f736bcedd"
+source = "git+https://github.com/MarinPostma/heed.git?rev=2ae9a14#2ae9a14ce2270118e23f069ba6999212353d94aa"
 dependencies = [
  "cc",
  "doxygen-rs",

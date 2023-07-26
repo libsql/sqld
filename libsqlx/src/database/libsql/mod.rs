@@ -19,7 +19,6 @@ use self::replication_log::logger::FrameNotifierCb;
 
 pub use connection::LibsqlConnection;
 pub use replication_log::logger::{LogCompactor, LogFile};
-pub use replication_log::merger::SnapshotMerger;
 
 mod connection;
 mod injector;
@@ -196,12 +195,12 @@ impl InjectableDatabase for LibsqlDatabase<ReplicaType> {
 
 #[cfg(test)]
 mod test {
-    use std::fs::File;
     use std::sync::atomic::AtomicBool;
     use std::sync::atomic::Ordering::Relaxed;
 
     use parking_lot::Mutex;
     use rusqlite::types::Value;
+    use uuid::Uuid;
 
     use crate::connection::Connection;
     use crate::database::libsql::replication_log::logger::LogFile;
@@ -238,8 +237,7 @@ mod test {
             .unwrap();
         assert!(row.lock().is_empty());
 
-        let file = File::open("assets/test/simple_wallog").unwrap();
-        let log = LogFile::new(file).unwrap();
+        let log = LogFile::new(PathBuf::from("assets/test/simple_wallog")).unwrap();
         let mut injector = db.injector().unwrap();
         log.frames_iter().unwrap().for_each(|f| {
             injector.inject(f.unwrap()).unwrap();
@@ -312,13 +310,15 @@ mod test {
             }
 
             fn compact(
-                &self,
-                _file: LogFile,
-                _path: PathBuf,
-                _size_after: u32,
+                &mut self,
+                _id: Uuid,
             ) -> Result<(), Box<dyn std::error::Error + Sync + Send + 'static>> {
                 self.0.store(true, Relaxed);
                 Ok(())
+            }
+
+            fn snapshot_dir(&self) -> PathBuf {
+                todo!();
             }
         }
 
@@ -353,12 +353,14 @@ mod test {
             }
 
             fn compact(
-                &self,
-                _file: LogFile,
-                _path: PathBuf,
-                _size_after: u32,
+                &mut self,
+                _id: Uuid,
             ) -> Result<(), Box<dyn std::error::Error + Sync + Send + 'static>> {
                 unreachable!()
+            }
+
+            fn snapshot_dir(&self) -> PathBuf {
+                todo!()
             }
         }
 

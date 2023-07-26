@@ -171,15 +171,14 @@ impl Injector {
 
 #[cfg(test)]
 mod test {
-    use std::fs::File;
+    use std::path::PathBuf;
 
     use crate::database::libsql::injector::Injector;
     use crate::database::libsql::replication_log::logger::LogFile;
 
     #[test]
     fn test_simple_inject_frames() {
-        let file = File::open("assets/test/simple_wallog").unwrap();
-        let log = LogFile::new(file).unwrap();
+        let log = LogFile::new(PathBuf::from("assets/test/simple_wallog")).unwrap();
         let temp = tempfile::tempdir().unwrap();
 
         let mut injector = Injector::new(temp.path(), Box::new(()), 10).unwrap();
@@ -199,8 +198,7 @@ mod test {
 
     #[test]
     fn test_inject_frames_split_txn() {
-        let file = File::open("assets/test/simple_wallog").unwrap();
-        let log = LogFile::new(file).unwrap();
+        let log = LogFile::new(PathBuf::from("assets/test/simple_wallog")).unwrap();
         let temp = tempfile::tempdir().unwrap();
 
         // inject one frame at a time
@@ -221,8 +219,7 @@ mod test {
 
     #[test]
     fn test_inject_partial_txn_isolated() {
-        let file = File::open("assets/test/simple_wallog").unwrap();
-        let log = LogFile::new(file).unwrap();
+        let log = LogFile::new(PathBuf::from("assets/test/simple_wallog")).unwrap();
         let temp = tempfile::tempdir().unwrap();
 
         // inject one frame at a time

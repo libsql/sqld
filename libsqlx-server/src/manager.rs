@@ -8,6 +8,7 @@ use tokio::task::JoinSet;
 
 use crate::allocation::config::AllocConfig;
 use crate::allocation::{Allocation, AllocationMessage, Database};
+use crate::compactor::CompactionQueue;
 use crate::hrana;
 use crate::linc::bus::Dispatch;
 use crate::linc::handler::Handler;
@@ -18,16 +19,23 @@ pub struct Manager {
     cache: Cache<DatabaseId, mpsc::Sender<AllocationMessage>>,
     meta_store: Arc<Store>,
     db_path: PathBuf,
+    compaction_queue: Arc<CompactionQueue>,
 }
 
 const MAX_ALLOC_MESSAGE_QUEUE_LEN: usize = 32;
 
 impl Manager {
-    pub fn new(db_path: PathBuf, meta_store: Arc<Store>, max_conccurent_allocs: u64) -> Self {
+    pub fn new(
+        db_path: PathBuf,
+        meta_store: Arc<Store>,
+        max_conccurent_allocs: u64,
+        compaction_queue: Arc<CompactionQueue>,
+    ) -> Self {
         Self {
             cache: Cache::new(max_conccurent_allocs),
             meta_store,
             db_path,
+            compaction_queue,
         }
     }
 
@@ -47,7 +55,12 @@ impl Manager {
             let (alloc_sender, inbox) = mpsc::channel(MAX_ALLOC_MESSAGE_QUEUE_LEN);
             let alloc = Allocation {
                 inbox,
-                database: Database::from_config(&config, path, dispatcher.clone()),
+                database: Database::from_config(
+                    &config,
+                    path,
+                    dispatcher.clone(),
+                    self.compaction_queue.clone(),
+                ),
                 connections_futs: JoinSet::new(),
                 next_conn_id: 0,
                 max_concurrent_connections: config.max_conccurent_connection,

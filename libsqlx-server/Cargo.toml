@@ -18,8 +18,10 @@ clap = { version = "4.3.11", features = ["derive"] }
 color-eyre = "0.6.2"
 either = "1.8.1"
 futures = "0.3.28"
-heed = { version = "0.20.0-alpha.3", features = ["serde-bincode"] }
-heed-types = "0.20.0-alpha.3"
+# heed = { version = "0.20.0-alpha.3", features = ["serde-bincode", "sync-read-txn"] }
+heed = { git = "https://github.com/MarinPostma/heed.git", rev = "2ae9a14", features = ["serde-bincode", "sync-read-txn"] }
+heed-types = { git = "https://github.com/MarinPostma/heed.git", rev = "2ae9a14" }
+# heed-types = "0.20.0-alpha.3"
 hmac = "0.12.1"
 humantime = "2.1.0"
 hyper = { version = "0.14.27", features = ["h2", "server"] }
@@ -46,3 +48,4 @@ uuid = { version = "1.4.0", features = ["v4", "serde"] }
 
 [dev-dependencies]
 turmoil = "0.5.5"
+walkdir = "2.3.3"

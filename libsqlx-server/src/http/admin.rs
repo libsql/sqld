@@ -57,7 +57,7 @@ struct AllocateReq {
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub struct Primary {
     /// The maximum size the replication is allowed to grow. Expects a string like 200mb.
     #[serde(default = "default_max_log_size")]
