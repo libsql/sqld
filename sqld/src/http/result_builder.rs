@@ -65,7 +65,7 @@ impl io::Write for LimitBuffer {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         let total_size = TOTAL_RESPONSE_SIZE.fetch_add(buf.len(), Ordering::Relaxed);
         if (total_size + buf.len()) as u64 > self.global_limit {
-            tracing::info!(
+            tracing::debug!(
                 "Total responses exceeded threshold: {}/{}, aborting query",
                 total_size + buf.len(),
                 self.global_limit

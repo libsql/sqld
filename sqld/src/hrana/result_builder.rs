@@ -80,7 +80,7 @@ impl SingleStatementBuilder {
         self.current_size += size;
         let total_size = TOTAL_RESPONSE_SIZE.fetch_add(size as usize, Ordering::Relaxed) as u64;
         if total_size + size > self.max_total_response_size {
-            tracing::info!(
+            tracing::debug!(
                 "Total responses exceeded threshold: {}/{}, aborting query",
                 total_size + size,
                 self.max_total_response_size
