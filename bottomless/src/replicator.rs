@@ -363,7 +363,7 @@ impl Replicator {
                         } else {
                             tokio::fs::remove_file(&fpath).await.unwrap();
                             let elapsed = Instant::now() - start;
-                            tracing::trace!("Uploaded to S3: {} in {:?}", fpath, elapsed);
+                            tracing::debug!("Uploaded to S3: {} in {:?}", fpath, elapsed);
                         }
                         drop(permit);
                     });

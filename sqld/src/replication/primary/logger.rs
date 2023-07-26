@@ -923,7 +923,6 @@ fn checkpoint_db(data_path: &Path, disable_auto_checkpoint: bool) -> anyhow::Res
             if num_checkpointed == -1 {
                 bail!("Checkpoint failed: database journal_mode is not WAL")
             } else {
-                conn.execute("VACUUM", ())?;
                 Ok(())
             }
         } else {

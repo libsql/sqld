@@ -196,7 +196,7 @@ struct Cli {
     http_replication_listen_addr: Option<SocketAddr>,
     /// Interval in seconds, in which WAL checkpoint is being called.
     /// By default, the interval is 1 hour.
-    #[clap(long, env = "SQLD_CHECKPOINT_INTERVAL_S", default_value = "3600")]
+    #[clap(long, env = "SQLD_CHECKPOINT_INTERVAL_S")]
     checkpoint_interval_s: Option<u64>,
 }
 

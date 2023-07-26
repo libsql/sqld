@@ -745,7 +745,9 @@ pub async fn run_server(config: Config) -> anyhow::Result<()> {
         }
 
         if let Some(interval) = config.checkpoint_interval {
-            join_set.spawn(run_checkpoint_cron(config.db_path.clone(), interval));
+            if config.bottomless_replication.is_some() {
+                join_set.spawn(run_checkpoint_cron(config.db_path.clone(), interval));
+            }
         }
 
         let reset = HARD_RESET.clone();
