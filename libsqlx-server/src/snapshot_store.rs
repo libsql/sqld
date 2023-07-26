@@ -2,8 +2,7 @@ use std::mem::size_of;
 use std::path::PathBuf;
 
 use bytemuck::{Pod, Zeroable};
-use heed::BytesDecode;
-use heed_types::{ByteSlice, CowType, SerdeBincode};
+use heed_types::{CowType, SerdeBincode};
 use libsqlx::FrameNo;
 use serde::{Deserialize, Serialize};
 use tokio::task::block_in_place;

@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::mem::size_of;
@@ -8,7 +9,7 @@ use std::sync::{
     Arc,
 };
 
-use bytemuck::{bytes_of, pod_read_unaligned, Pod, Zeroable};
+use bytemuck::{bytes_of, pod_read_unaligned, Pod, Zeroable, try_from_bytes};
 use bytes::{Bytes, BytesMut};
 use heed::byteorder::BigEndian;
 use heed_types::{SerdeBincode, U64};
@@ -168,6 +169,39 @@ pub struct SnapshotBuilder {
     last_seen_frame_no: u64,
 }
 
+#[derive(Debug, Clone, Copy, Pod, Zeroable)]
+#[repr(C)]
+pub struct SnapshotFrameHeader {
+    frame_no: FrameNo,
+    page_no: u32,
+    _pad: u32,
+}
+
+#[derive(Clone)]
+pub struct SnapshotFrame {
+    data: Bytes
+}
+
+impl SnapshotFrame {
+    const SIZE: usize = size_of::<SnapshotFrameHeader>() + 4096;
+
+    pub fn try_from_bytes(data: Bytes) -> crate::Result<Self> {
+        if data.len() != Self::SIZE {
+            color_eyre::eyre::bail!("invalid snapshot frame")
+        }
+
+        Ok(Self { data })
+ 
+    }
+
+    pub fn header(&self) -> Cow<SnapshotFrameHeader> {
+        let data = &self.data[..size_of::<SnapshotFrameHeader>()];
+        try_from_bytes(data)
+            .map(Cow::Borrowed)
+            .unwrap_or_else(|_| Cow::Owned(pod_read_unaligned(data)))
+    }
+}
+
 impl SnapshotBuilder {
     pub fn new(db_path: &Path, db_id: DatabaseId, snapshot_id: Uuid) -> color_eyre::Result<Self> {
         let temp_dir = db_path.join("tmp");
@@ -202,8 +236,15 @@ impl SnapshotBuilder {
             self.header.end_frame_no = frame.header().frame_no;
             self.header.size_after = frame.header().size_after;
         }
+        let header = SnapshotFrameHeader {
+            frame_no: frame.header().frame_no,
+            page_no: frame.header().page_no,
+            _pad: 0,
+        };
 
-        self.snapshot_file.write_all(frame.as_slice())?;
+        self.snapshot_file.write_all(bytes_of(&header))?;
+        self.snapshot_file.write_all(frame.page())?;
+
         self.header.frame_count += 1;
 
         Ok(())
@@ -241,18 +282,18 @@ impl SnapshotFile {
     }
 
     /// Iterator on the frames contained in the snapshot file, in reverse frame_no order.
-    pub fn frames_iter(&self) -> impl Iterator<Item = libsqlx::Result<Bytes>> + '_ {
+    pub fn frames_iter(&self) -> impl Iterator<Item = crate::Result<SnapshotFrame>> + '_ {
         let mut current_offset = 0;
         std::iter::from_fn(move || {
             if current_offset >= self.header.frame_count {
                 return None;
             }
             let read_offset = size_of::<SnapshotFileHeader>() as u64
-                + current_offset * LogFile::FRAME_SIZE as u64;
+                + current_offset * SnapshotFrame::SIZE as u64;
             current_offset += 1;
-            let mut buf = BytesMut::zeroed(LogFile::FRAME_SIZE);
+            let mut buf = BytesMut::zeroed(SnapshotFrame::SIZE);
             match self.file.read_exact_at(&mut buf, read_offset as _) {
-                Ok(_) => Some(Ok(buf.freeze())),
+                Ok(_) => Some(Ok(SnapshotFrame { data: buf.freeze() })),
                 Err(e) => Some(Err(e.into())),
             }
         })
@@ -262,18 +303,15 @@ impl SnapshotFile {
     pub fn frames_iter_from(
         &self,
         frame_no: u64,
-    ) -> impl Iterator<Item = libsqlx::Result<Bytes>> + '_ {
+    ) -> impl Iterator<Item = crate::Result<SnapshotFrame>> + '_ {
         let mut iter = self.frames_iter();
         std::iter::from_fn(move || match iter.next() {
-            Some(Ok(bytes)) => match Frame::try_from_bytes(bytes.clone()) {
-                Ok(frame) => {
-                    if frame.header().frame_no < frame_no {
-                        None
-                    } else {
-                        Some(Ok(bytes))
-                    }
+            Some(Ok(frame)) =>  {
+                if frame.header().frame_no < frame_no {
+                    None
+                } else {
+                    Some(Ok(frame))
                 }
-                Err(e) => Some(Err(e)),
             },
             other => other,
         })
@@ -332,13 +370,11 @@ mod test {
         assert_eq!(snapshot_file.header.start_frame_no, expected_start_frameno);
         assert_eq!(snapshot_file.header.end_frame_no, expected_end_frameno);
         assert!(snapshot_file.frames_iter().all(|f| expected_page_content
-            .remove(&Frame::try_from_bytes(f.unwrap()).unwrap().header().page_no)));
+            .remove(&f.unwrap().header().page_no)));
         assert!(expected_page_content.is_empty());
 
         assert_eq!(snapshot_file
             .frames_iter()
-            .map(Result::unwrap)
-            .map(Frame::try_from_bytes)
             .map(Result::unwrap)
             .map(|f| f.header().frame_no)
             .reduce(|prev, new| {
