@@ -51,7 +51,7 @@ mod test;
 mod utils;
 pub mod version;
 
-const MAX_CONCCURENT_DBS: usize = 128;
+const MAX_CONCCURENT_DBS: usize = 32;
 const DB_CREATE_TIMEOUT: Duration = Duration::from_secs(1);
 
 #[derive(clap::ValueEnum, Clone, Debug, PartialEq)]
@@ -338,7 +338,11 @@ async fn start_replica(
         config.max_response_size,
         config.max_total_response_size,
     )
-    .throttled(MAX_CONCCURENT_DBS, Some(DB_CREATE_TIMEOUT));
+    .throttled(
+        MAX_CONCCURENT_DBS,
+        Some(DB_CREATE_TIMEOUT),
+        config.max_total_response_size,
+    );
 
     run_service(
         Arc::new(factory),
@@ -490,7 +494,11 @@ async fn start_primary(
         config.max_total_response_size,
     )
     .await?
-    .throttled(MAX_CONCCURENT_DBS, Some(DB_CREATE_TIMEOUT))
+    .throttled(
+        MAX_CONCCURENT_DBS,
+        Some(DB_CREATE_TIMEOUT),
+        config.max_total_response_size,
+    )
     .into();
 
     if let Some(ref addr) = config.rpc_server_addr {
