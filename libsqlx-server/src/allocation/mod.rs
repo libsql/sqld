@@ -113,7 +113,7 @@ impl Database {
                 )
                 .unwrap();
 
-                let compact_interval = replication_log_compact_interval.map(|d| { 
+                let compact_interval = replication_log_compact_interval.map(|d| {
                     let mut i = tokio::time::interval(d / 2);
                     i.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
                     Box::pin(i)
@@ -228,10 +228,9 @@ impl ConnectionHandle {
 impl Allocation {
     pub async fn run(mut self) {
         loop {
-            dbg!();
             let fut = poll_fn(|cx| self.database.poll(cx));
             tokio::select! {
-                _ = fut => dbg!(),
+                _ = fut => (),
                 Some(msg) = self.inbox.recv() => {
                     match msg {
                         AllocationMessage::HranaPipelineReq { req, ret } => {
@@ -247,15 +246,11 @@ impl Allocation {
                     }
                 },
                 maybe_id = self.connections_futs.join_next(), if !self.connections_futs.is_empty() => {
-                    dbg!();
-                    if let Some(Ok(_id)) = maybe_id {
-                        // self.connections.remove_entry(&id);
+                    if let Some(Ok((node_id, conn_id))) = maybe_id {
+                        self.connections.get_mut(&node_id).map(|m| m.remove(&conn_id));
                     }
                 },
-                else => {
-                    dbg!();
-                    break 
-                },
+                else => break,
             }
         }
     }
@@ -500,6 +495,7 @@ impl<C: ConnectionHandler> Connection<C> {
 mod test {
     use std::time::Duration;
 
+    use libsqlx::result_builder::ResultBuilder;
     use tokio::sync::Notify;
 
     use crate::allocation::replica::ReplicaConnection;
