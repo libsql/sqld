@@ -112,5 +112,86 @@ impl SnapshotStore {
         }
     }
 }
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    #[test]
+    fn insert_and_locate() {
+        let temp = tempfile::tempdir().unwrap();
+        let env = heed::EnvOpenOptions::new()
+            .max_dbs(10)
+            .map_size(1000 * 4096)
+            .open(temp.path())
+            .unwrap();
+        let store = SnapshotStore::new(temp.path().to_path_buf(), env).unwrap();
+        let mut txn = store.env.write_txn().unwrap();
+        let db_id = DatabaseId::random();
+        let snapshot_id = Uuid::new_v4();
+        store.register(&mut txn, db_id, 0, 51, snapshot_id);
+        txn.commit().unwrap();
+
+        assert!(store.locate(db_id, 0).is_some());
+        assert!(store.locate(db_id, 17).is_some());
+        assert!(store.locate(db_id, 51).is_some());
+        assert!(store.locate(db_id, 52).is_none());
+    }
+
+    #[test]
+    fn multiple_snapshots() {
+        let temp = tempfile::tempdir().unwrap();
+        let env = heed::EnvOpenOptions::new()
+            .max_dbs(10)
+            .map_size(1000 * 4096)
+            .open(temp.path())
+            .unwrap();
+        let store = SnapshotStore::new(temp.path().to_path_buf(), env).unwrap();
+        let mut txn = store.env.write_txn().unwrap();
+        let db_id = DatabaseId::random();
+        let snapshot_1_id = Uuid::new_v4();
+        store.register(&mut txn, db_id, 0, 51, snapshot_1_id);
+        let snapshot_2_id = Uuid::new_v4();
+        store.register(&mut txn, db_id, 52, 112, snapshot_2_id);
+        txn.commit().unwrap();
+
+        assert_eq!(store.locate(db_id, 0).unwrap().snapshot_id, snapshot_1_id);
+        assert_eq!(store.locate(db_id, 17).unwrap().snapshot_id, snapshot_1_id);
+        assert_eq!(store.locate(db_id, 51).unwrap().snapshot_id, snapshot_1_id);
+        assert_eq!(store.locate(db_id, 52).unwrap().snapshot_id, snapshot_2_id);
+        assert_eq!(store.locate(db_id, 100).unwrap().snapshot_id, snapshot_2_id);
+        assert_eq!(store.locate(db_id, 112).unwrap().snapshot_id, snapshot_2_id);
+        assert!(store.locate(db_id, 12345).is_none());
+    }
+
+    #[test]
+    fn multiple_databases() {
+        let temp = tempfile::tempdir().unwrap();
+        let env = heed::EnvOpenOptions::new()
+            .max_dbs(10)
+            .map_size(1000 * 4096)
+            .open(temp.path())
+            .unwrap();
+        let store = SnapshotStore::new(temp.path().to_path_buf(), env).unwrap();
+        let mut txn = store.env.write_txn().unwrap();
+        let db_id1 = DatabaseId::random();
+        let db_id2 = DatabaseId::random();
+        let snapshot_id1 = Uuid::new_v4();
+        let snapshot_id2 = Uuid::new_v4();
+        store.register(&mut txn, db_id1, 0, 51, snapshot_id1);
+        store.register(&mut txn, db_id2, 0, 51, snapshot_id2);
+        txn.commit().unwrap();
+
+        assert_eq!(store.locate(db_id1, 0).unwrap().snapshot_id, snapshot_id1);
+        assert_eq!(store.locate(db_id2, 0).unwrap().snapshot_id, snapshot_id2);
+
+        assert_eq!(store.locate(db_id1, 12).unwrap().snapshot_id, snapshot_id1);
+        assert_eq!(store.locate(db_id2, 18).unwrap().snapshot_id, snapshot_id2);
+
+        assert_eq!(store.locate(db_id1, 51).unwrap().snapshot_id, snapshot_id1);
+        assert_eq!(store.locate(db_id2, 51).unwrap().snapshot_id, snapshot_id2);
+
+        assert!(store.locate(db_id1, 52).is_none());
+        assert!(store.locate(db_id2, 52).is_none());
     }
 }
