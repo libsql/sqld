@@ -4,22 +4,21 @@ use std::future::poll_fn;
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::task::{ready, Context, Poll, Waker};
-use std::time::{Instant, Duration};
+use std::task::{ready, Context, Poll};
+use std::time::{Duration, Instant};
 
 use either::Either;
-use futures::{Future, FutureExt};
 use libsqlx::libsql::LibsqlDatabase;
 use libsqlx::program::Program;
 use libsqlx::proxy::WriteProxyDatabase;
 use libsqlx::result_builder::ResultBuilder;
 use libsqlx::{Database as _, InjectableDatabase};
-use parking_lot::Mutex;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::{block_in_place, JoinSet};
-use tokio::time::{Interval, Sleep, sleep_until};
+use tokio::time::Interval;
 
 use crate::allocation::primary::FrameStreamer;
+use crate::allocation::timeout_notifier::timeout_monitor;
 use crate::compactor::CompactionQueue;
 use crate::hrana;
 use crate::hrana::http::handle_pipeline;
@@ -33,10 +32,12 @@ use self::config::{AllocConfig, DbConfig};
 use self::primary::compactor::Compactor;
 use self::primary::{PrimaryConnection, PrimaryDatabase, ProxyResponseBuilder};
 use self::replica::{ProxyDatabase, RemoteDb, ReplicaConnection, Replicator};
+use self::timeout_notifier::TimeoutMonitor;
 
 pub mod config;
 mod primary;
 mod replica;
+mod timeout_notifier;
 
 /// Maximum number of frame a Frame message is allowed to contain
 const FRAMES_MESSAGE_MAX_COUNT: usize = 5;
@@ -172,28 +173,34 @@ impl Database {
         }
     }
 
-    fn connect(&self, connection_id: u32, alloc: &Allocation, on_txn_status_change_cb: impl Fn(bool) + Send + Sync + 'static) -> impl ConnectionHandler {
+    fn connect(
+        &self,
+        connection_id: u32,
+        alloc: &Allocation,
+        on_txn_status_change_cb: impl Fn(bool) + Send + Sync + 'static,
+    ) -> impl ConnectionHandler {
         match self {
             Database::Primary {
                 db: PrimaryDatabase { db, .. },
                 ..
-            } => { 
+            } => {
                 let mut conn = db.connect().unwrap();
                 conn.set_on_txn_status_change_cb(on_txn_status_change_cb);
-                Either::Right(PrimaryConnection {
-                conn,
-            }) },
+                Either::Right(PrimaryConnection { conn })
+            }
             Database::Replica { db, primary_id, .. } => {
                 let mut conn = db.connect().unwrap();
-                conn.reader_mut().set_on_txn_status_change_cb(on_txn_status_change_cb);
+                conn.reader_mut()
+                    .set_on_txn_status_change_cb(on_txn_status_change_cb);
                 Either::Left(ReplicaConnection {
-                conn,
-                connection_id,
-                next_req_id: 0,
-                primary_node_id: *primary_id,
-                database_id: DatabaseId::from_name(&alloc.db_name),
-                dispatcher: alloc.dispatcher.clone(),
-            }) },
+                    conn,
+                    connection_id,
+                    next_req_id: 0,
+                    primary_node_id: *primary_id,
+                    database_id: DatabaseId::from_name(&alloc.db_name),
+                    dispatcher: alloc.dispatcher.clone(),
+                })
+            }
         }
     }
 
@@ -224,9 +231,15 @@ pub struct ConnectionHandle {
 }
 
 impl ConnectionHandle {
-    pub async fn execute(&self, pgm: Program, builder: Box<dyn ResultBuilder>) -> crate::Result<()>
-    {
-        self.messages.send(ConnectionMessage::Execute { pgm, builder }).await.unwrap();
+    pub async fn execute(
+        &self,
+        pgm: Program,
+        builder: Box<dyn ResultBuilder>,
+    ) -> crate::Result<()> {
+        self.messages
+            .send(ConnectionMessage::Execute { pgm, builder })
+            .await
+            .unwrap();
         Ok(())
     }
 }
@@ -367,13 +380,8 @@ impl Allocation {
         let dispatcher = self.dispatcher.clone();
         let database_id = DatabaseId::from_name(&self.db_name);
         let exec = |conn: ConnectionHandle| async move {
-            let builder = ProxyResponseBuilder::new(
-                dispatcher,
-                database_id,
-                to,
-                req_id,
-                connection_id,
-            );
+            let builder =
+                ProxyResponseBuilder::new(dispatcher, database_id, to, req_id, connection_id);
             conn.execute(program, Box::new(builder)).await.unwrap();
         };
 
@@ -400,13 +408,15 @@ impl Allocation {
 
         let conn_id = self.next_conn_id();
         let (timeout_monitor, notifier) = timeout_monitor();
-        let conn = block_in_place(|| self.database.connect(conn_id, self, move |is_txn| {
-            if is_txn {
-                notifier.timeout_at(Instant::now() + TXN_TIMEOUT_DURATION);
-            } else {
-                notifier.disable();
-            }
-        }));
+        let conn = block_in_place(|| {
+            self.database.connect(conn_id, self, move |is_txn| {
+                if is_txn {
+                    notifier.timeout_at(Instant::now() + TXN_TIMEOUT_DURATION);
+                } else {
+                    notifier.disable();
+                }
+            })
+        });
 
         let (messages_sender, messages_receiver) = mpsc::channel(1);
         let (inbound_sender, inbound_receiver) = mpsc::channel(1);
@@ -477,60 +487,6 @@ where
         match self {
             Either::Left(l) => l.handle_inbound(msg).await,
             Either::Right(r) => r.handle_inbound(msg).await,
-        }
-    }
-}
-
-
-fn timeout_monitor() -> (TimeoutMonitor, TimeoutNotifier) {
-    let inner = Arc::new(Mutex::new(TimeoutInner {
-        sleep: Box::pin(sleep_until(Instant::now().into())),
-        enabled: false,
-        waker: None,
-    }));
-
-    (TimeoutMonitor { inner: inner.clone()}, TimeoutNotifier { inner })
-}
-
-struct TimeoutMonitor {
-    inner: Arc<Mutex<TimeoutInner>>
-}
-
-struct TimeoutNotifier {
-    inner: Arc<Mutex<TimeoutInner>>
-}
-
-impl TimeoutNotifier {
-    pub fn disable(&self) {
-        self.inner.lock().enabled = false;
-    }
-
-    pub fn timeout_at(&self, at: Instant) {
-        let mut inner = self.inner.lock();
-        inner.enabled = true;
-        inner.sleep.as_mut().reset(at.into());
-        if let Some(waker) = inner.waker.take() {
-            waker.wake()
-        }
-    }
-}
-
-struct TimeoutInner {
-    sleep: Pin<Box<Sleep>>,
-    enabled: bool,
-    waker: Option<Waker>,
-}
-
-impl Future for TimeoutMonitor {
-    type Output = ();
-
-    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        let mut inner = self.inner.lock();
-        if inner.enabled {
-            inner.sleep.poll_unpin(cx)
-        } else {
-            inner.waker.replace(cx.waker().clone());
-            Poll::Pending
         }
     }
 }
@@ -610,13 +566,16 @@ mod test {
             dispatcher: bus,
         };
 
-        let (exec_sender, exec) = mpsc::channel(1);
+        let (messages_sender, messages) = mpsc::channel(1);
         let (_inbound_sender, inbound) = mpsc::channel(1);
+        let (timeout_monitor, _) = timeout_monitor();
         let connection = Connection {
             id: (0, 0),
             conn,
             messages,
             inbound,
+            timeout_monitor,
+            last_txn_timedout: false,
         };
 
         let handle = tokio::spawn(connection.run());
@@ -630,13 +589,11 @@ mod test {
         }
 
         let builder = Box::new(Builder(notify.clone()));
-        exec_sender
-            .send(Box::new(move |conn| {
-                conn.execute_program(&Program::seq(&["create table test (c)"]), builder)
-                    .unwrap();
-            }))
-            .await
-            .unwrap();
+        let msg = ConnectionMessage::Execute {
+            pgm: Program::seq(&["create table test (c)"]),
+            builder,
+        };
+        messages_sender.send(msg).await.unwrap();
 
         notify.notified().await;
 

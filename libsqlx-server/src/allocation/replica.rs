@@ -9,7 +9,7 @@ use libsqlx::libsql::{LibsqlConnection, LibsqlDatabase, ReplicaType};
 use libsqlx::program::Program;
 use libsqlx::proxy::{WriteProxyConnection, WriteProxyDatabase};
 use libsqlx::result_builder::{Column, QueryBuilderConfig, ResultBuilder};
-use libsqlx::{DescribeResponse, Frame, FrameNo, Injector, Connection};
+use libsqlx::{Connection, DescribeResponse, Frame, FrameNo, Injector};
 use parking_lot::Mutex;
 use tokio::sync::mpsc;
 use tokio::task::block_in_place;
@@ -324,7 +324,6 @@ impl ConnectionHandler for ReplicaConnection {
                 if let Some(msg) = msg {
                     self.dispatcher.dispatch(msg).await;
                 }
-
             }
             ConnectionMessage::Describe => (),
         }

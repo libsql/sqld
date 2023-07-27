@@ -47,7 +47,6 @@ pub async fn execute_stmt(
     conn: &ConnectionHandle,
     query: Query,
 ) -> color_eyre::Result<proto::StmtResult> {
-    
     let (builder, ret) = SingleStatementBuilder::new();
     let pgm = libsqlx::program::Program::from_queries(std::iter::once(query));
     conn.execute(pgm, Box::new(builder)).await?;

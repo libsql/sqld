@@ -7,7 +7,7 @@ use std::time::Duration;
 use bytes::Bytes;
 use libsqlx::libsql::{LibsqlDatabase, PrimaryType};
 use libsqlx::result_builder::ResultBuilder;
-use libsqlx::{Frame, FrameHeader, FrameNo, LogReadError, ReplicationLogger, Connection};
+use libsqlx::{Connection, Frame, FrameHeader, FrameNo, LogReadError, ReplicationLogger};
 use tokio::task::block_in_place;
 
 use crate::linc::bus::Dispatch;
@@ -16,7 +16,7 @@ use crate::linc::{Inbound, NodeId, Outbound};
 use crate::meta::DatabaseId;
 use crate::snapshot_store::SnapshotStore;
 
-use super::{ConnectionHandler, FRAMES_MESSAGE_MAX_COUNT, ConnectionMessage};
+use super::{ConnectionHandler, ConnectionMessage, FRAMES_MESSAGE_MAX_COUNT};
 
 pub mod compactor;
 
@@ -325,7 +325,6 @@ impl ConnectionHandler for PrimaryConnection {
             ConnectionMessage::Describe => {
                 todo!()
             }
-
         }
     }
 
