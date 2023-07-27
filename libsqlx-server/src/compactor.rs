@@ -9,7 +9,7 @@ use std::sync::{
     Arc,
 };
 
-use bytemuck::{bytes_of, pod_read_unaligned, Pod, Zeroable, try_from_bytes};
+use bytemuck::{bytes_of, pod_read_unaligned, try_from_bytes, Pod, Zeroable};
 use bytes::{Bytes, BytesMut};
 use heed::byteorder::BigEndian;
 use heed_types::{SerdeBincode, U64};
@@ -38,7 +38,7 @@ pub struct CompactionQueue {
     next_id: AtomicU64,
     notify: watch::Sender<Option<u64>>,
     db_path: PathBuf,
-    snapshot_store: Arc<SnapshotStore>,
+    pub snapshot_store: Arc<SnapshotStore>,
 }
 
 impl CompactionQueue {
@@ -110,9 +110,17 @@ impl CompactionQueue {
             let to_compact_path = to_compact_path.clone();
             let db_path = self.db_path.clone();
             move || {
-                let mut builder = SnapshotBuilder::new(&db_path, job.database_id, job.log_id)?;
                 let log = LogFile::new(to_compact_path)?;
-                for frame in log.rev_deduped() {
+                let (start_fno, end_fno, iter) =
+                    log.rev_deduped().expect("compaction job with no frames!");
+                let mut builder = SnapshotBuilder::new(
+                    &db_path,
+                    job.database_id,
+                    job.log_id,
+                    start_fno,
+                    end_fno,
+                )?;
+                for frame in iter {
                     let frame = frame?;
                     builder.push_frame(frame)?;
                 }
@@ -172,14 +180,14 @@ pub struct SnapshotBuilder {
 #[derive(Debug, Clone, Copy, Pod, Zeroable)]
 #[repr(C)]
 pub struct SnapshotFrameHeader {
-    frame_no: FrameNo,
-    page_no: u32,
+    pub frame_no: FrameNo,
+    pub page_no: u32,
     _pad: u32,
 }
 
 #[derive(Clone)]
 pub struct SnapshotFrame {
-    data: Bytes
+    data: Bytes,
 }
 
 impl SnapshotFrame {
@@ -191,7 +199,6 @@ impl SnapshotFrame {
         }
 
         Ok(Self { data })
- 
     }
 
     pub fn header(&self) -> Cow<SnapshotFrameHeader> {
@@ -200,10 +207,20 @@ impl SnapshotFrame {
             .map(Cow::Borrowed)
             .unwrap_or_else(|_| Cow::Owned(pod_read_unaligned(data)))
     }
+
+    pub(crate) fn page(&self) -> &[u8] {
+        &self.data[size_of::<SnapshotFrameHeader>()..]
+    }
 }
 
 impl SnapshotBuilder {
-    pub fn new(db_path: &Path, db_id: DatabaseId, snapshot_id: Uuid) -> color_eyre::Result<Self> {
+    pub fn new(
+        db_path: &Path,
+        db_id: DatabaseId,
+        snapshot_id: Uuid,
+        start_fno: FrameNo,
+        end_fno: FrameNo,
+    ) -> color_eyre::Result<Self> {
         let temp_dir = db_path.join("tmp");
         let mut target = BufWriter::new(NamedTempFile::new_in(&temp_dir)?);
         // reserve header space
@@ -212,8 +229,8 @@ impl SnapshotBuilder {
         Ok(Self {
             header: SnapshotFileHeader {
                 db_id,
-                start_frame_no: u64::MAX,
-                end_frame_no: u64::MIN,
+                start_frame_no: start_fno,
+                end_frame_no: end_fno,
                 frame_count: 0,
                 size_after: 0,
                 _pad: 0,
@@ -228,14 +245,11 @@ impl SnapshotBuilder {
     pub fn push_frame(&mut self, frame: Frame) -> color_eyre::Result<()> {
         assert!(frame.header().frame_no < self.last_seen_frame_no);
         self.last_seen_frame_no = frame.header().frame_no;
-        if frame.header().frame_no < self.header.start_frame_no {
-            self.header.start_frame_no = frame.header().frame_no;
-        }
 
-        if frame.header().frame_no > self.header.end_frame_no {
-            self.header.end_frame_no = frame.header().frame_no;
+        if frame.header().frame_no == self.header.end_frame_no {
             self.header.size_after = frame.header().size_after;
         }
+
         let header = SnapshotFrameHeader {
             frame_no: frame.header().frame_no,
             page_no: frame.header().page_no,
@@ -306,13 +320,13 @@ impl SnapshotFile {
     ) -> impl Iterator<Item = crate::Result<SnapshotFrame>> + '_ {
         let mut iter = self.frames_iter();
         std::iter::from_fn(move || match iter.next() {
-            Some(Ok(frame)) =>  {
+            Some(Ok(frame)) => {
                 if frame.header().frame_no < frame_no {
                     None
                 } else {
                     Some(Ok(frame))
                 }
-            },
+            }
             other => other,
         })
     }
@@ -369,18 +383,23 @@ mod test {
         let snapshot_file = SnapshotFile::open(&snapshot_path).unwrap();
         assert_eq!(snapshot_file.header.start_frame_no, expected_start_frameno);
         assert_eq!(snapshot_file.header.end_frame_no, expected_end_frameno);
-        assert!(snapshot_file.frames_iter().all(|f| expected_page_content
-            .remove(&f.unwrap().header().page_no)));
+        assert!(snapshot_file
+            .frames_iter()
+            .all(|f| expected_page_content.remove(&f.unwrap().header().page_no)));
         assert!(expected_page_content.is_empty());
 
-        assert_eq!(snapshot_file
-            .frames_iter()
-            .map(Result::unwrap)
-            .map(|f| f.header().frame_no)
-            .reduce(|prev, new| {
-                assert!(new < prev);
-                new
-            }).unwrap(), 0);
+        assert_eq!(
+            snapshot_file
+                .frames_iter()
+                .map(Result::unwrap)
+                .map(|f| f.header().frame_no)
+                .reduce(|prev, new| {
+                    assert!(new < prev);
+                    new
+                })
+                .unwrap(),
+            0
+        );
 
         assert_eq!(store.locate(database_id, 0).unwrap().snapshot_id, log_id);
     }

@@ -7,7 +7,7 @@ use std::os::unix::prelude::FileExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use anyhow::{bail, ensure};
+use anyhow::bail;
 use bytemuck::{bytes_of, pod_read_unaligned, Pod, Zeroable};
 use bytes::{Bytes, BytesMut};
 use parking_lot::{Mutex, RwLock};
@@ -26,7 +26,7 @@ use crate::database::frame::{Frame, FrameHeader};
 #[cfg(feature = "bottomless")]
 use crate::libsql::ffi::SQLITE_IOERR_WRITE;
 
-use super::{FrameNo, CRC_64_GO_ISO, WAL_MAGIC, WAL_PAGE_SIZE};
+use super::{FrameNo, WAL_MAGIC, WAL_PAGE_SIZE};
 
 init_static_wal_method!(REPLICATION_METHODS, ReplicationLoggerHook);
 
@@ -354,10 +354,6 @@ pub struct LogFile {
     /// On rollback, this is reset to 0, so that everything that was written after the previous
     /// header.frame_count is ignored and can be overwritten
     pub(crate) uncommitted_frame_count: u64,
-    uncommitted_checksum: u64,
-
-    /// checksum of the last commited frame
-    commited_checksum: u64,
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -392,10 +388,10 @@ impl LogFile {
                 start_frame_no: 0,
                 magic: WAL_MAGIC,
                 page_size: WAL_PAGE_SIZE,
-                start_checksum: 0,
                 db_id: db_id.as_u128(),
                 frame_count: 0,
                 sqld_version: Version::current().0,
+                _pad: 0,
             };
 
             let mut this = Self {
@@ -403,8 +399,6 @@ impl LogFile {
                 file,
                 header,
                 uncommitted_frame_count: 0,
-                uncommitted_checksum: 0,
-                commited_checksum: 0,
             };
 
             this.write_header()?;
@@ -412,27 +406,12 @@ impl LogFile {
             Ok(this)
         } else {
             let header = Self::read_header(&file)?;
-            let mut this = Self {
+            Ok(Self {
                 file,
                 header,
                 uncommitted_frame_count: 0,
-                uncommitted_checksum: 0,
-                commited_checksum: 0,
                 path,
-            };
-
-            if let Some(last_commited) = this.last_commited_frame_no() {
-                // file is not empty, the starting checksum is the checksum from the last entry
-                let last_frame = this.frame(last_commited).unwrap();
-                this.commited_checksum = last_frame.header().checksum;
-                this.uncommitted_checksum = last_frame.header().checksum;
-            } else {
-                // file contains no entry, start with the initial checksum from the file header.
-                this.commited_checksum = this.header.start_checksum;
-                this.uncommitted_checksum = this.header.start_checksum;
-            }
-
-            Ok(this)
+            })
         }
     }
 
@@ -458,7 +437,6 @@ impl LogFile {
     pub fn commit(&mut self) -> crate::Result<()> {
         self.header.frame_count += self.uncommitted_frame_count;
         self.uncommitted_frame_count = 0;
-        self.commited_checksum = self.uncommitted_checksum;
         self.write_header()?;
 
         Ok(())
@@ -466,7 +444,6 @@ impl LogFile {
 
     fn rollback(&mut self) {
         self.uncommitted_frame_count = 0;
-        self.uncommitted_checksum = self.commited_checksum;
     }
 
     pub fn write_header(&mut self) -> crate::Result<()> {
@@ -504,11 +481,20 @@ impl LogFile {
         })
     }
 
-    /// Return a reversed iterator over the deduplicated frames in the log file.
-    pub fn rev_deduped(&self) -> impl Iterator<Item = crate::Result<Frame>> + '_ {
+    /// If the log contains any frames, returns (start_frameno, end_frameno, iter), where iter, is
+    /// a deduplicated reversed iterator over the frames in the log
+    pub fn rev_deduped(
+        &self,
+    ) -> Option<(
+        FrameNo,
+        FrameNo,
+        impl Iterator<Item = crate::Result<Frame>> + '_,
+    )> {
         let mut iter = self.rev_frames_iter();
         let mut seen = HashSet::new();
-        std::iter::from_fn(move || loop {
+        let start_fno = self.header().start_frame_no;
+        let end_fno = self.header().last_frame_no()?;
+        let iter = std::iter::from_fn(move || loop {
             match iter.next()? {
                 Ok(frame) => {
                     if !seen.contains(&frame.header().page_no) {
@@ -518,21 +504,15 @@ impl LogFile {
                 }
                 Err(e) => return Some(Err(e)),
             }
-        })
-    }
+        });
 
-    fn compute_checksum(&self, page: &WalPage) -> u64 {
-        let mut digest = CRC_64_GO_ISO.digest_with_initial(self.uncommitted_checksum);
-        digest.update(&page.data);
-        digest.finalize()
+        Some((start_fno, end_fno, iter))
     }
 
     pub fn push_page(&mut self, page: &WalPage) -> crate::Result<()> {
-        let checksum = self.compute_checksum(page);
         let frame = Frame::from_parts(
             &FrameHeader {
                 frame_no: self.next_frame_no(),
-                checksum,
                 page_no: page.page_no,
                 size_after: page.size_after,
             },
@@ -547,7 +527,6 @@ impl LogFile {
         self.file.write_all_at(frame.as_slice(), byte_offset)?;
 
         self.uncommitted_frame_count += 1;
-        self.uncommitted_checksum = checksum;
 
         Ok(())
     }
@@ -616,13 +595,12 @@ impl LogFile {
         let new_header = LogFileHeader {
             start_frame_no: self.header.start_frame_no + self.header.frame_count,
             frame_count: 0,
-            start_checksum: self.commited_checksum,
             ..self.header
         };
         new_log_file.header = new_header;
         new_log_file.write_header().unwrap();
-        // swap old and new snapshot
-        atomic_rename(dbg!(&temp_log_path), dbg!(&self.path)).unwrap();
+        // swap old and new log
+        atomic_rename(&temp_log_path, &self.path).unwrap();
         std::mem::swap(&mut new_log_file.path, &mut self.path);
         let _ = std::mem::replace(self, new_log_file);
         compactor.compact(log_id).unwrap();
@@ -704,9 +682,7 @@ fn atomic_rename(p1: impl AsRef<Path>, p2: impl AsRef<Path>) -> anyhow::Result<(
 pub struct LogFileHeader {
     /// magic number: b"SQLDWAL\0" as u64
     pub magic: u64,
-    /// Initial checksum value for the rolling CRC checksum
-    /// computed with the 64 bits CRC_64_GO_ISO
-    pub start_checksum: u64,
+    _pad: u64,
     /// Uuid of the database associated with this log.
     pub db_id: u128,
     /// Frame_no of the first frame in the log
@@ -895,23 +871,6 @@ impl ReplicationLogger {
         }
 
         Ok(())
-    }
-
-    #[allow(dead_code)]
-    fn compute_checksum(wal_header: &LogFileHeader, log_file: &LogFile) -> anyhow::Result<u64> {
-        tracing::debug!("computing WAL log running checksum...");
-        let mut iter = log_file.frames_iter()?;
-        iter.try_fold(wal_header.start_checksum, |sum, frame| {
-            let frame = frame?;
-            let mut digest = CRC_64_GO_ISO.digest_with_initial(sum);
-            digest.update(frame.page());
-            let cs = digest.finalize();
-            ensure!(
-                cs == frame.header().checksum,
-                "invalid WAL file: invalid checksum"
-            );
-            Ok(cs)
-        })
     }
 
     /// commit the current transaction and returns the new top frame number

@@ -9,7 +9,7 @@ pub mod proxy;
 #[cfg(test)]
 mod test_utils;
 
-pub use frame::Frame;
+pub use frame::{Frame, FrameHeader};
 
 pub type FrameNo = u64;
 

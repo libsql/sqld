@@ -2,17 +2,19 @@ use std::collections::HashMap;
 use std::mem::size_of;
 use std::sync::Arc;
 use std::task::{Context, Poll};
+use std::time::Duration;
 
 use bytes::Bytes;
 use libsqlx::libsql::{LibsqlDatabase, PrimaryType};
 use libsqlx::result_builder::ResultBuilder;
-use libsqlx::{FrameNo, LogReadError, ReplicationLogger};
+use libsqlx::{Frame, FrameHeader, FrameNo, LogReadError, ReplicationLogger};
 use tokio::task::block_in_place;
 
 use crate::linc::bus::Dispatch;
 use crate::linc::proto::{BuilderStep, Enveloppe, Frames, Message, StepError, Value};
 use crate::linc::{Inbound, NodeId, Outbound};
 use crate::meta::DatabaseId;
+use crate::snapshot_store::SnapshotStore;
 
 use super::{ConnectionHandler, ExecFn, FRAMES_MESSAGE_MAX_COUNT};
 
@@ -24,6 +26,7 @@ pub struct PrimaryDatabase {
     pub db: Arc<LibsqlDatabase<PrimaryType>>,
     pub replica_streams: HashMap<NodeId, (u32, tokio::task::JoinHandle<()>)>,
     pub frame_notifier: tokio::sync::watch::Receiver<FrameNo>,
+    pub snapshot_store: Arc<SnapshotStore>,
 }
 
 pub struct ProxyResponseBuilder {
@@ -206,6 +209,7 @@ pub struct FrameStreamer {
     pub dipatcher: Arc<dyn Dispatch>,
     pub notifier: tokio::sync::watch::Receiver<FrameNo>,
     pub buffer: Vec<Bytes>,
+    pub snapshot_store: Arc<SnapshotStore>,
 }
 
 impl FrameStreamer {
@@ -234,7 +238,53 @@ impl FrameStreamer {
                     }
                 }
                 Err(LogReadError::Error(_)) => todo!("handle log read error"),
-                Err(LogReadError::SnapshotRequired) => todo!("handle reading from snapshot"),
+                Err(LogReadError::SnapshotRequired) => self.send_snapshot().await,
+            }
+        }
+    }
+
+    async fn send_snapshot(&mut self) {
+        tracing::debug!("sending frames from snapshot");
+        loop {
+            match self
+                .snapshot_store
+                .locate_file(self.database_id, self.next_frame_no)
+            {
+                Some(file) => {
+                    let mut iter = file.frames_iter_from(self.next_frame_no).peekable();
+
+                    while let Some(frame) = block_in_place(|| iter.next()) {
+                        let frame = frame.unwrap();
+                        // TODO: factorize in maybe_send
+                        if self.buffer.len() > FRAMES_MESSAGE_MAX_COUNT {
+                            self.send_frames().await;
+                        }
+                        let size_after = iter
+                            .peek()
+                            .is_none()
+                            .then_some(file.header.size_after)
+                            .unwrap_or(0);
+                        let frame = Frame::from_parts(
+                            &FrameHeader {
+                                frame_no: frame.header().frame_no,
+                                page_no: frame.header().page_no,
+                                size_after,
+                            },
+                            frame.page(),
+                        );
+                        self.next_frame_no = frame.header().frame_no + 1;
+                        self.buffer.push(frame.bytes());
+
+                        tokio::task::yield_now().await;
+                    }
+
+                    break;
+                }
+                None => {
+                    // snapshot is not ready yet, wait a bit
+                    // FIXME: notify when snapshot becomes ready instead of using loop
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
             }
         }
     }

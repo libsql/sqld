@@ -103,7 +103,7 @@ impl Database {
                     Compactor::new(
                         max_log_size,
                         replication_log_compact_interval,
-                        compaction_queue,
+                        compaction_queue.clone(),
                         database_id,
                     ),
                     false,
@@ -124,6 +124,7 @@ impl Database {
                         db: Arc::new(db),
                         replica_streams: HashMap::new(),
                         frame_notifier: receiver,
+                        snapshot_store: compaction_queue.snapshot_store.clone(),
                     },
                     compact_interval,
                 }
@@ -275,6 +276,7 @@ impl Allocation {
                             db,
                             replica_streams,
                             frame_notifier,
+                            snapshot_store,
                             ..
                         },
                     ..
@@ -289,6 +291,7 @@ impl Allocation {
                         dipatcher: self.dispatcher.clone() as _,
                         notifier: frame_notifier.clone(),
                         buffer: Vec::new(),
+                        snapshot_store: snapshot_store.clone(),
                     };
 
                     match replica_streams.entry(msg.from) {

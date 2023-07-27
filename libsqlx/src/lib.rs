@@ -15,8 +15,8 @@ pub use database::libsql;
 pub use database::libsql::replication_log::logger::{LogReadError, ReplicationLogger};
 pub use database::libsql::replication_log::FrameNo;
 pub use database::proxy;
-pub use database::Frame;
 pub use database::{Database, InjectableDatabase, Injector};
+pub use database::{Frame, FrameHeader};
 
 pub use sqld_libsql_bindings::wal_hook::WalHook;
 

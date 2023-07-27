@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use tokio::task::block_in_place;
 use uuid::Uuid;
 
-use crate::meta::DatabaseId;
+use crate::{compactor::SnapshotFile, meta::DatabaseId};
 
 #[derive(Clone, Copy, Zeroable, Pod, Debug)]
 #[repr(transparent)]
@@ -91,6 +91,10 @@ impl SnapshotStore {
             end_frame_no: u64::MAX.into(),
         };
 
+        for entry in self.database.lazily_decode_data().iter(&txn).unwrap() {
+            let (k, _) = entry.unwrap();
+        }
+
         match self
             .database
             .get_lower_than_or_equal_to(&txn, &key)
@@ -102,6 +106,11 @@ impl SnapshotStore {
                 } else if frame_no >= key.start_frame_no.into()
                     && frame_no <= key.end_frame_no.into()
                 {
+                    tracing::debug!(
+                        "found snapshot for {frame_no}; {}-{}",
+                        u64::from(key.start_frame_no),
+                        u64::from(key.end_frame_no)
+                    );
                     return Some(v);
                 } else {
                     None
@@ -109,6 +118,15 @@ impl SnapshotStore {
             }
             Err(_) => todo!(),
         }
+    }
+
+    pub fn locate_file(&self, database_id: DatabaseId, frame_no: FrameNo) -> Option<SnapshotFile> {
+        let meta = self.locate(database_id, frame_no)?;
+        let path = self
+            .db_path
+            .join("snapshots")
+            .join(meta.snapshot_id.to_string());
+        Some(SnapshotFile::open(&path).unwrap())
     }
 }
 
