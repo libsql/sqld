@@ -4,17 +4,20 @@ use std::future::poll_fn;
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::task::{ready, Context, Poll};
+use std::task::{ready, Context, Poll, Waker};
 use std::time::Instant;
 
 use either::Either;
+use futures::{Future, FutureExt};
 use libsqlx::libsql::LibsqlDatabase;
 use libsqlx::program::Program;
 use libsqlx::proxy::WriteProxyDatabase;
+use libsqlx::result_builder::ResultBuilder;
 use libsqlx::{Database as _, InjectableDatabase};
+use parking_lot::Mutex;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::{block_in_place, JoinSet};
-use tokio::time::Interval;
+use tokio::time::{Interval, Sleep, sleep_until};
 
 use crate::allocation::primary::FrameStreamer;
 use crate::compactor::CompactionQueue;
@@ -40,7 +43,13 @@ const FRAMES_MESSAGE_MAX_COUNT: usize = 5;
 /// Maximum number of frames in the injector buffer
 const MAX_INJECTOR_BUFFER_CAPACITY: usize = 32;
 
-type ExecFn = Box<dyn FnOnce(&mut dyn libsqlx::Connection) + Send>;
+pub enum ConnectionMessage {
+    Execute {
+        pgm: Program,
+        builder: Box<dyn ResultBuilder>,
+    },
+    Describe,
+}
 
 pub enum AllocationMessage {
     HranaPipelineReq {
@@ -210,25 +219,15 @@ pub struct Allocation {
 
 #[derive(Clone)]
 pub struct ConnectionHandle {
-    exec: mpsc::Sender<ExecFn>,
+    messages: mpsc::Sender<ConnectionMessage>,
     inbound: mpsc::Sender<Inbound>,
 }
 
 impl ConnectionHandle {
-    pub async fn exec<F, R>(&self, f: F) -> crate::Result<R>
-    where
-        F: for<'a> FnOnce(&'a mut dyn libsqlx::Connection) -> R + Send + 'static,
-        R: Send + 'static,
+    pub async fn execute(&self, pgm: Program, builder: Box<dyn ResultBuilder>) -> crate::Result<()>
     {
-        let (sender, ret) = oneshot::channel();
-        let cb = move |conn: &mut dyn libsqlx::Connection| {
-            let res = f(conn);
-            let _ = sender.send(res);
-        };
-
-        self.exec.send(Box::new(cb)).await.unwrap();
-
-        Ok(ret.await?)
+        self.messages.send(ConnectionMessage::Execute { pgm, builder }).await.unwrap();
+        Ok(())
     }
 }
 
@@ -368,18 +367,14 @@ impl Allocation {
         let dispatcher = self.dispatcher.clone();
         let database_id = DatabaseId::from_name(&self.db_name);
         let exec = |conn: ConnectionHandle| async move {
-            let _ = conn
-                .exec(move |conn| {
-                    let builder = ProxyResponseBuilder::new(
-                        dispatcher,
-                        database_id,
-                        to,
-                        req_id,
-                        connection_id,
-                    );
-                    conn.execute_program(&program, Box::new(builder)).unwrap();
-                })
-                .await;
+            let builder = ProxyResponseBuilder::new(
+                dispatcher,
+                database_id,
+                to,
+                req_id,
+                connection_id,
+            );
+            conn.execute(program, Box::new(builder)).await.unwrap();
         };
 
         if self.database.is_primary() {
@@ -402,19 +397,22 @@ impl Allocation {
     async fn new_conn(&mut self, remote: Option<(NodeId, u32)>) -> ConnectionHandle {
         let conn_id = self.next_conn_id();
         let conn = block_in_place(|| self.database.connect(conn_id, self, |_|()));
-        let (exec_sender, exec_receiver) = mpsc::channel(1);
+        let (messages_sender, messages_receiver) = mpsc::channel(1);
         let (inbound_sender, inbound_receiver) = mpsc::channel(1);
         let id = remote.unwrap_or((self.dispatcher.node_id(), conn_id));
+        let (timeout_monitor, _) = timeout_monitor();
         let conn = Connection {
             id,
             conn,
-            exec: exec_receiver,
+            messages: messages_receiver,
             inbound: inbound_receiver,
+            last_txn_timedout: false,
+            timeout_monitor,
         };
 
         self.connections_futs.spawn(conn.run());
         let handle = ConnectionHandle {
-            exec: exec_sender,
+            messages: messages_sender,
             inbound: inbound_sender,
         };
         self.connections
@@ -442,7 +440,7 @@ impl Allocation {
 #[async_trait::async_trait]
 trait ConnectionHandler: Send {
     fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<()>;
-    async fn handle_exec(&mut self, exec: ExecFn);
+    async fn handle_conn_message(&mut self, exec: ConnectionMessage);
     async fn handle_inbound(&mut self, msg: Inbound);
 }
 
@@ -459,10 +457,10 @@ where
         }
     }
 
-    async fn handle_exec(&mut self, exec: ExecFn) {
+    async fn handle_conn_message(&mut self, msg: ConnectionMessage) {
         match self {
-            Either::Left(l) => l.handle_exec(exec).await,
-            Either::Right(r) => r.handle_exec(exec).await,
+            Either::Left(l) => l.handle_conn_message(msg).await,
+            Either::Right(r) => r.handle_conn_message(msg).await,
         }
     }
     async fn handle_inbound(&mut self, msg: Inbound) {
@@ -473,24 +471,89 @@ where
     }
 }
 
+
+fn timeout_monitor() -> (TimeoutMonitor, TimeoutNotifier) {
+    let inner = Arc::new(Mutex::new(TimeoutInner {
+        sleep: Box::pin(sleep_until(Instant::now().into())),
+        enabled: false,
+        waker: None,
+    }));
+
+    (TimeoutMonitor { inner: inner.clone()}, TimeoutNotifier { inner })
+}
+
+struct TimeoutMonitor {
+    inner: Arc<Mutex<TimeoutInner>>
+}
+
+struct TimeoutNotifier {
+    inner: Arc<Mutex<TimeoutInner>>
+}
+
+impl TimeoutNotifier {
+    pub fn disable(&self) {
+        self.inner.lock().enabled = false;
+    }
+
+    pub fn timeout_at(&self, at: Instant) {
+        let mut inner = self.inner.lock();
+        inner.enabled = true;
+        inner.sleep.as_mut().reset(at.into());
+        if let Some(waker) = inner.waker.take() {
+            waker.wake()
+        }
+    }
+}
+
+struct TimeoutInner {
+    sleep: Pin<Box<Sleep>>,
+    enabled: bool,
+    waker: Option<Waker>,
+}
+
+impl Future for TimeoutMonitor {
+    type Output = ();
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let mut inner = self.inner.lock();
+        if inner.enabled {
+            inner.sleep.poll_unpin(cx)
+        } else {
+            inner.waker.replace(cx.waker().clone());
+            Poll::Pending
+        }
+    }
+}
+
 struct Connection<C> {
     id: (NodeId, u32),
     conn: C,
-    exec: mpsc::Receiver<ExecFn>,
+    messages: mpsc::Receiver<ConnectionMessage>,
     inbound: mpsc::Receiver<Inbound>,
+    last_txn_timedout: bool,
+    timeout_monitor: TimeoutMonitor,
 }
 
 impl<C: ConnectionHandler> Connection<C> {
     async fn run(mut self) -> (NodeId, u32) {
         loop {
-            let fut =
-                futures::future::join(self.exec.recv(), poll_fn(|cx| self.conn.poll_ready(cx)));
+            let message_ready =
+                futures::future::join(self.messages.recv(), poll_fn(|cx| self.conn.poll_ready(cx)));
+
             tokio::select! {
+                _ = &mut self.timeout_monitor => {
+                    self.last_txn_timedout = true;
+                }
                 Some(inbound) = self.inbound.recv() => {
                     self.conn.handle_inbound(inbound).await;
                 }
-                (Some(exec), _) = fut => {
-                    self.conn.handle_exec(exec).await;
+                (Some(msg), _) = message_ready => {
+                    if self.last_txn_timedout{
+                        self.last_txn_timedout = false;
+                        todo!("handle txn timeout");
+                    } else {
+                        self.conn.handle_conn_message(msg).await;
+                    }
                 },
                 else => break,
             }
@@ -537,7 +600,7 @@ mod test {
         let connection = Connection {
             id: (0, 0),
             conn,
-            exec,
+            messages,
             inbound,
         };
 

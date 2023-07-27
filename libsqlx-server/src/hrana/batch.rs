@@ -74,15 +74,10 @@ pub async fn execute_batch(
     db: &ConnectionHandle,
     pgm: Program,
 ) -> color_eyre::Result<proto::BatchResult> {
-    let fut = db
-        .exec(move |conn| -> color_eyre::Result<_> {
-            let (builder, ret) = HranaBatchProtoBuilder::new();
-            conn.execute_program(&pgm, Box::new(builder))?;
-            Ok(ret)
-        })
-        .await??;
+    let (builder, ret) = HranaBatchProtoBuilder::new();
+    db.execute(pgm, Box::new(builder)).await?;
 
-    Ok(fut.await?)
+    Ok(ret.await?)
 }
 
 pub fn proto_sequence_to_program(sql: &str) -> color_eyre::Result<Program> {
@@ -111,17 +106,11 @@ pub fn proto_sequence_to_program(sql: &str) -> color_eyre::Result<Program> {
 }
 
 pub async fn execute_sequence(conn: &ConnectionHandle, pgm: Program) -> color_eyre::Result<()> {
-    let fut = conn
-        .exec(move |conn| -> color_eyre::Result<_> {
-            let (snd, rcv) = oneshot::channel();
-            let builder = StepResultsBuilder::new(snd);
-            conn.execute_program(&pgm, Box::new(builder))?;
+    let (snd, rcv) = oneshot::channel();
+    let builder = StepResultsBuilder::new(snd);
+    conn.execute(pgm, Box::new(builder)).await?;
 
-            Ok(rcv)
-        })
-        .await??;
-
-    fut.await?.into_iter().try_for_each(|result| match result {
+    rcv.await?.into_iter().try_for_each(|result| match result {
         StepResult::Ok => Ok(()),
         StepResult::Err(e) => match stmt_error_from_sqld_error(e) {
             Ok(stmt_err) => Err(anyhow!(stmt_err)),
