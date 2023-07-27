@@ -163,22 +163,28 @@ impl Database {
         }
     }
 
-    fn connect(&self, connection_id: u32, alloc: &Allocation) -> impl ConnectionHandler {
+    fn connect(&self, connection_id: u32, alloc: &Allocation, on_txn_status_change_cb: impl Fn(bool) + Send + Sync + 'static) -> impl ConnectionHandler {
         match self {
             Database::Primary {
                 db: PrimaryDatabase { db, .. },
                 ..
-            } => Either::Right(PrimaryConnection {
-                conn: db.connect().unwrap(),
-            }),
-            Database::Replica { db, primary_id, .. } => Either::Left(ReplicaConnection {
-                conn: db.connect().unwrap(),
+            } => { 
+                let mut conn = db.connect().unwrap();
+                conn.set_on_txn_status_change_cb(on_txn_status_change_cb);
+                Either::Right(PrimaryConnection {
+                conn,
+            }) },
+            Database::Replica { db, primary_id, .. } => {
+                let mut conn = db.connect().unwrap();
+                conn.reader_mut().set_on_txn_status_change_cb(on_txn_status_change_cb);
+                Either::Left(ReplicaConnection {
+                conn,
                 connection_id,
                 next_req_id: 0,
                 primary_node_id: *primary_id,
                 database_id: DatabaseId::from_name(&alloc.db_name),
                 dispatcher: alloc.dispatcher.clone(),
-            }),
+            }) },
         }
     }
 
@@ -395,7 +401,7 @@ impl Allocation {
 
     async fn new_conn(&mut self, remote: Option<(NodeId, u32)>) -> ConnectionHandle {
         let conn_id = self.next_conn_id();
-        let conn = block_in_place(|| self.database.connect(conn_id, self));
+        let conn = block_in_place(|| self.database.connect(conn_id, self, |_|()));
         let (exec_sender, exec_receiver) = mpsc::channel(1);
         let (inbound_sender, inbound_receiver) = mpsc::channel(1);
         let id = remote.unwrap_or((self.dispatcher.node_id(), conn_id));
