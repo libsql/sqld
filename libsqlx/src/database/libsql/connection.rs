@@ -1,12 +1,10 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Instant;
 
 use rusqlite::{OpenFlags, Statement, StatementStatus};
 use sqld_libsql_bindings::wal_hook::{WalHook, WalMethodsHook};
 
 use crate::connection::{Connection, DescribeCol, DescribeParam, DescribeResponse};
-use crate::database::TXN_TIMEOUT;
 use crate::error::Error;
 use crate::program::{Cond, Program, Step};
 use crate::query::Query;
@@ -50,10 +48,12 @@ where
 }
 
 pub struct LibsqlConnection<T: LibsqlDbType> {
-    timeout_deadline: Option<Instant>,
     conn: sqld_libsql_bindings::Connection<'static>, // holds a ref to _context, must be dropped first.
     row_stats_handler: Option<Arc<dyn RowStatsHandler>>,
     builder_config: QueryBuilderConfig,
+    /// `true` is the connection is in an open connection state
+    is_txn: bool,
+    on_txn_status_change_cb: Option<Box<dyn Fn(bool) + Sync + Send + 'static>>,
     _context: Seal<Box<<T::ConnectionHook as WalHook>::Context>>,
 }
 
@@ -65,6 +65,7 @@ impl<T: LibsqlDbType> LibsqlConnection<T> {
         hook_ctx: <T::ConnectionHook as WalHook>::Context,
         row_stats_callback: Option<Arc<dyn RowStatsHandler>>,
         builder_config: QueryBuilderConfig,
+        on_txn_status_change_cb: Option<Box<dyn Fn(bool) + Sync + Send + 'static>>,
     ) -> Result<LibsqlConnection<T>> {
         let mut ctx = Box::new(hook_ctx);
         let this = LibsqlConnection {
@@ -74,9 +75,10 @@ impl<T: LibsqlDbType> LibsqlConnection<T> {
                 unsafe { &mut *(ctx.as_mut() as *mut _) },
                 None,
             )?,
-            timeout_deadline: None,
+            on_txn_status_change_cb,
             builder_config,
             row_stats_handler: row_stats_callback,
+            is_txn: false,
             _context: Seal::new(ctx),
         };
 
@@ -105,16 +107,10 @@ impl<T: LibsqlDbType> LibsqlConnection<T> {
         let mut results = Vec::with_capacity(pgm.steps.len());
 
         builder.init(&self.builder_config)?;
-        let is_autocommit_before = self.conn.is_autocommit();
 
         for step in pgm.steps() {
             let res = self.execute_step(step, &results, builder)?;
             results.push(res);
-        }
-
-        // A transaction is still open, set up a timeout
-        if is_autocommit_before && !self.conn.is_autocommit() {
-            self.timeout_deadline = Some(Instant::now() + TXN_TIMEOUT)
         }
 
         let is_txn = !self.conn.is_autocommit();
@@ -159,6 +155,15 @@ impl<T: LibsqlDbType> LibsqlConnection<T> {
         };
 
         builder.finish_step(affected_row_count, last_insert_rowid)?;
+
+        let is_txn = !self.conn.is_autocommit();
+        if self.is_txn != is_txn {
+            // txn status changed
+            if let Some(ref cb) = self.on_txn_status_change_cb {
+                cb(is_txn)
+            }
+        }
+        self.is_txn = is_txn;
 
         Ok(enabled)
     }

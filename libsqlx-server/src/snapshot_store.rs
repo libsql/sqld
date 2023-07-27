@@ -91,10 +91,6 @@ impl SnapshotStore {
             end_frame_no: u64::MAX.into(),
         };
 
-        for entry in self.database.lazily_decode_data().iter(&txn).unwrap() {
-            let (k, _) = entry.unwrap();
-        }
-
         match self
             .database
             .get_lower_than_or_equal_to(&txn, &key)
