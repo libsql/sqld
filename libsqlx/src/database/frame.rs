@@ -17,8 +17,6 @@ use super::FrameNo;
 pub struct FrameHeader {
     /// Incremental frame number
     pub frame_no: FrameNo,
-    /// Rolling checksum of all the previous frames, including this one.
-    pub checksum: u64,
     /// page number, if frame_type is FrameType::Page
     pub page_no: u32,
     /// Size of the database (in page) after commiting the transaction. This is passed from sqlite,
