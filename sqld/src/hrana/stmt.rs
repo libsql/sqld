@@ -236,7 +236,7 @@ pub fn stmt_error_from_sqld_error(sqld_error: SqldError) -> Result<StmtError, Sq
 }
 
 pub fn proto_error_from_stmt_error(error: &StmtError) -> hrana::proto::Error {
-    hrana::proto::Error {
+    proto::Error {
         message: error.to_string(),
         code: error.code().into(),
     }

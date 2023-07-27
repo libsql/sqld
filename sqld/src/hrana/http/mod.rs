@@ -84,7 +84,7 @@ async fn read_request_json<T: DeserializeOwned>(req: hyper::Request<hyper::Body>
         .await
         .context("Could not read request body")?;
     let req_body = serde_json::from_slice(&req_body)
-        .map_err(|err| ProtocolError::Deserialize { source: err })
+        .map_err(|err| ProtocolError::JsonDeserialize { source: err })
         .context("Could not deserialize JSON request body")?;
     Ok(req_body)
 }

@@ -82,7 +82,7 @@ pub struct BatchStep {
     pub stmt: Stmt,
 }
 
-#[derive(Serialize, Debug)]
+#[derive(Serialize, Debug, Default)]
 pub struct BatchResult {
     pub step_results: Vec<Option<StmtResult>>,
     pub step_errors: Vec<Option<Error>>,
@@ -95,21 +95,64 @@ pub enum BatchCond {
     #[default]
     None,
     Ok {
-        step: i32,
+        step: u32,
     },
     Error {
-        step: i32,
+        step: u32,
     },
     Not {
         cond: Box<BatchCond>,
     },
-    And {
-        conds: Vec<BatchCond>,
-    },
-    Or {
-        conds: Vec<BatchCond>,
-    },
+    And(BatchCondList),
+    Or(BatchCondList),
     IsAutocommit {},
+}
+
+#[derive(Deserialize, prost::Message)]
+pub struct BatchCondList {
+    #[prost(message, repeated, tag = "1")]
+    pub conds: Vec<BatchCond>,
+}
+
+#[derive(Serialize, Debug, Default)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum CursorEntry {
+    #[serde(skip_deserializing)]
+    #[default]
+    None,
+    StepBegin(StepBeginEntry),
+    StepEnd(StepEndEntry),
+    StepError(StepErrorEntry),
+    Row {
+        row: Row,
+    },
+    Error {
+        error: Error,
+    },
+}
+
+#[derive(Serialize, prost::Message)]
+pub struct StepBeginEntry {
+    #[prost(uint32, tag = "1")]
+    pub step: u32,
+    #[prost(message, repeated, tag = "2")]
+    pub cols: Vec<Col>,
+}
+
+#[derive(Serialize, prost::Message)]
+pub struct StepEndEntry {
+    #[prost(uint64, tag = "1")]
+    pub affected_row_count: u64,
+    #[prost(sint64, optional, tag = "2")]
+    pub last_insert_rowid: Option<i64>,
+}
+
+#[derive(Serialize, prost::Message)]
+pub struct StepErrorEntry {
+    #[prost(uint32, tag = "1")]
+    pub step: u32,
+    #[prost(message, required, tag = "2")]
+    pub error: Error,
 }
 
 #[derive(Serialize, prost::Message)]
@@ -136,6 +179,12 @@ pub struct DescribeCol {
     pub name: String,
     #[prost(string, optional, tag = "2")]
     pub decltype: Option<String>,
+}
+
+#[derive(Serialize, prost::Message)]
+pub struct StreamState {
+    #[prost(bool, tag = "1")]
+    pub is_autocommit: bool,
 }
 
 #[derive(Serialize, Deserialize, Default, Clone, Debug)]

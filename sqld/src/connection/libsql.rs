@@ -553,6 +553,20 @@ impl super::Connection for LibSqlConnection {
 
         Ok(receiver.await?)
     }
+
+    async fn is_autocommit(&self) -> Result<bool> {
+        let (resp, receiver) = oneshot::channel();
+        let cb = Box::new(move |maybe_conn: Result<&mut Connection>| {
+            let res = maybe_conn.map(|c| c.is_autocommit());
+            if resp.send(res).is_err() {
+                anyhow::bail!("connection closed");
+            }
+            Ok(())
+        });
+
+        let _: Result<_, _> = self.sender.send(cb);
+        receiver.await?
+    }
 }
 
 #[cfg(test)]

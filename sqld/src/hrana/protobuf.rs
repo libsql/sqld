@@ -1,7 +1,7 @@
-use super::proto::{BatchCond, BatchResult, Value};
+use super::proto::{BatchCond, BatchCondList, BatchResult, CursorEntry, Value};
 use ::bytes::{Buf, BufMut, Bytes};
 use prost::encoding::{
-    bytes, double, int32, message, sint64, skip_field, string, DecodeContext, WireType,
+    bytes, double, message, sint64, skip_field, string, uint32, DecodeContext, WireType,
 };
 use prost::DecodeError;
 use std::mem::replace;
@@ -69,12 +69,12 @@ impl prost::Message for BatchCond {
         match tag {
             1 => {
                 let mut step = 0;
-                int32::merge(wire_type, &mut step, buf, ctx)?;
+                uint32::merge(wire_type, &mut step, buf, ctx)?;
                 *self = BatchCond::Ok { step }
             }
             2 => {
                 let mut step = 0;
-                int32::merge(wire_type, &mut step, buf, ctx)?;
+                uint32::merge(wire_type, &mut step, buf, ctx)?;
                 *self = BatchCond::Error { step }
             }
             3 => {
@@ -86,28 +86,21 @@ impl prost::Message for BatchCond {
                 *self = BatchCond::Not { cond };
             }
             4 => {
-                let conds = match replace(self, BatchCond::None) {
-                    BatchCond::And { conds } => conds,
-                    _ => Vec::new(),
+                let mut cond_list = match replace(self, BatchCond::None) {
+                    BatchCond::And(cond_list) => cond_list,
+                    _ => BatchCondList::default(),
                 };
-                let mut cond_list = BatchCondList { conds };
                 message::merge(wire_type, &mut cond_list, buf, ctx)?;
-                *self = BatchCond::And {
-                    conds: cond_list.conds,
-                };
+                *self = BatchCond::And(cond_list);
             }
             5 => {
-                let conds = match replace(self, BatchCond::None) {
-                    BatchCond::Or { conds } => conds,
-                    _ => Vec::new(),
+                let mut cond_list = match replace(self, BatchCond::None) {
+                    BatchCond::Or(cond_list) => cond_list,
+                    _ => BatchCondList::default(),
                 };
-                let mut cond_list = BatchCondList { conds };
                 message::merge(wire_type, &mut cond_list, buf, ctx)?;
-                *self = BatchCond::Or {
-                    conds: cond_list.conds,
-                };
+                *self = BatchCond::Or(cond_list);
             }
-
             6 => {
                 skip_field(wire_type, tag, buf, ctx)?;
                 *self = BatchCond::IsAutocommit {};
@@ -124,10 +117,50 @@ impl prost::Message for BatchCond {
     }
 }
 
-#[derive(prost::Message)]
-struct BatchCondList {
-    #[prost(message, repeated, tag = "1")]
-    conds: Vec<BatchCond>,
+impl prost::Message for CursorEntry {
+    fn encode_raw<B>(&self, buf: &mut B)
+    where
+        B: BufMut,
+        Self: Sized,
+    {
+        match self {
+            CursorEntry::None => {}
+            CursorEntry::StepBegin(entry) => message::encode(1, entry, buf),
+            CursorEntry::StepEnd(entry) => message::encode(2, entry, buf),
+            CursorEntry::StepError(entry) => message::encode(3, entry, buf),
+            CursorEntry::Row { row } => message::encode(4, row, buf),
+            CursorEntry::Error { error } => message::encode(5, error, buf),
+        }
+    }
+
+    fn encoded_len(&self) -> usize {
+        match self {
+            CursorEntry::None => 0,
+            CursorEntry::StepBegin(entry) => message::encoded_len(1, entry),
+            CursorEntry::StepEnd(entry) => message::encoded_len(2, entry),
+            CursorEntry::StepError(entry) => message::encoded_len(3, entry),
+            CursorEntry::Row { row } => message::encoded_len(4, row),
+            CursorEntry::Error { error } => message::encoded_len(5, error),
+        }
+    }
+
+    fn merge_field<B>(
+        &mut self,
+        _tag: u32,
+        _wire_type: WireType,
+        _buf: &mut B,
+        _ctx: DecodeContext,
+    ) -> Result<(), DecodeError>
+    where
+        B: Buf,
+        Self: Sized,
+    {
+        panic!("CursorEntry can only be encoded, not decoded")
+    }
+
+    fn clear(&mut self) {
+        *self = CursorEntry::None;
+    }
 }
 
 impl prost::Message for Value {

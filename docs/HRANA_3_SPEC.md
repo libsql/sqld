@@ -301,6 +301,9 @@ receives the response.
 The client should close even streams for which the `open_stream` request
 returned an error.
 
+If there is an open cursor for the stream, the cursor is closed together with
+the stream.
+
 > This request was introduced in Hrana 1.
 
 #### Execute a statement
@@ -410,7 +413,7 @@ requests for the given stream.
 type FetchCursorReq = {
     "type": "fetch_cursor",
     "cursor_id": int32,
-    "max_count": int32,
+    "max_count": uint32,
 }
 
 type FetchCursorResp = {
@@ -1013,7 +1016,7 @@ separated by a semicolon is not supported.
 type StmtResult = {
     "cols": Array<Col>,
     "rows": Array<Array<Value>>,
-    "affected_row_count": int32,
+    "affected_row_count": uint32,
     "last_insert_rowid": string | null,
 }
 
@@ -1062,8 +1065,8 @@ step is present and evaluates to false, the statement is not executed.
 
 ```typescript
 type BatchCond =
-    | { "type": "ok", "step": int32 }
-    | { "type": "error", "step": int32 }
+    | { "type": "ok", "step": uint32 }
+    | { "type": "error", "step": uint32 }
     | { "type": "not", "cond": BatchCond }
     | { "type": "and", "conds": Array<BatchCond> }
     | { "type": "or", "conds": Array<BatchCond> }
@@ -1127,13 +1130,13 @@ both peers don't need to keep the whole result in memory.
 ```typescript
 type StepBeginEntry = {
     "type": "step_begin",
-    "step_i": int32,
+    "step": uint32,
     "cols": Array<Col>,
 }
 
 type StepEndEntry = {
     "type": "step_end",
-    "affected_row_count": int32,
+    "affected_row_count": uint32,
     "last_insert_rowid": string | null,
 }
 
@@ -1162,7 +1165,7 @@ terminated by `step_end` or by `step_error`, described below.
 ```typescript
 type StepErrorEntry = {
     "type": "step_error",
-    "step_i": int32,
+    "step": uint32,
     "error": Error,
 }
 
@@ -1176,12 +1179,12 @@ The `step_error` entry indicates that the execution of a statement failed with
 an error. There are two ways in which the server may produce this entry:
 
 1. Before a `step_begin` entry was sent: this means that the statement failed
-   very early, without producing any results. The `step_i` field indicates which
+   very early, without producing any results. The `step` field indicates which
    step has failed (similar to the `step_begin` entry).
 2. After a `step_begin` entry was sent: in this case, the server has started
    executing the statement and produced `step_begin` (and perhaps a number of
-   `row` entries), but then encountered an error. The `step_i` field must in
-   this case be equal to the `step_i` of the currently processed step.
+   `row` entries), but then encountered an error. The `step` field must in this
+   case be equal to the `step` of the currently processed step.
 
 The `error` entry means that the execution of the whole batch has failed. This
 can be produced by the server at any time, and it is always the last entry in
@@ -1251,15 +1254,12 @@ results of expressions), `decltype` is `null`.
 ```typescript
 type StreamState = {
     "is_autocommit": boolean,
-    "total_changes": string,
 }
 ```
 
 The `StreamState` structure describes the state of a stream and the underlying
 SQL connection. `is_autocommit` is true iff the SQL connection is in autocommit
-state (not inside an explicit transaction). `total_changes` contains the total
-number of rows inserted, modified or deleted by SQL statements since the stream
-was opened. This is a 64-bit integer encoded as a string in JSON.
+state (not inside an explicit transaction).
 
 > This structure was introduced in Hrana 3.
 
@@ -1416,7 +1416,7 @@ message CloseCursorResp {
 
 message FetchCursorReq {
   int32 cursor_id = 1;
-  int32 max_count = 2;
+  uint32 max_count = 2;
 }
 
 message FetchCursorResp {
@@ -1632,8 +1632,8 @@ message BatchStep {
 
 message BatchCond {
   oneof cond {
-    int32 step_ok = 1;
-    int32 step_error = 2;
+    uint32 step_ok = 1;
+    uint32 step_error = 2;
     BatchCond not = 3;
     CondList and = 4;
     CondList or = 5;
@@ -1664,17 +1664,17 @@ message CursorEntry {
 }
 
 message StepBeginEntry {
-  uint32 step_i = 1;
+  uint32 step = 1;
   repeated Col cols = 2;
 }
 
 message StepEndEntry {
-  uint32 affected_row_count = 1;
+  uint64 affected_row_count = 1;
   optional sint64 last_insert_rowid = 2;
 }
 
 message StepErrorEntry {
-  uint32 step_i = 1;
+  uint32 step = 1;
   Error error = 2;
 }
 
@@ -1696,7 +1696,6 @@ message DescribeCol {
 
 message StreamState {
   bool is_autocommit = 1;
-  uint64 total_changes = 2;
 }
 
 message Value {
