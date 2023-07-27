@@ -25,9 +25,11 @@ pub enum DbConfig {
         max_log_size: usize,
         /// Interval at which to force compaction
         replication_log_compact_interval: Option<Duration>,
+        transaction_timeout_duration: Duration,
     },
     Replica {
         primary_node_id: NodeId,
         proxy_request_timeout_duration: Duration,
+        transaction_timeout_duration: Duration,
     },
 }

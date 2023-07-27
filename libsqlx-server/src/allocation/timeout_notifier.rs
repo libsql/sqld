@@ -83,6 +83,8 @@ mod test {
         let (monitor, notifier) = timeout_monitor();
         notifier.timeout_at(Instant::now() + Duration::from_millis(1));
         notifier.disable();
-        assert!(tokio::time::timeout(Duration::from_millis(10), monitor).await.is_err());
+        assert!(tokio::time::timeout(Duration::from_millis(10), monitor)
+            .await
+            .is_err());
     }
 }

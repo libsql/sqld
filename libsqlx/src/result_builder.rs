@@ -196,7 +196,7 @@ impl<R> StepResultsBuilder<R> {
     }
 }
 
-impl<R: RetChannel<Vec<StepResult>>> ResultBuilder for StepResultsBuilder<R> {
+impl<R: RetChannel<Result<Vec<StepResult>, String>>> ResultBuilder for StepResultsBuilder<R> {
     fn init(&mut self, _config: &QueryBuilderConfig) -> Result<(), QueryResultBuilderError> {
         self.current = None;
         self.step_results.clear();
@@ -248,8 +248,15 @@ impl<R: RetChannel<Vec<StepResult>>> ResultBuilder for StepResultsBuilder<R> {
         self.ret
             .take()
             .expect("finnalize called more than once")
-            .send(std::mem::take(&mut self.step_results));
+            .send(Ok(std::mem::take(&mut self.step_results)));
         Ok(true)
+    }
+
+    fn finnalize_error(&mut self, e: String) {
+        self.ret
+            .take()
+            .expect("finnalize called more than once")
+            .send(Err(e));
     }
 }
 
@@ -361,6 +368,10 @@ impl<B: ResultBuilder> ResultBuilder for Take<B> {
         frame_no: Option<FrameNo>,
     ) -> Result<bool, QueryResultBuilderError> {
         self.inner.finnalize(is_txn, frame_no)
+    }
+
+    fn finnalize_error(&mut self, e: String) {
+        self.inner.finnalize_error(e)
     }
 }
 

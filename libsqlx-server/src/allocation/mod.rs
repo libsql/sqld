@@ -64,12 +64,14 @@ pub enum Database {
     Primary {
         db: PrimaryDatabase,
         compact_interval: Option<Pin<Box<Interval>>>,
+        transaction_timeout_duration: Duration,
     },
     Replica {
         db: ProxyDatabase,
         injector_handle: mpsc::Sender<Frames>,
         primary_id: NodeId,
         last_received_frame_ts: Option<Instant>,
+        transaction_timeout_duration: Duration,
     },
 }
 
@@ -78,6 +80,7 @@ impl Database {
         if let Self::Primary {
             compact_interval: Some(ref mut interval),
             db,
+            ..
         } = self
         {
             ready!(interval.poll_tick(cx));
@@ -90,6 +93,13 @@ impl Database {
         }
 
         Poll::Pending
+    }
+
+    fn txn_timeout_duration(&self) -> Duration {
+        match self {
+            Database::Primary { transaction_timeout_duration, .. } => *transaction_timeout_duration,
+            Database::Replica { transaction_timeout_duration, .. } => *transaction_timeout_duration,
+        }
     }
 }
 
@@ -106,6 +116,7 @@ impl Database {
             DbConfig::Primary {
                 max_log_size,
                 replication_log_compact_interval,
+                transaction_timeout_duration,
             } => {
                 let (sender, receiver) = tokio::sync::watch::channel(0);
                 let db = LibsqlDatabase::new_primary(
@@ -137,11 +148,13 @@ impl Database {
                         snapshot_store: compaction_queue.snapshot_store.clone(),
                     },
                     compact_interval,
+                    transaction_timeout_duration,
                 }
             }
             DbConfig::Replica {
                 primary_node_id,
                 proxy_request_timeout_duration,
+                transaction_timeout_duration,
             } => {
                 let rdb =
                     LibsqlDatabase::new_replica(path, MAX_INJECTOR_BUFFER_CAPACITY, ()).unwrap();
@@ -168,6 +181,7 @@ impl Database {
                     injector_handle: sender,
                     primary_id: primary_node_id,
                     last_received_frame_ts: None,
+                    transaction_timeout_duration,
                 }
             }
         }
@@ -403,15 +417,13 @@ impl Allocation {
     }
 
     async fn new_conn(&mut self, remote: Option<(NodeId, u32)>) -> ConnectionHandle {
-        // TODO: make that configurable
-        const TXN_TIMEOUT_DURATION: Duration = Duration::from_secs(5);
-
         let conn_id = self.next_conn_id();
         let (timeout_monitor, notifier) = timeout_monitor();
+        let timeout = self.database.txn_timeout_duration();
         let conn = block_in_place(|| {
             self.database.connect(conn_id, self, move |is_txn| {
                 if is_txn {
-                    notifier.timeout_at(Instant::now() + TXN_TIMEOUT_DURATION);
+                    notifier.timeout_at(Instant::now() + timeout);
                 } else {
                     notifier.disable();
                 }
@@ -538,11 +550,15 @@ impl<C: ConnectionHandler> Connection<C> {
 mod test {
     use std::time::Duration;
 
-    use libsqlx::result_builder::ResultBuilder;
+    use heed::EnvOpenOptions;
+    use libsqlx::result_builder::{ResultBuilder, StepResultsBuilder};
+    use tempfile::tempdir;
     use tokio::sync::Notify;
 
     use crate::allocation::replica::ReplicaConnection;
+    use crate::init_dirs;
     use crate::linc::bus::Bus;
+    use crate::snapshot_store::SnapshotStore;
 
     use super::*;
 
@@ -598,5 +614,56 @@ mod test {
         notify.notified().await;
 
         handle.abort();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn txn_timeout() {
+        let bus = Arc::new(Bus::new(0, |_, _| async {}));
+        let tmp = tempdir().unwrap();
+        init_dirs(tmp.path()).await.unwrap();
+        let config = AllocConfig {
+            max_conccurent_connection: 10,
+            db_name: "test/db".to_owned(),
+            db_config: DbConfig::Primary {
+                max_log_size: 100000,
+                replication_log_compact_interval: None,
+                transaction_timeout_duration: Duration::from_millis(100),
+            },
+        };
+        let (sender, inbox) = mpsc::channel(10);
+        let env = EnvOpenOptions::new().max_dbs(10).map_size(4096 * 100).open(tmp.path()).unwrap();
+        let store = Arc::new(SnapshotStore::new(tmp.path().to_path_buf(), env.clone()).unwrap());
+        let queue = Arc::new(CompactionQueue::new(env, tmp.path().to_path_buf(), store).unwrap());
+        let mut alloc = Allocation {
+            inbox,
+            database: Database::from_config(
+                &config,
+                tmp.path().to_path_buf(),
+                bus.clone(),
+                queue,
+            ),
+            connections_futs: JoinSet::new(),
+            next_conn_id: 0,
+            max_concurrent_connections: config.max_conccurent_connection,
+            hrana_server: Arc::new(hrana::http::Server::new(None)),
+            dispatcher: bus, // TODO: handle self URL?
+            db_name: config.db_name,
+            connections: HashMap::new(),
+        };
+
+        let conn = alloc.new_conn(None).await;
+        tokio::spawn(alloc.run());
+
+        let (snd, rcv) = oneshot::channel();
+        let builder = StepResultsBuilder::new(snd);
+        conn.execute(Program::seq(&["begin"]), Box::new(builder)).await.unwrap();
+        rcv.await.unwrap().unwrap();
+
+        tokio::time::sleep(Duration::from_secs(1)).await;
+
+        let (snd, rcv) = oneshot::channel();
+        let builder = StepResultsBuilder::new(snd);
+        conn.execute(Program::seq(&["create table test (x)"]), Box::new(builder)).await.unwrap();
+        assert!(rcv.await.unwrap().is_err());
     }
 }

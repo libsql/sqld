@@ -110,7 +110,7 @@ pub async fn execute_sequence(conn: &ConnectionHandle, pgm: Program) -> color_ey
     let builder = StepResultsBuilder::new(snd);
     conn.execute(pgm, Box::new(builder)).await?;
 
-    rcv.await?.into_iter().try_for_each(|result| match result {
+    rcv.await?.map_err(|e| anyhow!("{e}"))?.into_iter().try_for_each(|result| match result {
         StepResult::Ok => Ok(()),
         StepResult::Err(e) => match stmt_error_from_sqld_error(e) {
             Ok(stmt_err) => Err(anyhow!(stmt_err)),
