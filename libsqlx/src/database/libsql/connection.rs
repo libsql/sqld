@@ -222,6 +222,10 @@ impl<T: LibsqlDbType> LibsqlConnection<T> {
 
         Ok((affected_row_count, last_insert_rowid))
     }
+
+    pub fn set_on_txn_status_change_cb(&mut self, cb: impl Fn(bool) + Send + Sync + 'static) {
+        self.on_txn_status_change_cb = Some(Box::new(cb));
+    }
 }
 
 fn eval_cond(cond: &Cond, results: &[bool]) -> Result<bool> {
