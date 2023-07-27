@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{ready, Context, Poll, Waker};
-use std::time::Instant;
+use std::time::{Instant, Duration};
 
 use either::Either;
 use futures::{Future, FutureExt};
@@ -395,12 +395,22 @@ impl Allocation {
     }
 
     async fn new_conn(&mut self, remote: Option<(NodeId, u32)>) -> ConnectionHandle {
+        // TODO: make that configurable
+        const TXN_TIMEOUT_DURATION: Duration = Duration::from_secs(5);
+
         let conn_id = self.next_conn_id();
-        let conn = block_in_place(|| self.database.connect(conn_id, self, |_|()));
+        let (timeout_monitor, notifier) = timeout_monitor();
+        let conn = block_in_place(|| self.database.connect(conn_id, self, move |is_txn| {
+            if is_txn {
+                notifier.timeout_at(Instant::now() + TXN_TIMEOUT_DURATION);
+            } else {
+                notifier.disable();
+            }
+        }));
+
         let (messages_sender, messages_receiver) = mpsc::channel(1);
         let (inbound_sender, inbound_receiver) = mpsc::channel(1);
         let id = remote.unwrap_or((self.dispatcher.node_id(), conn_id));
-        let (timeout_monitor, _) = timeout_monitor();
         let conn = Connection {
             id,
             conn,
@@ -548,9 +558,14 @@ impl<C: ConnectionHandler> Connection<C> {
                     self.conn.handle_inbound(inbound).await;
                 }
                 (Some(msg), _) = message_ready => {
-                    if self.last_txn_timedout{
+                    if self.last_txn_timedout {
                         self.last_txn_timedout = false;
-                        todo!("handle txn timeout");
+                        match msg {
+                            ConnectionMessage::Execute { mut builder, .. } => {
+                                let _ = builder.finnalize_error("transaction has timed out".into());
+                            },
+                            ConnectionMessage::Describe => todo!(),
+                        }
                     } else {
                         self.conn.handle_conn_message(msg).await;
                     }
