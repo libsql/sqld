@@ -9,7 +9,7 @@ use libsqlx::libsql::{LibsqlConnection, LibsqlDatabase, ReplicaType};
 use libsqlx::program::Program;
 use libsqlx::proxy::{WriteProxyConnection, WriteProxyDatabase};
 use libsqlx::result_builder::{Column, QueryBuilderConfig, ResultBuilder};
-use libsqlx::{DescribeResponse, Frame, FrameNo, Injector};
+use libsqlx::{Connection, DescribeResponse, Frame, FrameNo, Injector};
 use parking_lot::Mutex;
 use tokio::sync::mpsc;
 use tokio::task::block_in_place;
@@ -22,7 +22,7 @@ use crate::linc::Inbound;
 use crate::linc::{NodeId, Outbound};
 use crate::meta::DatabaseId;
 
-use super::{ConnectionHandler, ExecFn};
+use super::{ConnectionHandler, ConnectionMessage};
 
 type ProxyConnection = WriteProxyConnection<LibsqlConnection<ReplicaType>, RemoteConn>;
 pub type ProxyDatabase = WriteProxyDatabase<LibsqlDatabase<ReplicaType>, RemoteDb>;
@@ -287,40 +287,45 @@ impl ConnectionHandler for ReplicaConnection {
         Poll::Ready(())
     }
 
-    async fn handle_exec(&mut self, exec: ExecFn) {
-        block_in_place(|| exec(&mut self.conn));
-        let msg = {
-            let mut lock = self.conn.writer().inner.current_req.lock();
-            match *lock {
-                Some(ref mut req) if req.id.is_none() => {
-                    let program = req
-                        .pgm
-                        .take()
-                        .expect("unsent request should have a program");
-                    let req_id = self.next_req_id;
-                    self.next_req_id += 1;
-                    req.id = Some(req_id);
+    async fn handle_conn_message(&mut self, msg: ConnectionMessage) {
+        match msg {
+            ConnectionMessage::Execute { pgm, builder } => {
+                self.conn.execute_program(&pgm, builder).unwrap();
+                let msg = {
+                    let mut lock = self.conn.writer().inner.current_req.lock();
+                    match *lock {
+                        Some(ref mut req) if req.id.is_none() => {
+                            let program = req
+                                .pgm
+                                .take()
+                                .expect("unsent request should have a program");
+                            let req_id = self.next_req_id;
+                            self.next_req_id += 1;
+                            req.id = Some(req_id);
 
-                    let msg = Outbound {
-                        to: self.primary_node_id,
-                        enveloppe: Enveloppe {
-                            database_id: Some(self.database_id),
-                            message: Message::ProxyRequest {
-                                connection_id: self.connection_id,
-                                req_id,
-                                program,
-                            },
-                        },
-                    };
+                            let msg = Outbound {
+                                to: self.primary_node_id,
+                                enveloppe: Enveloppe {
+                                    database_id: Some(self.database_id),
+                                    message: Message::ProxyRequest {
+                                        connection_id: self.connection_id,
+                                        req_id,
+                                        program,
+                                    },
+                                },
+                            };
 
-                    Some(msg)
+                            Some(msg)
+                        }
+                        _ => None,
+                    }
+                };
+
+                if let Some(msg) = msg {
+                    self.dispatcher.dispatch(msg).await;
                 }
-                _ => None,
             }
-        };
-
-        if let Some(msg) = msg {
-            self.dispatcher.dispatch(msg).await;
+            ConnectionMessage::Describe => (),
         }
     }
 

@@ -1,5 +1,3 @@
-use std::time::Duration;
-
 use crate::connection::Connection;
 use crate::error::Error;
 
@@ -12,8 +10,6 @@ mod test_utils;
 pub use frame::{Frame, FrameHeader};
 
 pub type FrameNo = u64;
-
-pub const TXN_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Debug)]
 pub enum InjectError {}

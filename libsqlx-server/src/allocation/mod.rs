@@ -5,18 +5,20 @@ use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{ready, Context, Poll};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use either::Either;
 use libsqlx::libsql::LibsqlDatabase;
 use libsqlx::program::Program;
 use libsqlx::proxy::WriteProxyDatabase;
+use libsqlx::result_builder::ResultBuilder;
 use libsqlx::{Database as _, InjectableDatabase};
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::{block_in_place, JoinSet};
 use tokio::time::Interval;
 
 use crate::allocation::primary::FrameStreamer;
+use crate::allocation::timeout_notifier::timeout_monitor;
 use crate::compactor::CompactionQueue;
 use crate::hrana;
 use crate::hrana::http::handle_pipeline;
@@ -30,17 +32,25 @@ use self::config::{AllocConfig, DbConfig};
 use self::primary::compactor::Compactor;
 use self::primary::{PrimaryConnection, PrimaryDatabase, ProxyResponseBuilder};
 use self::replica::{ProxyDatabase, RemoteDb, ReplicaConnection, Replicator};
+use self::timeout_notifier::TimeoutMonitor;
 
 pub mod config;
 mod primary;
 mod replica;
+mod timeout_notifier;
 
 /// Maximum number of frame a Frame message is allowed to contain
 const FRAMES_MESSAGE_MAX_COUNT: usize = 5;
 /// Maximum number of frames in the injector buffer
 const MAX_INJECTOR_BUFFER_CAPACITY: usize = 32;
 
-type ExecFn = Box<dyn FnOnce(&mut dyn libsqlx::Connection) + Send>;
+pub enum ConnectionMessage {
+    Execute {
+        pgm: Program,
+        builder: Box<dyn ResultBuilder>,
+    },
+    Describe,
+}
 
 pub enum AllocationMessage {
     HranaPipelineReq {
@@ -54,12 +64,14 @@ pub enum Database {
     Primary {
         db: PrimaryDatabase,
         compact_interval: Option<Pin<Box<Interval>>>,
+        transaction_timeout_duration: Duration,
     },
     Replica {
         db: ProxyDatabase,
         injector_handle: mpsc::Sender<Frames>,
         primary_id: NodeId,
         last_received_frame_ts: Option<Instant>,
+        transaction_timeout_duration: Duration,
     },
 }
 
@@ -68,6 +80,7 @@ impl Database {
         if let Self::Primary {
             compact_interval: Some(ref mut interval),
             db,
+            ..
         } = self
         {
             ready!(interval.poll_tick(cx));
@@ -80,6 +93,13 @@ impl Database {
         }
 
         Poll::Pending
+    }
+
+    fn txn_timeout_duration(&self) -> Duration {
+        match self {
+            Database::Primary { transaction_timeout_duration, .. } => *transaction_timeout_duration,
+            Database::Replica { transaction_timeout_duration, .. } => *transaction_timeout_duration,
+        }
     }
 }
 
@@ -96,6 +116,7 @@ impl Database {
             DbConfig::Primary {
                 max_log_size,
                 replication_log_compact_interval,
+                transaction_timeout_duration,
             } => {
                 let (sender, receiver) = tokio::sync::watch::channel(0);
                 let db = LibsqlDatabase::new_primary(
@@ -127,11 +148,13 @@ impl Database {
                         snapshot_store: compaction_queue.snapshot_store.clone(),
                     },
                     compact_interval,
+                    transaction_timeout_duration,
                 }
             }
             DbConfig::Replica {
                 primary_node_id,
                 proxy_request_timeout_duration,
+                transaction_timeout_duration,
             } => {
                 let rdb =
                     LibsqlDatabase::new_replica(path, MAX_INJECTOR_BUFFER_CAPACITY, ()).unwrap();
@@ -158,27 +181,40 @@ impl Database {
                     injector_handle: sender,
                     primary_id: primary_node_id,
                     last_received_frame_ts: None,
+                    transaction_timeout_duration,
                 }
             }
         }
     }
 
-    fn connect(&self, connection_id: u32, alloc: &Allocation) -> impl ConnectionHandler {
+    fn connect(
+        &self,
+        connection_id: u32,
+        alloc: &Allocation,
+        on_txn_status_change_cb: impl Fn(bool) + Send + Sync + 'static,
+    ) -> impl ConnectionHandler {
         match self {
             Database::Primary {
                 db: PrimaryDatabase { db, .. },
                 ..
-            } => Either::Right(PrimaryConnection {
-                conn: db.connect().unwrap(),
-            }),
-            Database::Replica { db, primary_id, .. } => Either::Left(ReplicaConnection {
-                conn: db.connect().unwrap(),
-                connection_id,
-                next_req_id: 0,
-                primary_node_id: *primary_id,
-                database_id: DatabaseId::from_name(&alloc.db_name),
-                dispatcher: alloc.dispatcher.clone(),
-            }),
+            } => {
+                let mut conn = db.connect().unwrap();
+                conn.set_on_txn_status_change_cb(on_txn_status_change_cb);
+                Either::Right(PrimaryConnection { conn })
+            }
+            Database::Replica { db, primary_id, .. } => {
+                let mut conn = db.connect().unwrap();
+                conn.reader_mut()
+                    .set_on_txn_status_change_cb(on_txn_status_change_cb);
+                Either::Left(ReplicaConnection {
+                    conn,
+                    connection_id,
+                    next_req_id: 0,
+                    primary_node_id: *primary_id,
+                    database_id: DatabaseId::from_name(&alloc.db_name),
+                    dispatcher: alloc.dispatcher.clone(),
+                })
+            }
         }
     }
 
@@ -204,25 +240,21 @@ pub struct Allocation {
 
 #[derive(Clone)]
 pub struct ConnectionHandle {
-    exec: mpsc::Sender<ExecFn>,
+    messages: mpsc::Sender<ConnectionMessage>,
     inbound: mpsc::Sender<Inbound>,
 }
 
 impl ConnectionHandle {
-    pub async fn exec<F, R>(&self, f: F) -> crate::Result<R>
-    where
-        F: for<'a> FnOnce(&'a mut dyn libsqlx::Connection) -> R + Send + 'static,
-        R: Send + 'static,
-    {
-        let (sender, ret) = oneshot::channel();
-        let cb = move |conn: &mut dyn libsqlx::Connection| {
-            let res = f(conn);
-            let _ = sender.send(res);
-        };
-
-        self.exec.send(Box::new(cb)).await.unwrap();
-
-        Ok(ret.await?)
+    pub async fn execute(
+        &self,
+        pgm: Program,
+        builder: Box<dyn ResultBuilder>,
+    ) -> crate::Result<()> {
+        self.messages
+            .send(ConnectionMessage::Execute { pgm, builder })
+            .await
+            .unwrap();
+        Ok(())
     }
 }
 
@@ -362,18 +394,9 @@ impl Allocation {
         let dispatcher = self.dispatcher.clone();
         let database_id = DatabaseId::from_name(&self.db_name);
         let exec = |conn: ConnectionHandle| async move {
-            let _ = conn
-                .exec(move |conn| {
-                    let builder = ProxyResponseBuilder::new(
-                        dispatcher,
-                        database_id,
-                        to,
-                        req_id,
-                        connection_id,
-                    );
-                    conn.execute_program(&program, Box::new(builder)).unwrap();
-                })
-                .await;
+            let builder =
+                ProxyResponseBuilder::new(dispatcher, database_id, to, req_id, connection_id);
+            conn.execute(program, Box::new(builder)).await.unwrap();
         };
 
         if self.database.is_primary() {
@@ -395,20 +418,33 @@ impl Allocation {
 
     async fn new_conn(&mut self, remote: Option<(NodeId, u32)>) -> ConnectionHandle {
         let conn_id = self.next_conn_id();
-        let conn = block_in_place(|| self.database.connect(conn_id, self));
-        let (exec_sender, exec_receiver) = mpsc::channel(1);
+        let (timeout_monitor, notifier) = timeout_monitor();
+        let timeout = self.database.txn_timeout_duration();
+        let conn = block_in_place(|| {
+            self.database.connect(conn_id, self, move |is_txn| {
+                if is_txn {
+                    notifier.timeout_at(Instant::now() + timeout);
+                } else {
+                    notifier.disable();
+                }
+            })
+        });
+
+        let (messages_sender, messages_receiver) = mpsc::channel(1);
         let (inbound_sender, inbound_receiver) = mpsc::channel(1);
         let id = remote.unwrap_or((self.dispatcher.node_id(), conn_id));
         let conn = Connection {
             id,
             conn,
-            exec: exec_receiver,
+            messages: messages_receiver,
             inbound: inbound_receiver,
+            last_txn_timedout: false,
+            timeout_monitor,
         };
 
         self.connections_futs.spawn(conn.run());
         let handle = ConnectionHandle {
-            exec: exec_sender,
+            messages: messages_sender,
             inbound: inbound_sender,
         };
         self.connections
@@ -436,7 +472,7 @@ impl Allocation {
 #[async_trait::async_trait]
 trait ConnectionHandler: Send {
     fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<()>;
-    async fn handle_exec(&mut self, exec: ExecFn);
+    async fn handle_conn_message(&mut self, exec: ConnectionMessage);
     async fn handle_inbound(&mut self, msg: Inbound);
 }
 
@@ -453,10 +489,10 @@ where
         }
     }
 
-    async fn handle_exec(&mut self, exec: ExecFn) {
+    async fn handle_conn_message(&mut self, msg: ConnectionMessage) {
         match self {
-            Either::Left(l) => l.handle_exec(exec).await,
-            Either::Right(r) => r.handle_exec(exec).await,
+            Either::Left(l) => l.handle_conn_message(msg).await,
+            Either::Right(r) => r.handle_conn_message(msg).await,
         }
     }
     async fn handle_inbound(&mut self, msg: Inbound) {
@@ -470,21 +506,37 @@ where
 struct Connection<C> {
     id: (NodeId, u32),
     conn: C,
-    exec: mpsc::Receiver<ExecFn>,
+    messages: mpsc::Receiver<ConnectionMessage>,
     inbound: mpsc::Receiver<Inbound>,
+    last_txn_timedout: bool,
+    timeout_monitor: TimeoutMonitor,
 }
 
 impl<C: ConnectionHandler> Connection<C> {
     async fn run(mut self) -> (NodeId, u32) {
         loop {
-            let fut =
-                futures::future::join(self.exec.recv(), poll_fn(|cx| self.conn.poll_ready(cx)));
+            let message_ready =
+                futures::future::join(self.messages.recv(), poll_fn(|cx| self.conn.poll_ready(cx)));
+
             tokio::select! {
+                _ = &mut self.timeout_monitor => {
+                    self.last_txn_timedout = true;
+                }
                 Some(inbound) = self.inbound.recv() => {
                     self.conn.handle_inbound(inbound).await;
                 }
-                (Some(exec), _) = fut => {
-                    self.conn.handle_exec(exec).await;
+                (Some(msg), _) = message_ready => {
+                    if self.last_txn_timedout {
+                        self.last_txn_timedout = false;
+                        match msg {
+                            ConnectionMessage::Execute { mut builder, .. } => {
+                                let _ = builder.finnalize_error("transaction has timed out".into());
+                            },
+                            ConnectionMessage::Describe => todo!(),
+                        }
+                    } else {
+                        self.conn.handle_conn_message(msg).await;
+                    }
                 },
                 else => break,
             }
@@ -498,11 +550,15 @@ impl<C: ConnectionHandler> Connection<C> {
 mod test {
     use std::time::Duration;
 
-    use libsqlx::result_builder::ResultBuilder;
+    use heed::EnvOpenOptions;
+    use libsqlx::result_builder::{ResultBuilder, StepResultsBuilder};
+    use tempfile::tempdir;
     use tokio::sync::Notify;
 
     use crate::allocation::replica::ReplicaConnection;
+    use crate::init_dirs;
     use crate::linc::bus::Bus;
+    use crate::snapshot_store::SnapshotStore;
 
     use super::*;
 
@@ -526,13 +582,16 @@ mod test {
             dispatcher: bus,
         };
 
-        let (exec_sender, exec) = mpsc::channel(1);
+        let (messages_sender, messages) = mpsc::channel(1);
         let (_inbound_sender, inbound) = mpsc::channel(1);
+        let (timeout_monitor, _) = timeout_monitor();
         let connection = Connection {
             id: (0, 0),
             conn,
-            exec,
+            messages,
             inbound,
+            timeout_monitor,
+            last_txn_timedout: false,
         };
 
         let handle = tokio::spawn(connection.run());
@@ -546,16 +605,65 @@ mod test {
         }
 
         let builder = Box::new(Builder(notify.clone()));
-        exec_sender
-            .send(Box::new(move |conn| {
-                conn.execute_program(&Program::seq(&["create table test (c)"]), builder)
-                    .unwrap();
-            }))
-            .await
-            .unwrap();
+        let msg = ConnectionMessage::Execute {
+            pgm: Program::seq(&["create table test (c)"]),
+            builder,
+        };
+        messages_sender.send(msg).await.unwrap();
 
         notify.notified().await;
 
         handle.abort();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn txn_timeout() {
+        let bus = Arc::new(Bus::new(0, |_, _| async {}));
+        let tmp = tempdir().unwrap();
+        init_dirs(tmp.path()).await.unwrap();
+        let config = AllocConfig {
+            max_conccurent_connection: 10,
+            db_name: "test/db".to_owned(),
+            db_config: DbConfig::Primary {
+                max_log_size: 100000,
+                replication_log_compact_interval: None,
+                transaction_timeout_duration: Duration::from_millis(100),
+            },
+        };
+        let (sender, inbox) = mpsc::channel(10);
+        let env = EnvOpenOptions::new().max_dbs(10).map_size(4096 * 100).open(tmp.path()).unwrap();
+        let store = Arc::new(SnapshotStore::new(tmp.path().to_path_buf(), env.clone()).unwrap());
+        let queue = Arc::new(CompactionQueue::new(env, tmp.path().to_path_buf(), store).unwrap());
+        let mut alloc = Allocation {
+            inbox,
+            database: Database::from_config(
+                &config,
+                tmp.path().to_path_buf(),
+                bus.clone(),
+                queue,
+            ),
+            connections_futs: JoinSet::new(),
+            next_conn_id: 0,
+            max_concurrent_connections: config.max_conccurent_connection,
+            hrana_server: Arc::new(hrana::http::Server::new(None)),
+            dispatcher: bus, // TODO: handle self URL?
+            db_name: config.db_name,
+            connections: HashMap::new(),
+        };
+
+        let conn = alloc.new_conn(None).await;
+        tokio::spawn(alloc.run());
+
+        let (snd, rcv) = oneshot::channel();
+        let builder = StepResultsBuilder::new(snd);
+        conn.execute(Program::seq(&["begin"]), Box::new(builder)).await.unwrap();
+        rcv.await.unwrap().unwrap();
+
+        tokio::time::sleep(Duration::from_secs(1)).await;
+
+        let (snd, rcv) = oneshot::channel();
+        let builder = StepResultsBuilder::new(snd);
+        conn.execute(Program::seq(&["create table test (x)"]), Box::new(builder)).await.unwrap();
+        assert!(rcv.await.unwrap().is_err());
     }
 }

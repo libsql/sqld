@@ -7,7 +7,7 @@ use std::time::Duration;
 use bytes::Bytes;
 use libsqlx::libsql::{LibsqlDatabase, PrimaryType};
 use libsqlx::result_builder::ResultBuilder;
-use libsqlx::{Frame, FrameHeader, FrameNo, LogReadError, ReplicationLogger};
+use libsqlx::{Connection, Frame, FrameHeader, FrameNo, LogReadError, ReplicationLogger};
 use tokio::task::block_in_place;
 
 use crate::linc::bus::Dispatch;
@@ -16,7 +16,7 @@ use crate::linc::{Inbound, NodeId, Outbound};
 use crate::meta::DatabaseId;
 use crate::snapshot_store::SnapshotStore;
 
-use super::{ConnectionHandler, ExecFn, FRAMES_MESSAGE_MAX_COUNT};
+use super::{ConnectionHandler, ConnectionMessage, FRAMES_MESSAGE_MAX_COUNT};
 
 pub mod compactor;
 
@@ -317,8 +317,15 @@ impl ConnectionHandler for PrimaryConnection {
         Poll::Ready(())
     }
 
-    async fn handle_exec(&mut self, exec: ExecFn) {
-        block_in_place(|| exec(&mut self.conn));
+    async fn handle_conn_message(&mut self, msg: ConnectionMessage) {
+        match msg {
+            ConnectionMessage::Execute { pgm, builder } => {
+                self.conn.execute_program(&pgm, builder).unwrap()
+            }
+            ConnectionMessage::Describe => {
+                todo!()
+            }
+        }
     }
 
     async fn handle_inbound(&mut self, _msg: Inbound) {

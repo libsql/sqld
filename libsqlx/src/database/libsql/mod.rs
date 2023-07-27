@@ -178,6 +178,7 @@ impl<T: LibsqlDbType> Database for LibsqlDatabase<T> {
             QueryBuilderConfig {
                 max_size: Some(self.response_size_limit),
             },
+            None,
         )?)
     }
 }

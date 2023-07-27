@@ -63,6 +63,8 @@ pub struct Primary {
     #[serde(default = "default_max_log_size")]
     pub max_replication_log_size: bytesize::ByteSize,
     pub replication_log_compact_interval: Option<HumanDuration>,
+    #[serde(default = "default_txn_timeout")]
+    transaction_timeout_duration: HumanDuration,
 }
 
 #[derive(Debug)]
@@ -112,6 +114,8 @@ pub enum DbConfigReq {
         primary_node_id: NodeId,
         #[serde(default = "default_proxy_timeout")]
         proxy_request_timeout_duration: HumanDuration,
+        #[serde(default = "default_txn_timeout")]
+        transaction_timeout_duration: HumanDuration,
     },
 }
 
@@ -120,6 +124,10 @@ const fn default_max_log_size() -> bytesize::ByteSize {
 }
 
 const fn default_proxy_timeout() -> HumanDuration {
+    HumanDuration(Duration::from_secs(5))
+}
+
+const fn default_txn_timeout() -> HumanDuration {
     HumanDuration(Duration::from_secs(5))
 }
 
@@ -134,18 +142,22 @@ async fn allocate(
             DbConfigReq::Primary(Primary {
                 max_replication_log_size,
                 replication_log_compact_interval,
+                transaction_timeout_duration,
             }) => DbConfig::Primary {
                 max_log_size: max_replication_log_size.as_u64() as usize,
                 replication_log_compact_interval: replication_log_compact_interval
                     .as_deref()
                     .copied(),
+                transaction_timeout_duration: *transaction_timeout_duration,
             },
             DbConfigReq::Replica {
                 primary_node_id,
                 proxy_request_timeout_duration,
+                transaction_timeout_duration,
             } => DbConfig::Replica {
                 primary_node_id,
                 proxy_request_timeout_duration: *proxy_request_timeout_duration,
+                transaction_timeout_duration: *transaction_timeout_duration,
             },
         },
     };
