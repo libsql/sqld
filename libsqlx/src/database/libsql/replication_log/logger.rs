@@ -759,7 +759,6 @@ impl LogCompactor for () {
 pub type FrameNotifierCb = Box<dyn Fn(FrameNo) + Send + Sync + 'static>;
 
 pub struct ReplicationLogger {
-    pub generation: Generation,
     pub log_file: RwLock<LogFile>,
     compactor: Box<Mutex<dyn LogCompactor + Send>>,
     /// a notifier channel other tasks can subscribe to, and get notified when new frames become
@@ -807,15 +806,17 @@ impl ReplicationLogger {
         compactor: impl LogCompactor,
         new_frame_notifier: FrameNotifierCb,
     ) -> crate::Result<Self> {
-        let header = log_file.header();
-        let generation_start_frame_no = header.start_frame_no + header.frame_count;
-
-        Ok(Self {
-            generation: Generation::new(generation_start_frame_no),
+        let this = Self {
             compactor: Box::new(Mutex::new(compactor)),
             log_file: RwLock::new(log_file),
             new_frame_notifier,
-        })
+        };
+
+        if let Some(last_frame) = this.log_file.read().last_commited_frame_no() {
+            (this.new_frame_notifier)(last_frame);
+        }
+
+        Ok(this)
     }
 
     fn recover(

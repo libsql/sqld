@@ -27,6 +27,7 @@ use crate::linc::bus::Dispatch;
 use crate::linc::proto::{Frames, Message};
 use crate::linc::{Inbound, NodeId};
 use crate::meta::DatabaseId;
+use crate::replica_commit_store::ReplicaCommitStore;
 
 use self::config::{AllocConfig, DbConfig};
 use self::primary::compactor::Compactor;
@@ -97,8 +98,14 @@ impl Database {
 
     fn txn_timeout_duration(&self) -> Duration {
         match self {
-            Database::Primary { transaction_timeout_duration, .. } => *transaction_timeout_duration,
-            Database::Replica { transaction_timeout_duration, .. } => *transaction_timeout_duration,
+            Database::Primary {
+                transaction_timeout_duration,
+                ..
+            } => *transaction_timeout_duration,
+            Database::Replica {
+                transaction_timeout_duration,
+                ..
+            } => *transaction_timeout_duration,
         }
     }
 }
@@ -109,6 +116,7 @@ impl Database {
         path: PathBuf,
         dispatcher: Arc<dyn Dispatch>,
         compaction_queue: Arc<CompactionQueue>,
+        replica_commit_store: Arc<ReplicaCommitStore>,
     ) -> Self {
         let database_id = DatabaseId::from_name(&config.db_name);
 
@@ -118,7 +126,7 @@ impl Database {
                 replication_log_compact_interval,
                 transaction_timeout_duration,
             } => {
-                let (sender, receiver) = tokio::sync::watch::channel(0);
+                let (sender, receiver) = tokio::sync::watch::channel(None);
                 let db = LibsqlDatabase::new_primary(
                     path,
                     Compactor::new(
@@ -129,7 +137,7 @@ impl Database {
                     ),
                     false,
                     Box::new(move |fno| {
-                        let _ = sender.send(fno);
+                        let _ = sender.send(Some(fno));
                     }),
                 )
                 .unwrap();
@@ -156,8 +164,22 @@ impl Database {
                 proxy_request_timeout_duration,
                 transaction_timeout_duration,
             } => {
-                let rdb =
-                    LibsqlDatabase::new_replica(path, MAX_INJECTOR_BUFFER_CAPACITY, ()).unwrap();
+                let next_frame_no =
+                    block_in_place(|| replica_commit_store.get_commit_index(database_id))
+                        .map(|fno| fno + 1)
+                        .unwrap_or(0);
+
+                let commit_callback = Arc::new(move |fno| {
+                    replica_commit_store.commit(database_id, fno);
+                });
+
+                let rdb = LibsqlDatabase::new_replica(
+                    path,
+                    MAX_INJECTOR_BUFFER_CAPACITY,
+                    commit_callback,
+                )
+                .unwrap();
+
                 let wdb = RemoteDb {
                     proxy_request_timeout_duration,
                 };
@@ -167,7 +189,7 @@ impl Database {
 
                 let replicator = Replicator::new(
                     dispatcher,
-                    0,
+                    next_frame_no,
                     database_id,
                     primary_node_id,
                     injector,
@@ -556,9 +578,10 @@ mod test {
     use tokio::sync::Notify;
 
     use crate::allocation::replica::ReplicaConnection;
-    use crate::init_dirs;
     use crate::linc::bus::Bus;
+    use crate::replica_commit_store::ReplicaCommitStore;
     use crate::snapshot_store::SnapshotStore;
+    use crate::{init_dirs, replica_commit_store};
 
     use super::*;
 
@@ -567,7 +590,8 @@ mod test {
         let bus = Arc::new(Bus::new(0, |_, _| async {}));
         let _queue = bus.connect(1); // pretend connection to node 1
         let tmp = tempfile::TempDir::new().unwrap();
-        let read_db = LibsqlDatabase::new_replica(tmp.path().to_path_buf(), 1, ()).unwrap();
+        let read_db =
+            LibsqlDatabase::new_replica(tmp.path().to_path_buf(), 1, Arc::new(|_| ())).unwrap();
         let write_db = RemoteDb {
             proxy_request_timeout_duration: Duration::from_millis(100),
         };
@@ -631,9 +655,15 @@ mod test {
             },
         };
         let (sender, inbox) = mpsc::channel(10);
-        let env = EnvOpenOptions::new().max_dbs(10).map_size(4096 * 100).open(tmp.path()).unwrap();
+        let env = EnvOpenOptions::new()
+            .max_dbs(10)
+            .map_size(4096 * 100)
+            .open(tmp.path())
+            .unwrap();
         let store = Arc::new(SnapshotStore::new(tmp.path().to_path_buf(), env.clone()).unwrap());
-        let queue = Arc::new(CompactionQueue::new(env, tmp.path().to_path_buf(), store).unwrap());
+        let queue =
+            Arc::new(CompactionQueue::new(env.clone(), tmp.path().to_path_buf(), store).unwrap());
+        let replica_commit_store = Arc::new(ReplicaCommitStore::new(env.clone()));
         let mut alloc = Allocation {
             inbox,
             database: Database::from_config(
@@ -641,6 +671,7 @@ mod test {
                 tmp.path().to_path_buf(),
                 bus.clone(),
                 queue,
+                replica_commit_store,
             ),
             connections_futs: JoinSet::new(),
             next_conn_id: 0,
@@ -656,14 +687,18 @@ mod test {
 
         let (snd, rcv) = oneshot::channel();
         let builder = StepResultsBuilder::new(snd);
-        conn.execute(Program::seq(&["begin"]), Box::new(builder)).await.unwrap();
+        conn.execute(Program::seq(&["begin"]), Box::new(builder))
+            .await
+            .unwrap();
         rcv.await.unwrap().unwrap();
 
         tokio::time::sleep(Duration::from_secs(1)).await;
 
         let (snd, rcv) = oneshot::channel();
         let builder = StepResultsBuilder::new(snd);
-        conn.execute(Program::seq(&["create table test (x)"]), Box::new(builder)).await.unwrap();
+        conn.execute(Program::seq(&["create table test (x)"]), Box::new(builder))
+            .await
+            .unwrap();
         assert!(rcv.await.unwrap().is_err());
     }
 }

@@ -14,7 +14,7 @@ use replication_log::logger::{
     ReplicationLogger, ReplicationLoggerHook, ReplicationLoggerHookCtx, REPLICATION_METHODS,
 };
 
-use self::injector::InjectorCommitHandler;
+use self::injector::OnCommitCb;
 use self::replication_log::logger::FrameNotifierCb;
 
 pub use connection::LibsqlConnection;
@@ -44,7 +44,7 @@ impl LibsqlDbType for PrimaryType {
 }
 
 pub struct ReplicaType {
-    commit_handler: Option<Box<dyn InjectorCommitHandler>>,
+    on_commit_cb: OnCommitCb,
     injector_buffer_capacity: usize,
 }
 
@@ -101,10 +101,10 @@ impl LibsqlDatabase<ReplicaType> {
     pub fn new_replica(
         db_path: PathBuf,
         injector_buffer_capacity: usize,
-        injector_commit_handler: impl InjectorCommitHandler,
+        on_commit_cb: OnCommitCb,
     ) -> crate::Result<Self> {
         let ty = ReplicaType {
-            commit_handler: Some(Box::new(injector_commit_handler)),
+            on_commit_cb,
             injector_buffer_capacity,
         };
 
@@ -185,10 +185,9 @@ impl<T: LibsqlDbType> Database for LibsqlDatabase<T> {
 
 impl InjectableDatabase for LibsqlDatabase<ReplicaType> {
     fn injector(&mut self) -> crate::Result<Box<dyn super::Injector + Send + 'static>> {
-        let Some(commit_handler) = self.ty.commit_handler.take() else { panic!("there can be only one injector") };
         Ok(Box::new(Injector::new(
             &self.db_path,
-            commit_handler,
+            self.ty.on_commit_cb.clone(),
             self.ty.injector_buffer_capacity,
         )?))
     }
@@ -226,7 +225,7 @@ mod test {
     fn inject_libsql_db() {
         let temp = tempfile::tempdir().unwrap();
         let replica = ReplicaType {
-            commit_handler: Some(Box::new(())),
+            on_commit_cb: Arc::new(|_| ()),
             injector_buffer_capacity: 10,
         };
         let mut db = LibsqlDatabase::new(temp.path().to_path_buf(), replica);
@@ -269,7 +268,7 @@ mod test {
         let mut replica = LibsqlDatabase::new(
             temp_replica.path().to_path_buf(),
             ReplicaType {
-                commit_handler: Some(Box::new(())),
+                on_commit_cb: Arc::new(|_| ()),
                 injector_buffer_capacity: 10,
             },
         );

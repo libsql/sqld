@@ -10,8 +10,6 @@ use tokio::task::block_in_place;
 
 use crate::allocation::config::AllocConfig;
 
-type ExecFn = Box<dyn FnOnce(&mut libsqlx::libsql::LibsqlConnection<()>)>;
-
 pub struct Store {
     env: heed::Env,
     alloc_config_db: heed::Database<OwnedType<DatabaseId>, SerdeBincode<AllocConfig>>,

@@ -16,10 +16,8 @@ use tokio::task::block_in_place;
 use tokio::time::{timeout, Sleep};
 
 use crate::linc::bus::Dispatch;
-use crate::linc::proto::{BuilderStep, ProxyResponse};
-use crate::linc::proto::{Enveloppe, Frames, Message};
-use crate::linc::Inbound;
-use crate::linc::{NodeId, Outbound};
+use crate::linc::proto::{BuilderStep, Enveloppe, Frames, Message, ProxyResponse};
+use crate::linc::{Inbound, NodeId, Outbound};
 use crate::meta::DatabaseId;
 
 use super::{ConnectionHandler, ConnectionMessage};
@@ -166,6 +164,7 @@ impl Replicator {
                         });
                     }
                 }
+                // no news from primary for the past 5 secs, send a request again
                 Err(_) => self.query_replicate().await,
                 Ok(None) => break,
             }

@@ -14,12 +14,14 @@ use crate::linc::bus::Dispatch;
 use crate::linc::handler::Handler;
 use crate::linc::Inbound;
 use crate::meta::{DatabaseId, Store};
+use crate::replica_commit_store::ReplicaCommitStore;
 
 pub struct Manager {
     cache: Cache<DatabaseId, mpsc::Sender<AllocationMessage>>,
     meta_store: Arc<Store>,
     db_path: PathBuf,
     compaction_queue: Arc<CompactionQueue>,
+    replica_commit_store: Arc<ReplicaCommitStore>,
 }
 
 const MAX_ALLOC_MESSAGE_QUEUE_LEN: usize = 32;
@@ -30,12 +32,14 @@ impl Manager {
         meta_store: Arc<Store>,
         max_conccurent_allocs: u64,
         compaction_queue: Arc<CompactionQueue>,
+        replica_commit_store: Arc<ReplicaCommitStore>,
     ) -> Self {
         Self {
             cache: Cache::new(max_conccurent_allocs),
             meta_store,
             db_path,
             compaction_queue,
+            replica_commit_store,
         }
     }
 
@@ -60,6 +64,7 @@ impl Manager {
                     path,
                     dispatcher.clone(),
                     self.compaction_queue.clone(),
+                    self.replica_commit_store.clone(),
                 ),
                 connections_futs: JoinSet::new(),
                 next_conn_id: 0,
