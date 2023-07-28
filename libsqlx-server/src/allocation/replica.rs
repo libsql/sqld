@@ -172,6 +172,7 @@ impl Replicator {
     }
 
     async fn query_replicate(&mut self) {
+        tracing::debug!("seinding replication request");
         self.req_id += 1;
         self.next_seq = 0;
         // clear buffered, uncommitted frames
