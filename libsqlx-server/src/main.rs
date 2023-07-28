@@ -3,7 +3,6 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use clap::Parser;
-use color_eyre::eyre::Result;
 use compactor::{run_compactor_loop, CompactionQueue};
 use config::{AdminApiConfig, ClusterConfig, UserApiConfig};
 use http::admin::run_admin_api;
@@ -24,6 +23,7 @@ mod allocation;
 mod compactor;
 mod config;
 mod database;
+mod error;
 mod hrana;
 mod http;
 mod linc;
@@ -31,6 +31,8 @@ mod manager;
 mod meta;
 mod replica_commit_store;
 mod snapshot_store;
+
+pub type Result<T, E = error::Error> = std::result::Result<T, E>;
 
 #[derive(Debug, Parser)]
 struct Args {
@@ -40,10 +42,10 @@ struct Args {
 }
 
 async fn spawn_admin_api(
-    set: &mut JoinSet<Result<()>>,
+    set: &mut JoinSet<color_eyre::Result<()>>,
     config: &AdminApiConfig,
     bus: Arc<Bus<Arc<Manager>>>,
-) -> Result<()> {
+) -> color_eyre::Result<()> {
     let admin_api_listener = TcpListener::bind(config.addr).await?;
     let fut = run_admin_api(
         http::admin::Config { bus },
@@ -55,11 +57,11 @@ async fn spawn_admin_api(
 }
 
 async fn spawn_user_api(
-    set: &mut JoinSet<Result<()>>,
+    set: &mut JoinSet<color_eyre::Result<()>>,
     config: &UserApiConfig,
     manager: Arc<Manager>,
     bus: Arc<Bus<Arc<Manager>>>,
-) -> Result<()> {
+) -> color_eyre::Result<()> {
     let user_api_listener = TcpListener::bind(config.addr).await?;
     set.spawn(run_user_api(
         http::user::Config { manager, bus },
@@ -70,10 +72,10 @@ async fn spawn_user_api(
 }
 
 async fn spawn_cluster_networking(
-    set: &mut JoinSet<Result<()>>,
+    set: &mut JoinSet<color_eyre::Result<()>>,
     config: &ClusterConfig,
     bus: Arc<Bus<Arc<Manager>>>,
-) -> Result<()> {
+) -> color_eyre::Result<()> {
     let server = linc::server::Server::new(bus.clone());
 
     let listener = TcpListener::bind(config.addr).await?;
@@ -102,7 +104,7 @@ async fn init_dirs(db_path: &Path) -> color_eyre::Result<()> {
 }
 
 #[tokio::main(flavor = "multi_thread", worker_threads = 10)]
-async fn main() -> Result<()> {
+async fn main() -> color_eyre::Result<()> {
     init();
     let args = Args::parse();
     let config_str = read_to_string(args.config)?;

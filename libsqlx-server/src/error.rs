@@ -6,4 +6,10 @@ pub enum Error {
     InjectorExited,
     #[error("connection closed")]
     ConnectionClosed,
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
+    #[error("allocation closed")]
+    AllocationClosed,
+    #[error("internal error: {0}")]
+    Internal(String),
 }

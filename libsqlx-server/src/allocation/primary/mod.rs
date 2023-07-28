@@ -320,9 +320,7 @@ impl ConnectionHandler for PrimaryConnection {
     async fn handle_conn_message(&mut self, msg: ConnectionMessage) {
         match msg {
             ConnectionMessage::Execute { pgm, builder } => {
-                block_in_place(|| {
-                    self.conn.execute_program(&pgm, builder).unwrap()
-                })
+                block_in_place(|| self.conn.execute_program(&pgm, builder).unwrap())
             }
             ConnectionMessage::Describe => {
                 todo!()

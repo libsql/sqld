@@ -10,7 +10,7 @@ use crate::allocation::ConnectionHandle;
 
 use self::proto::{PipelineRequestBody, PipelineResponseBody};
 
-use super::ProtocolError;
+use super::error::{HranaError, ProtocolError, StreamError};
 
 pub mod proto;
 mod request;
@@ -42,7 +42,7 @@ impl Server {
     }
 }
 
-fn handle_index() -> color_eyre::Result<hyper::Response<hyper::Body>> {
+fn handle_index() -> crate::Result<hyper::Response<hyper::Body>, HranaError> {
     Ok(text_response(
         hyper::StatusCode::OK,
         "Hello, this is HTTP API v2 (Hrana over HTTP)".into(),
@@ -52,9 +52,9 @@ fn handle_index() -> color_eyre::Result<hyper::Response<hyper::Body>> {
 pub async fn handle_pipeline<F, Fut>(
     server: Arc<Server>,
     req: PipelineRequestBody,
-    ret: oneshot::Sender<color_eyre::Result<PipelineResponseBody>>,
+    ret: oneshot::Sender<crate::Result<PipelineResponseBody, HranaError>>,
     mk_conn: F,
-) -> color_eyre::Result<()>
+) -> crate::Result<(), HranaError>
 where
     F: FnOnce() -> Fut,
     Fut: Future<Output = crate::Result<ConnectionHandle>>,
@@ -66,8 +66,7 @@ where
             let mut results = Vec::with_capacity(req.requests.len());
             for request in req.requests.into_iter() {
                 let result = request::handle(&mut stream_guard, request)
-                    .await
-                    .context("Could not execute a request in pipeline")?;
+                    .await?;
                 results.push(result);
             }
 
@@ -100,7 +99,7 @@ fn protocol_error_response(err: ProtocolError) -> hyper::Response<hyper::Body> {
     text_response(hyper::StatusCode::BAD_REQUEST, err.to_string())
 }
 
-fn stream_error_response(err: stream::StreamError) -> hyper::Response<hyper::Body> {
+fn stream_error_response(err: StreamError) -> hyper::Response<hyper::Body> {
     json_response(
         hyper::StatusCode::INTERNAL_SERVER_ERROR,
         &proto::Error {

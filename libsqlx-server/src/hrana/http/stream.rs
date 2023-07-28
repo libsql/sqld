@@ -5,15 +5,14 @@ use std::sync::Arc;
 use std::{future, mem, task};
 
 use base64::prelude::{Engine as _, BASE64_STANDARD_NO_PAD};
-use color_eyre::eyre::{anyhow, WrapErr};
 use futures::Future;
 use hmac::Mac as _;
 use priority_queue::PriorityQueue;
 use tokio::time::{Duration, Instant};
 
-use super::super::ProtocolError;
 use super::Server;
 use crate::allocation::ConnectionHandle;
+use crate::hrana::error::{ProtocolError, HranaError, StreamError};
 
 /// Mutable state related to streams, owned by [`Server`] and protected with a mutex.
 pub struct ServerStreamState {
@@ -78,15 +77,6 @@ pub struct Guard {
     release: bool,
 }
 
-/// An unrecoverable error that should close the stream. The difference from [`ProtocolError`] is
-/// that a correct client may trigger this error, it does not mean that the protocol has been
-/// violated.
-#[derive(thiserror::Error, Debug)]
-pub enum StreamError {
-    #[error("The stream has expired due to inactivity")]
-    StreamExpired,
-}
-
 impl ServerStreamState {
     pub fn new() -> Self {
         Self {
@@ -106,7 +96,7 @@ pub async fn acquire<F, Fut>(
     server: Arc<Server>,
     baton: Option<&str>,
     mk_conn: F,
-) -> color_eyre::Result<Guard>
+) -> crate::Result<Guard, HranaError>
 where
     F: FnOnce() -> Fut,
     Fut: Future<Output = crate::Result<ConnectionHandle>>,
@@ -125,19 +115,20 @@ where
                     .into())
                 }
                 Some(Handle::Acquired) => {
-                    return Err(ProtocolError::BatonReused)
-                        .context(format!("Stream handle for {stream_id} is acquired"));
+                    Err(ProtocolError::BatonReused)?
+                        // .context(format!("Stream handle for {stream_id} is acquired"));
                 }
                 Some(Handle::Expired) => {
-                    return Err(StreamError::StreamExpired)
-                        .context(format!("Stream handle for {stream_id} is expired"));
+                    Err(StreamError::StreamExpired)?
+                        // .context(format!("Stream handle for {stream_id} is expired"));
                 }
                 Some(Handle::Available(stream)) => {
                     if stream.baton_seq != baton_seq {
-                        return Err(ProtocolError::BatonReused).context(format!(
-                            "Expected baton seq {}, received {baton_seq}",
-                            stream.baton_seq
-                        ));
+                        Err(ProtocolError::BatonReused)?
+                        //     .context(format!(
+                        //     "Expected baton seq {}, received {baton_seq}",
+                        //     stream.baton_seq
+                        // ));
                     }
                 }
             };
@@ -156,7 +147,7 @@ where
         None => {
             let conn = mk_conn()
                 .await
-                .context("Could not create a database connection")?;
+                .map_err(|e| HranaError::Internal(e.into()))?;
 
             let mut state = server.stream_state.lock();
             let stream = Box::new(Stream {
@@ -289,7 +280,7 @@ fn encode_baton(server: &Server, stream_id: u64, baton_seq: u64) -> String {
 /// Decodes a baton encoded with `encode_baton()` and returns `(stream_id, baton_seq)`. Always
 /// returns a [`ProtocolError::BatonInvalid`] if the baton is invalid, but it attaches an anyhow
 /// context that describes the precise cause.
-fn decode_baton(server: &Server, baton_str: &str) -> color_eyre::Result<(u64, u64)> {
+fn decode_baton(server: &Server, baton_str: &str) -> crate::Result<(u64, u64), HranaError> {
     let baton_data = BASE64_STANDARD_NO_PAD.decode(baton_str).map_err(|err| {
         ProtocolError::BatonInvalid(format!("Could not base64-decode baton: {err}"))
     })?;
@@ -308,9 +299,9 @@ fn decode_baton(server: &Server, baton_str: &str) -> color_eyre::Result<(u64, u6
     let mut hmac = hmac::Hmac::<sha2::Sha256>::new_from_slice(&server.baton_key).unwrap();
     hmac.update(payload);
     hmac.verify_slice(received_mac).map_err(|_| {
-        anyhow!(ProtocolError::BatonInvalid(
+        ProtocolError::BatonInvalid(
             "Invalid MAC on baton".to_string()
-        ))
+        )
     })?;
 
     let stream_id = u64::from_be_bytes(payload[0..8].try_into().unwrap());

@@ -278,7 +278,8 @@ mod test {
             .execute_program(
                 &Program::seq(&["create table test (x)", "insert into test values (42)"]),
                 Box::new(()),
-            ).unwrap();
+            )
+            .unwrap();
 
         let logfile = primary.ty.logger.log_file.read();
 

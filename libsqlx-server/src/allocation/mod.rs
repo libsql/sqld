@@ -20,7 +20,9 @@ use tokio::time::Interval;
 use crate::allocation::primary::FrameStreamer;
 use crate::allocation::timeout_notifier::timeout_monitor;
 use crate::compactor::CompactionQueue;
+use crate::error::Error;
 use crate::hrana;
+use crate::hrana::error::HranaError;
 use crate::hrana::http::handle_pipeline;
 use crate::hrana::http::proto::{PipelineRequestBody, PipelineResponseBody};
 use crate::linc::bus::Dispatch;
@@ -39,9 +41,6 @@ pub mod config;
 mod primary;
 mod replica;
 mod timeout_notifier;
-mod error;
-
-pub type Result<T, E = error::Error> = std::result::Result<T, E>;
 
 /// Maximum number of frame a Frame message is allowed to contain
 const FRAMES_MESSAGE_MAX_COUNT: usize = 5;
@@ -59,7 +58,7 @@ pub enum ConnectionMessage {
 pub enum AllocationMessage {
     HranaPipelineReq {
         req: PipelineRequestBody,
-        ret: oneshot::Sender<crate::Result<PipelineResponseBody>>,
+        ret: oneshot::Sender<crate::Result<PipelineResponseBody, HranaError>>,
     },
     Inbound(Inbound),
 }
@@ -120,7 +119,7 @@ impl Database {
         dispatcher: Arc<dyn Dispatch>,
         compaction_queue: Arc<CompactionQueue>,
         replica_commit_store: Arc<ReplicaCommitStore>,
-    ) -> Result<Self> {
+    ) -> crate::Result<Self> {
         let database_id = DatabaseId::from_name(&config.db_name);
 
         match config.db_config {
@@ -215,7 +214,7 @@ impl Database {
         connection_id: u32,
         alloc: &Allocation,
         on_txn_status_change_cb: impl Fn(bool) + Send + Sync + 'static,
-    ) -> Result<impl ConnectionHandler> {
+    ) -> crate::Result<impl ConnectionHandler> {
         match self {
             Database::Primary {
                 db: PrimaryDatabase { db, .. },
@@ -268,11 +267,7 @@ pub struct ConnectionHandle {
 }
 
 impl ConnectionHandle {
-    pub async fn execute(
-        &self,
-        pgm: Program,
-        builder: Box<dyn ResultBuilder>,
-    ) {
+    pub async fn execute(&self, pgm: Program, builder: Box<dyn ResultBuilder>) {
         let msg = ConnectionMessage::Execute { pgm, builder };
         if let Err(e) = self.messages.send(msg).await {
             let ConnectionMessage::Execute { mut builder, .. } = e.0 else { unreachable!() };
@@ -316,7 +311,7 @@ impl Allocation {
         }
     }
 
-    async fn handle_inbound(&mut self, msg: Inbound) -> Result<()> {
+    async fn handle_inbound(&mut self, msg: Inbound) -> crate::Result<()> {
         debug_assert_eq!(
             msg.enveloppe.database_id,
             Some(DatabaseId::from_name(&self.db_name))
@@ -375,16 +370,19 @@ impl Allocation {
                 }
                 Database::Replica { .. } => todo!("not a primary!"),
             },
-            Message::Frames(frames) => if let Database::Replica {
-                injector_handle,
-                last_received_frame_ts,
-                ..
-            } = &mut self.database {
-                *last_received_frame_ts = Some(Instant::now());
-                if injector_handle.send(frames).await.is_err() {
-                    return Err(error::Error::InjectorExited)
+            Message::Frames(frames) => {
+                if let Database::Replica {
+                    injector_handle,
+                    last_received_frame_ts,
+                    ..
+                } = &mut self.database
+                {
+                    *last_received_frame_ts = Some(Instant::now());
+                    if injector_handle.send(frames).await.is_err() {
+                        return Err(Error::InjectorExited);
+                    }
                 }
-            },
+            }
             Message::ProxyRequest {
                 connection_id,
                 req_id,
@@ -433,20 +431,19 @@ impl Allocation {
                 Some(handle) => {
                     tokio::spawn(async move { handle.execute(program, Box::new(builder)).await });
                 }
-                None => {
-                    match self.new_conn(Some((to, connection_id))).await {
-                        Ok(handle) => { 
-                            tokio::spawn(async move { handle.execute(program, Box::new(builder)).await });
-                        },
-                        Err(e) => builder.finnalize_error(format!("error creating connection: {e}")),
-
+                None => match self.new_conn(Some((to, connection_id))).await {
+                    Ok(handle) => {
+                        tokio::spawn(
+                            async move { handle.execute(program, Box::new(builder)).await },
+                        );
                     }
-                }
+                    Err(e) => builder.finnalize_error(format!("error creating connection: {e}")),
+                },
             }
         }
     }
 
-    async fn new_conn(&mut self, remote: Option<(NodeId, u32)>) -> Result<ConnectionHandle> {
+    async fn new_conn(&mut self, remote: Option<(NodeId, u32)>) -> crate::Result<ConnectionHandle> {
         let conn_id = self.next_conn_id();
         let (timeout_monitor, notifier) = timeout_monitor();
         let timeout = self.database.txn_timeout_duration();
@@ -591,10 +588,10 @@ mod test {
     use tokio::sync::Notify;
 
     use crate::allocation::replica::ReplicaConnection;
+    use crate::init_dirs;
     use crate::linc::bus::Bus;
     use crate::replica_commit_store::ReplicaCommitStore;
     use crate::snapshot_store::SnapshotStore;
-    use crate::init_dirs;
 
     use super::*;
 
@@ -685,7 +682,8 @@ mod test {
                 bus.clone(),
                 queue,
                 replica_commit_store,
-            ).unwrap(),
+            )
+            .unwrap(),
             connections_futs: JoinSet::new(),
             next_conn_id: 0,
             max_concurrent_connections: config.max_conccurent_connection,

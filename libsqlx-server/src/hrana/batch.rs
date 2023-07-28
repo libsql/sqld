@@ -1,20 +1,19 @@
 use std::collections::HashMap;
 
 use crate::allocation::ConnectionHandle;
-use crate::hrana::stmt::StmtError;
 
+use super::error::{ProtocolError, StmtError, HranaError};
 use super::result_builder::HranaBatchProtoBuilder;
 use super::stmt::{proto_stmt_to_query, stmt_error_from_sqld_error};
-use super::{proto, ProtocolError, Version};
+use super::{proto, Version};
 
-use color_eyre::eyre::anyhow;
 use libsqlx::analysis::Statement;
 use libsqlx::program::{Cond, Program, Step};
 use libsqlx::query::{Params, Query};
 use libsqlx::result_builder::{StepResult, StepResultsBuilder};
 use tokio::sync::oneshot;
 
-fn proto_cond_to_cond(cond: &proto::BatchCond, max_step_i: usize) -> color_eyre::Result<Cond> {
+fn proto_cond_to_cond(cond: &proto::BatchCond, max_step_i: usize) -> crate::Result<Cond, ProtocolError> {
     let try_convert_step = |step: i32| -> Result<usize, ProtocolError> {
         let step = usize::try_from(step).map_err(|_| ProtocolError::BatchCondBadStep)?;
         if step >= max_step_i {
@@ -36,13 +35,13 @@ fn proto_cond_to_cond(cond: &proto::BatchCond, max_step_i: usize) -> color_eyre:
             conds: conds
                 .iter()
                 .map(|cond| proto_cond_to_cond(cond, max_step_i))
-                .collect::<color_eyre::Result<_>>()?,
+                .collect::<crate::Result<_, _>>()?,
         },
         proto::BatchCond::Or { conds } => Cond::Or {
             conds: conds
                 .iter()
                 .map(|cond| proto_cond_to_cond(cond, max_step_i))
-                .collect::<color_eyre::Result<_>>()?,
+                .collect::<crate::Result<_, _>>()?,
         },
     };
 
@@ -53,7 +52,7 @@ pub fn proto_batch_to_program(
     batch: &proto::Batch,
     sqls: &HashMap<i32, String>,
     version: Version,
-) -> color_eyre::Result<Program> {
+) -> crate::Result<Program, HranaError> {
     let mut steps = Vec::with_capacity(batch.steps.len());
     for (step_i, step) in batch.steps.iter().enumerate() {
         let query = proto_stmt_to_query(&step.stmt, sqls, version)?;
@@ -73,17 +72,17 @@ pub fn proto_batch_to_program(
 pub async fn execute_batch(
     db: &ConnectionHandle,
     pgm: Program,
-) -> color_eyre::Result<proto::BatchResult> {
+) -> crate::Result<proto::BatchResult, HranaError> {
     let (builder, ret) = HranaBatchProtoBuilder::new();
     db.execute(pgm, Box::new(builder)).await;
 
-    Ok(ret.await?)
+    Ok(ret.await.unwrap())
 }
 
-pub fn proto_sequence_to_program(sql: &str) -> color_eyre::Result<Program> {
+pub fn proto_sequence_to_program(sql: &str) -> crate::Result<Program, StmtError> {
     let stmts = Statement::parse(sql)
         .collect::<libsqlx::Result<Vec<_>>>()
-        .map_err(|err| anyhow!(StmtError::SqlParse { source: err.into() }))?;
+        .map_err(|err| StmtError::SqlParse { source: err.into() })?;
 
     let steps = stmts
         .into_iter()
@@ -105,20 +104,21 @@ pub fn proto_sequence_to_program(sql: &str) -> color_eyre::Result<Program> {
     Ok(Program { steps })
 }
 
-pub async fn execute_sequence(conn: &ConnectionHandle, pgm: Program) -> color_eyre::Result<()> {
+pub async fn execute_sequence(conn: &ConnectionHandle, pgm: Program) -> crate::Result<(), HranaError> {
     let (snd, rcv) = oneshot::channel();
     let builder = StepResultsBuilder::new(snd);
     conn.execute(pgm, Box::new(builder)).await;
 
-    rcv.await?
-        .map_err(|e| anyhow!("{e}"))?
+    rcv.await
+        .map_err(|e| HranaError::Internal(e.into()))?
+        .map_err(|e| HranaError::Stmt(StmtError::QueryError(e)))?
         .into_iter()
         .try_for_each(|result| match result {
             StepResult::Ok => Ok(()),
-            StepResult::Err(e) => match stmt_error_from_sqld_error(e) {
-                Ok(stmt_err) => Err(anyhow!(stmt_err)),
-                Err(sqld_err) => Err(anyhow!(sqld_err)),
+            StepResult::Err(e) => { 
+                let stmt_err = stmt_error_from_sqld_error(e)?;
+                Err(stmt_err)?
             },
-            StepResult::Skipped => Err(anyhow!("Statement in sequence was not executed")),
+            StepResult::Skipped => Err(HranaError::StatementSkipped),
         })
 }

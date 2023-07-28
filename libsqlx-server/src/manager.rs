@@ -65,7 +65,8 @@ impl Manager {
                     dispatcher.clone(),
                     self.compaction_queue.clone(),
                     self.replica_commit_store.clone(),
-                ).unwrap(),
+                )
+                .unwrap(),
                 connections_futs: JoinSet::new(),
                 next_conn_id: 0,
                 max_concurrent_connections: config.max_conccurent_connection,
