@@ -229,7 +229,7 @@ type Request =
     | DescribeReq
     | StoreSqlReq
     | CloseSqlReq
-    | GetStateReq
+    | GetAutocommitReq
 
 type Response =
     | OpenStreamResp
@@ -243,7 +243,7 @@ type Response =
     | DescribeResp
     | StoreSqlReq
     | CloseSqlReq
-    | GetStateResp
+    | GetAutocommitResp
 ```
 
 The type of the request and response is determined by its `type` field. The
@@ -537,22 +537,22 @@ describing a statement.
 
 > This request was introduced in Hrana 2.
 
-#### Get the stream state
+#### Get the autocommit state
 
 ```typescript
-type GetStateReq = {
-    "type": "get_state",
+type GetAutocommitReq = {
+    "type": "get_autocommit",
     "stream_id": int32,
 }
 
-type GetStateResp = {
-    "type": "get_state",
-    "state": StreamState,
+type GetAutocommitResp = {
+    "type": "get_autocommit",
+    "is_autocommit": bool,
 }
 ```
 
-The `get_state` request can be used to obtain the current state of the SQL
-connection underlying the stream (such as the autocommit status).
+The `get_autocommit` request can be used to check whether the stream is in
+autocommit state (not inside an explicit transaction).
 
 > This request was introduced in Hrana 3.
 
@@ -765,7 +765,7 @@ type StreamRequest =
     | DescribeStreamReq
     | StoreSqlStreamReq
     | CloseSqlStreamReq
-    | GetStateStreamReq
+    | GetAutocommitStreamReq
 
 type StreamResponse =
     | CloseStreamResp
@@ -775,7 +775,7 @@ type StreamResponse =
     | DescribeStreamResp
     | StoreSqlStreamResp
     | CloseSqlStreamResp
-    | GetStateStreamReq
+    | GetAutocommitStreamReq
 ```
 
 #### Close stream
@@ -914,18 +914,18 @@ stream.
 #### Get the stream state
 
 ```typescript
-type GetStateStreamReq = {
-    "type": "get_state",
+type GetAutocommitStreamReq = {
+    "type": "get_autocommit",
 }
 
-type GetStateStreamResp = {
-    "type": "get_state",
-    "state": StreamState,
+type GetAutocommitStreamResp = {
+    "type": "get_autocommit",
+    "is_autocommit": bool,
 }
 ```
 
-The `get_state` request has the same semantics as the `get_state` request in
-Hrana over WebSocket.
+The `get_autocommit` request has the same semantics as the `get_autocommit`
+request in Hrana over WebSocket.
 
 > This request was introduced in Hrana 3.
 
@@ -1249,20 +1249,6 @@ results of expressions), `decltype` is `null`.
 
 > This structure was introduced in Hrana 2.
 
-### Stream state
-
-```typescript
-type StreamState = {
-    "is_autocommit": boolean,
-}
-```
-
-The `StreamState` structure describes the state of a stream and the underlying
-SQL connection. `is_autocommit` is true iff the SQL connection is in autocommit
-state (not inside an explicit transaction).
-
-> This structure was introduced in Hrana 3.
-
 ### Values
 
 ```typescript
@@ -1339,7 +1325,7 @@ message RequestMsg {
     DescribeReq describe = 10;
     StoreSqlReq store_sql = 11;
     CloseSqlReq close_sql = 12;
-    GetStateReq get_state = 13;
+    GetAutocommitReq get_autocommit = 13;
   }
 }
 
@@ -1357,7 +1343,7 @@ message ResponseOkMsg {
     DescribeResp describe = 10;
     StoreSqlResp store_sql = 11;
     CloseSqlResp close_sql = 12;
-    GetStateResp get_state = 13;
+    GetAutocommitResp get_autocommit = 13;
   }
 }
 
@@ -1457,6 +1443,14 @@ message DescribeReq {
 message DescribeResp {
   DescribeResult result = 1;
 }
+
+message GetAutocommitReq {
+  int32 stream_id = 1;
+}
+
+message GetAutocommitResp {
+  bool is_autocommit = 1;
+}
 ```
 
 ### Hrana over HTTP
@@ -1502,7 +1496,7 @@ message StreamRequest {
     DescribeStreamReq describe = 5;
     StoreSqlStreamReq store_sql = 6;
     CloseSqlStreamReq close_sql = 7;
-    GetStateStreamReq get_state = 8;
+    GetAutocommitStreamReq get_autocommit = 8;
   }
 }
 
@@ -1515,7 +1509,7 @@ message StreamResponse {
     DescribeStreamResp describe = 5;
     StoreSqlStreamResp store_sql = 6;
     CloseSqlStreamResp close_sql = 7;
-    GetStateStreamResp get_state = 8;
+    GetAutocommitStreamResp get_autocommit = 8;
   }
 }
 
@@ -1573,11 +1567,11 @@ message CloseSqlStreamReq {
 message CloseSqlStreamResp {
 }
 
-message GetStateStreamReq {
+message GetAutocommitStreamReq {
 }
 
-message GetStateStreamResp {
-  StreamState state = 1;
+message GetAutocommitStreamResp {
+  bool is_autocommit = 1;
 }
 ```
 
@@ -1692,10 +1686,6 @@ message DescribeParam {
 message DescribeCol {
   string name = 1;
   optional string decltype = 2;
-}
-
-message StreamState {
-  bool is_autocommit = 1;
 }
 
 message Value {

@@ -386,16 +386,16 @@ pub(super) async fn handle_request<D: Connection>(
                 }))
             });
         }
-        proto::Request::GetState(req) => {
-            ensure_version!(Version::Hrana3, "The `get_state` request");
+        proto::Request::GetAutocommit(req) => {
+            ensure_version!(Version::Hrana3, "The `get_autocommit` request");
             let stream_id = req.stream_id;
             let stream_hnd = get_stream_mut!(stream_id);
 
             stream_respond!(stream_hnd, async move |stream| {
                 let db = get_stream_db!(stream, stream_id);
                 let is_autocommit = db.is_autocommit().await?;
-                Ok(proto::Response::GetState(proto::GetStateResp {
-                    state: proto::StreamState { is_autocommit },
+                Ok(proto::Response::GetAutocommit(proto::GetAutocommitResp {
+                    is_autocommit,
                 }))
             });
         }

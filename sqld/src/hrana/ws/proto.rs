@@ -87,7 +87,7 @@ pub enum Request {
     #[prost(message, tag = "12")]
     CloseSql(CloseSqlReq),
     #[prost(message, tag = "13")]
-    GetState(GetStateReq),
+    GetAutocommit(GetAutocommitReq),
 }
 
 #[derive(Serialize, prost::Oneof)]
@@ -116,7 +116,7 @@ pub enum Response {
     #[prost(message, tag = "12")]
     CloseSql(CloseSqlResp),
     #[prost(message, tag = "13")]
-    GetState(GetStateResp),
+    GetAutocommit(GetAutocommitResp),
 }
 
 #[derive(Deserialize, prost::Message)]
@@ -257,13 +257,13 @@ pub struct CloseSqlReq {
 pub struct CloseSqlResp {}
 
 #[derive(Deserialize, prost::Message)]
-pub struct GetStateReq {
+pub struct GetAutocommitReq {
     #[prost(int32, tag = "1")]
     pub stream_id: i32,
 }
 
 #[derive(Serialize, prost::Message)]
-pub struct GetStateResp {
+pub struct GetAutocommitResp {
     #[prost(message, required, tag = "1")]
-    pub state: StreamState,
+    pub is_autocommit: bool,
 }

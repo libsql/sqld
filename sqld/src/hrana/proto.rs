@@ -181,12 +181,6 @@ pub struct DescribeCol {
     pub decltype: Option<String>,
 }
 
-#[derive(Serialize, prost::Message)]
-pub struct StreamState {
-    #[prost(bool, tag = "1")]
-    pub is_autocommit: bool,
-}
-
 #[derive(Serialize, Deserialize, Default, Clone, Debug)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Value {
