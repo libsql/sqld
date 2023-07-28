@@ -25,7 +25,7 @@ const MAX_STEP_BATCH_SIZE: usize = 100_000_000; // ~100kb
 pub struct PrimaryDatabase {
     pub db: Arc<LibsqlDatabase<PrimaryType>>,
     pub replica_streams: HashMap<NodeId, (u32, tokio::task::JoinHandle<()>)>,
-    pub frame_notifier: tokio::sync::watch::Receiver<FrameNo>,
+    pub frame_notifier: tokio::sync::watch::Receiver<Option<FrameNo>>,
     pub snapshot_store: Arc<SnapshotStore>,
 }
 
@@ -207,7 +207,7 @@ pub struct FrameStreamer {
     pub req_no: u32,
     pub seq_no: u32,
     pub dipatcher: Arc<dyn Dispatch>,
-    pub notifier: tokio::sync::watch::Receiver<FrameNo>,
+    pub notifier: tokio::sync::watch::Receiver<Option<FrameNo>>,
     pub buffer: Vec<Bytes>,
     pub snapshot_store: Arc<SnapshotStore>,
 }
@@ -230,7 +230,7 @@ impl FrameStreamer {
                     }
                     if self
                         .notifier
-                        .wait_for(|fno| *fno >= self.next_frame_no)
+                        .wait_for(|fno| fno.map(|f| f >= self.next_frame_no).unwrap_or(false))
                         .await
                         .is_err()
                     {

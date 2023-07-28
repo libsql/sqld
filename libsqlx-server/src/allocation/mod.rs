@@ -126,7 +126,7 @@ impl Database {
                 replication_log_compact_interval,
                 transaction_timeout_duration,
             } => {
-                let (sender, receiver) = tokio::sync::watch::channel(0);
+                let (sender, receiver) = tokio::sync::watch::channel(None);
                 let db = LibsqlDatabase::new_primary(
                     path,
                     Compactor::new(
@@ -137,7 +137,7 @@ impl Database {
                     ),
                     false,
                     Box::new(move |fno| {
-                        let _ = sender.send(fno);
+                        let _ = sender.send(Some(fno));
                     }),
                 )
                 .unwrap();
