@@ -18,6 +18,7 @@ mod headers;
 mod hook;
 
 pub type FrameBuffer = Arc<Mutex<VecDeque<Frame>>>;
+pub type OnCommitCb = Arc<dyn Fn(FrameNo) + Send + Sync + 'static>;
 
 pub struct Injector {
     /// The injector is in a transaction state
@@ -48,39 +49,15 @@ impl crate::database::Injector for Injector {
 /// This trait trait is used to record the last committed frame_no to the log.
 /// The implementer can persist the pre and post commit frame no, and compare them in the event of
 /// a crash; if the pre and post commit frame_no don't match, then the log may be corrupted.
-pub trait InjectorCommitHandler: Send + Sync + 'static {
-    fn pre_commit(&mut self, frame_no: FrameNo) -> anyhow::Result<()>;
-    fn post_commit(&mut self, frame_no: FrameNo) -> anyhow::Result<()>;
-}
-
-impl<T: InjectorCommitHandler> InjectorCommitHandler for Box<T> {
-    fn pre_commit(&mut self, frame_no: FrameNo) -> anyhow::Result<()> {
-        self.as_mut().pre_commit(frame_no)
-    }
-
-    fn post_commit(&mut self, frame_no: FrameNo) -> anyhow::Result<()> {
-        self.as_mut().post_commit(frame_no)
-    }
-}
-
-impl InjectorCommitHandler for () {
-    fn pre_commit(&mut self, _frame_no: FrameNo) -> anyhow::Result<()> {
-        Ok(())
-    }
-
-    fn post_commit(&mut self, _frame_no: FrameNo) -> anyhow::Result<()> {
-        Ok(())
-    }
-}
 
 impl Injector {
     pub fn new(
         path: &Path,
-        injector_commit_handler: Box<dyn InjectorCommitHandler>,
+        on_commit_cb: OnCommitCb,
         buffer_capacity: usize,
     ) -> crate::Result<Self> {
         let buffer = FrameBuffer::default();
-        let ctx = InjectorHookCtx::new(buffer.clone(), injector_commit_handler);
+        let ctx = InjectorHookCtx::new(buffer.clone(), on_commit_cb);
         let mut ctx = Box::new(ctx);
         let connection = sqld_libsql_bindings::Connection::open(
             path,
@@ -172,6 +149,7 @@ impl Injector {
 #[cfg(test)]
 mod test {
     use std::path::PathBuf;
+    use std::sync::Arc;
 
     use crate::database::libsql::injector::Injector;
     use crate::database::libsql::replication_log::logger::LogFile;
@@ -181,7 +159,7 @@ mod test {
         let log = LogFile::new(PathBuf::from("assets/test/simple_wallog")).unwrap();
         let temp = tempfile::tempdir().unwrap();
 
-        let mut injector = Injector::new(temp.path(), Box::new(()), 10).unwrap();
+        let mut injector = Injector::new(temp.path(), Arc::new(|_| ()), 10).unwrap();
         for frame in log.frames_iter().unwrap() {
             let frame = frame.unwrap();
             injector.inject_frame(frame).unwrap();
@@ -202,7 +180,7 @@ mod test {
         let temp = tempfile::tempdir().unwrap();
 
         // inject one frame at a time
-        let mut injector = Injector::new(temp.path(), Box::new(()), 1).unwrap();
+        let mut injector = Injector::new(temp.path(), Arc::new(|_| ()), 1).unwrap();
         for frame in log.frames_iter().unwrap() {
             let frame = frame.unwrap();
             injector.inject_frame(frame).unwrap();
@@ -223,7 +201,7 @@ mod test {
         let temp = tempfile::tempdir().unwrap();
 
         // inject one frame at a time
-        let mut injector = Injector::new(temp.path(), Box::new(()), 10).unwrap();
+        let mut injector = Injector::new(temp.path(), Arc::new(|_| ()), 10).unwrap();
         let mut iter = log.frames_iter().unwrap();
 
         assert!(injector

@@ -9,7 +9,7 @@ use crate::database::frame::FrameBorrowed;
 use crate::database::libsql::replication_log::WAL_PAGE_SIZE;
 
 use super::headers::Headers;
-use super::{FrameBuffer, InjectorCommitHandler};
+use super::{FrameBuffer, OnCommitCb};
 
 // Those are custom error codes returned by the replicator hook.
 pub const LIBSQL_INJECT_FATAL: c_int = 200;
@@ -23,15 +23,15 @@ pub struct InjectorHookCtx {
     buffer: FrameBuffer,
     /// currently in a txn
     is_txn: bool,
-    commit_handler: Box<dyn InjectorCommitHandler>,
+    on_commit_cb: OnCommitCb,
 }
 
 impl InjectorHookCtx {
-    pub fn new(buffer: FrameBuffer, commit_handler: Box<dyn InjectorCommitHandler>) -> Self {
+    pub fn new(buffer: FrameBuffer, commit_handler: OnCommitCb) -> Self {
         Self {
             buffer,
             is_txn: false,
-            commit_handler,
+            on_commit_cb: commit_handler,
         }
     }
 
@@ -45,9 +45,6 @@ impl InjectorHookCtx {
         let buffer = self.buffer.lock();
         let (mut headers, last_frame_no, size_after) =
             make_page_header(buffer.iter().map(|f| &**f));
-        if size_after != 0 {
-            self.commit_handler.pre_commit(last_frame_no)?;
-        }
 
         let ret = unsafe {
             orig(
@@ -64,7 +61,7 @@ impl InjectorHookCtx {
             debug_assert!(headers.all_applied());
             drop(headers);
             if size_after != 0 {
-                self.commit_handler.post_commit(last_frame_no)?;
+                (self.on_commit_cb)(last_frame_no);
                 self.is_txn = false;
             }
             tracing::trace!("applied frame batch");
