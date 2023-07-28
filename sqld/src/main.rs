@@ -185,8 +185,8 @@ struct Cli {
     snapshot_exec: Option<String>,
 
     /// The address and port for the replication HTTP API.
-    #[clap(long, env = "SQLD_HTTP_REPLICATION_LISTEN_ADDR")]
-    http_replication_listen_addr: Option<SocketAddr>,
+    #[clap(long, env = "SQLD_ENABLE_HTTP_REPLICATION")]
+    enable_http_replication: bool,
 }
 
 #[derive(clap::Subcommand, Debug)]
@@ -296,7 +296,7 @@ fn config_from_args(args: Cli) -> Result<Config> {
         allow_replica_overwrite: args.allow_replica_overwrite,
         max_response_size: args.max_response_size.0,
         snapshot_exec: args.snapshot_exec,
-        http_replication_addr: args.http_replication_listen_addr,
+        enable_http_replication: args.enable_http_replication,
     })
 }
 

@@ -177,6 +177,7 @@ async fn handle_upgrade(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn handle_request<D: Database>(
     auth: Arc<Auth>,
     req: Request<Body>,
@@ -184,6 +185,7 @@ async fn handle_request<D: Database>(
     hrana_http_srv: Arc<hrana::http::Server<D>>,
     db_factory: Arc<dyn DbFactory<Db = D>>,
     enable_console: bool,
+    http_replication_logger: Option<Arc<crate::replication::ReplicationLogger>>,
     stats: Stats,
 ) -> anyhow::Result<Response<Body>> {
     if hyper_tungstenite::is_upgrade_request(&req) {
@@ -229,6 +231,28 @@ async fn handle_request<D: Database>(
                 .await
         }
 
+        // HTTP replication
+        (&Method::GET, "/replication/hello") => {
+            if let Some(logger) = http_replication_logger {
+                crate::replication::http::handle_hello(logger).await
+            } else {
+                Ok(Response::builder()
+                    .status(hyper::StatusCode::NOT_FOUND)
+                    .body(Body::empty())
+                    .unwrap())
+            }
+        }
+        (&Method::POST, "/replication/frames") => {
+            if let Some(logger) = http_replication_logger {
+                crate::replication::http::handle_frames(logger, req).await
+            } else {
+                Ok(Response::builder()
+                    .status(hyper::StatusCode::NOT_FOUND)
+                    .body(Body::empty())
+                    .unwrap())
+            }
+        }
+
         _ => Ok(Response::builder().status(404).body(Body::empty()).unwrap()),
     }
 }
@@ -247,6 +271,7 @@ pub async fn run_http<D: Database>(
     upgrade_tx: mpsc::Sender<hrana::ws::Upgrade>,
     hrana_http_srv: Arc<hrana::http::Server<D>>,
     enable_console: bool,
+    http_replication_logger: Option<Arc<crate::replication::ReplicationLogger>>,
     idle_shutdown_layer: Option<IdleShutdownLayer>,
     stats: Stats,
 ) -> anyhow::Result<()> {
@@ -281,6 +306,7 @@ pub async fn run_http<D: Database>(
                 hrana_http_srv.clone(),
                 db_factory.clone(),
                 enable_console,
+                http_replication_logger.clone(),
                 stats.clone(),
             )
         });
