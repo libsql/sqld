@@ -75,7 +75,7 @@ pub async fn execute_batch(
     pgm: Program,
 ) -> color_eyre::Result<proto::BatchResult> {
     let (builder, ret) = HranaBatchProtoBuilder::new();
-    db.execute(pgm, Box::new(builder)).await?;
+    db.execute(pgm, Box::new(builder)).await;
 
     Ok(ret.await?)
 }
@@ -108,7 +108,7 @@ pub fn proto_sequence_to_program(sql: &str) -> color_eyre::Result<Program> {
 pub async fn execute_sequence(conn: &ConnectionHandle, pgm: Program) -> color_eyre::Result<()> {
     let (snd, rcv) = oneshot::channel();
     let builder = StepResultsBuilder::new(snd);
-    conn.execute(pgm, Box::new(builder)).await?;
+    conn.execute(pgm, Box::new(builder)).await;
 
     rcv.await?
         .map_err(|e| anyhow!("{e}"))?

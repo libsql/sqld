@@ -49,7 +49,7 @@ pub async fn execute_stmt(
 ) -> color_eyre::Result<proto::StmtResult> {
     let (builder, ret) = SingleStatementBuilder::new();
     let pgm = libsqlx::program::Program::from_queries(std::iter::once(query));
-    conn.execute(pgm, Box::new(builder)).await?;
+    conn.execute(pgm, Box::new(builder)).await;
     ret.await?
         .map_err(|sqld_error| match stmt_error_from_sqld_error(sqld_error) {
             Ok(stmt_error) => anyhow!(stmt_error),

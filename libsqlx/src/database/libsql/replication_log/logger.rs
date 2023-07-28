@@ -711,20 +711,6 @@ impl LogFileHeader {
     }
 }
 
-pub struct Generation {
-    pub id: Uuid,
-    pub start_index: u64,
-}
-
-impl Generation {
-    fn new(start_index: u64) -> Self {
-        Self {
-            id: Uuid::new_v4(),
-            start_index,
-        }
-    }
-}
-
 pub trait LogCompactor: Sync + Send + 'static {
     /// returns whether the passed log file should be compacted. If this method returns true,
     /// compact should be called next.

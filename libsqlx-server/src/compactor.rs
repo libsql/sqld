@@ -193,6 +193,7 @@ pub struct SnapshotFrame {
 impl SnapshotFrame {
     const SIZE: usize = size_of::<SnapshotFrameHeader>() + 4096;
 
+    #[cfg(test)]
     pub fn try_from_bytes(data: Bytes) -> crate::Result<Self> {
         if data.len() != Self::SIZE {
             color_eyre::eyre::bail!("invalid snapshot frame")
