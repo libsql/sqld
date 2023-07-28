@@ -12,6 +12,7 @@ use hyper::server::conn::AddrIncoming;
 use linc::bus::Bus;
 use manager::Manager;
 use meta::Store;
+use replica_commit_store::ReplicaCommitStore;
 use snapshot_store::SnapshotStore;
 use tokio::fs::create_dir_all;
 use tokio::net::{TcpListener, TcpStream};
@@ -28,6 +29,7 @@ mod http;
 mod linc;
 mod manager;
 mod meta;
+mod replica_commit_store;
 mod snapshot_store;
 
 #[derive(Debug, Parser)]
@@ -123,11 +125,13 @@ async fn main() -> Result<()> {
         snapshot_store,
     )?);
     let store = Arc::new(Store::new(env.clone()));
+    let replica_commit_store = Arc::new(ReplicaCommitStore::new(env.clone()));
     let manager = Arc::new(Manager::new(
         config.db_path.clone(),
         store.clone(),
         100,
         compaction_queue.clone(),
+        replica_commit_store,
     ));
     let bus = Arc::new(Bus::new(config.cluster.id, manager.clone()));
 

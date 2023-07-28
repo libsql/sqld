@@ -27,6 +27,7 @@ use crate::linc::bus::Dispatch;
 use crate::linc::proto::{Frames, Message};
 use crate::linc::{Inbound, NodeId};
 use crate::meta::DatabaseId;
+use crate::replica_commit_store::ReplicaCommitStore;
 
 use self::config::{AllocConfig, DbConfig};
 use self::primary::compactor::Compactor;
@@ -115,6 +116,7 @@ impl Database {
         path: PathBuf,
         dispatcher: Arc<dyn Dispatch>,
         compaction_queue: Arc<CompactionQueue>,
+        replica_commit_store: Arc<ReplicaCommitStore>,
     ) -> Self {
         let database_id = DatabaseId::from_name(&config.db_name);
 
@@ -162,13 +164,22 @@ impl Database {
                 proxy_request_timeout_duration,
                 transaction_timeout_duration,
             } => {
-                // TODO: set commit handler
+                let next_frame_no =
+                    block_in_place(|| replica_commit_store.get_commit_index(database_id))
+                        .map(|fno| fno + 1)
+                        .unwrap_or(0);
+
+                let commit_callback = Arc::new(move |fno| {
+                    replica_commit_store.commit(database_id, fno);
+                });
+
                 let rdb = LibsqlDatabase::new_replica(
                     path,
                     MAX_INJECTOR_BUFFER_CAPACITY,
-                    Arc::new(|_| ()),
+                    commit_callback,
                 )
                 .unwrap();
+
                 let wdb = RemoteDb {
                     proxy_request_timeout_duration,
                 };
@@ -178,7 +189,7 @@ impl Database {
 
                 let replicator = Replicator::new(
                     dispatcher,
-                    0,
+                    next_frame_no,
                     database_id,
                     primary_node_id,
                     injector,
@@ -567,9 +578,10 @@ mod test {
     use tokio::sync::Notify;
 
     use crate::allocation::replica::ReplicaConnection;
-    use crate::init_dirs;
     use crate::linc::bus::Bus;
+    use crate::replica_commit_store::ReplicaCommitStore;
     use crate::snapshot_store::SnapshotStore;
+    use crate::{init_dirs, replica_commit_store};
 
     use super::*;
 
@@ -649,10 +661,18 @@ mod test {
             .open(tmp.path())
             .unwrap();
         let store = Arc::new(SnapshotStore::new(tmp.path().to_path_buf(), env.clone()).unwrap());
-        let queue = Arc::new(CompactionQueue::new(env, tmp.path().to_path_buf(), store).unwrap());
+        let queue =
+            Arc::new(CompactionQueue::new(env.clone(), tmp.path().to_path_buf(), store).unwrap());
+        let replica_commit_store = Arc::new(ReplicaCommitStore::new(env.clone()));
         let mut alloc = Allocation {
             inbox,
-            database: Database::from_config(&config, tmp.path().to_path_buf(), bus.clone(), queue),
+            database: Database::from_config(
+                &config,
+                tmp.path().to_path_buf(),
+                bus.clone(),
+                queue,
+                replica_commit_store,
+            ),
             connections_futs: JoinSet::new(),
             next_conn_id: 0,
             max_concurrent_connections: config.max_conccurent_connection,
