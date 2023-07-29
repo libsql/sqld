@@ -1,7 +1,5 @@
-/*! 
- * This file contains functions to deal with the connection of the Hrana protocol
- * over web sockets
- * */
+//! This file contains functions to deal with the connection of the Hrana protocol
+//! over web sockets
  
 use std::borrow::Cow;
 use std::future::Future;

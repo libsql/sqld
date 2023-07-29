@@ -1,6 +1,4 @@
-/*! 
- * This file handles web socket handshakes.
- * */
+//! This file handles web socket handshakes.
 
 use anyhow::{anyhow, bail, Context as _, Result};
 use futures::{SinkExt as _, StreamExt as _};
