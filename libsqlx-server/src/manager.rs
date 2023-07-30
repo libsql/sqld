@@ -9,7 +9,6 @@ use tokio::task::JoinSet;
 use crate::allocation::config::AllocConfig;
 use crate::allocation::{Allocation, AllocationMessage, Database};
 use crate::compactor::CompactionQueue;
-use crate::hrana;
 use crate::linc::bus::Dispatch;
 use crate::linc::handler::Handler;
 use crate::linc::Inbound;
@@ -70,8 +69,7 @@ impl Manager {
                 connections_futs: JoinSet::new(),
                 next_conn_id: 0,
                 max_concurrent_connections: config.max_conccurent_connection,
-                hrana_server: Arc::new(hrana::http::Server::new(None)),
-                dispatcher, // TODO: handle self URL?
+                dispatcher,
                 db_name: config.db_name,
                 connections: HashMap::new(),
             };

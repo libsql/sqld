@@ -1,69 +1,82 @@
-use crate::hrana::error::{HranaError, ProtocolError, StreamResponseError};
+use crate::hrana::ProtocolError;
+use crate::hrana::error::HranaError;
 
 use super::super::{batch, stmt, Version};
 use super::{proto, stream};
+// use crate::auth::Authenticated;
+
+/// An error from executing a [`proto::StreamRequest`]
+#[derive(thiserror::Error, Debug)]
+pub enum StreamResponseError {
+    #[error("The server already stores {count} SQL texts, it cannot store more")]
+    SqlTooMany { count: usize },
+    #[error(transparent)]
+    Stmt(stmt::StmtError),
+}
 
 pub async fn handle(
-    stream_guard: &mut stream::Guard,
+    stream_guard: &mut stream::Guard<'_>,
+    // auth: Authenticated,
     request: proto::StreamRequest,
-) -> crate::Result<proto::StreamResult, HranaError> {
-    let result = match try_handle(stream_guard, request).await {
+) -> Result<proto::StreamResult, HranaError> {
+    let result = match try_handle(stream_guard/*, auth*/, request).await {
         Ok(response) => proto::StreamResult::Ok { response },
         Err(err) => {
-            if let HranaError::StreamResponse(resp_err) = err {
+            if let HranaError::StreamResponse(err) = err {
                 let error = proto::Error {
-                    message: resp_err.to_string(),
-                    code: resp_err.code().into(),
+                    message: err.to_string(),
+                    code: err.code().into(),
                 };
                 proto::StreamResult::Error { error }
             } else {
-                return Err(err);
+                Err(err)?
             }
         }
     };
-
     Ok(result)
 }
 
 async fn try_handle(
-    stream_guard: &mut stream::Guard,
+    stream_guard: &mut stream::Guard<'_>,
+    // auth: Authenticated,
     request: proto::StreamRequest,
 ) -> crate::Result<proto::StreamResponse, HranaError> {
     Ok(match request {
         proto::StreamRequest::Close(_req) => {
-            stream_guard.close_db();
+            stream_guard.close_conn();
             proto::StreamResponse::Close(proto::CloseStreamResp {})
         }
         proto::StreamRequest::Execute(req) => {
-            let db = stream_guard.get_db()?;
+            let db = stream_guard.get_conn()?;
             let sqls = stream_guard.sqls();
             let query = stmt::proto_stmt_to_query(&req.stmt, sqls, Version::Hrana2)?;
-            let result = stmt::execute_stmt(db, query).await?;
+            let result = stmt::execute_stmt(db, /*auth,*/ query)
+                .await?;
             proto::StreamResponse::Execute(proto::ExecuteStreamResp { result })
         }
         proto::StreamRequest::Batch(req) => {
-            let db = stream_guard.get_db()?;
+            let db = stream_guard.get_conn()?;
             let sqls = stream_guard.sqls();
             let pgm = batch::proto_batch_to_program(&req.batch, sqls, Version::Hrana2)?;
-            let result = batch::execute_batch(db, pgm).await?;
+            let result = batch::execute_batch(db, /*auth,*/ pgm).await?;
             proto::StreamResponse::Batch(proto::BatchStreamResp { result })
         }
         proto::StreamRequest::Sequence(req) => {
-            let db = stream_guard.get_db()?;
+            let db = stream_guard.get_conn()?;
             let sqls = stream_guard.sqls();
             let sql =
                 stmt::proto_sql_to_sql(req.sql.as_deref(), req.sql_id, sqls, Version::Hrana2)?;
             let pgm = batch::proto_sequence_to_program(sql)?;
-            batch::execute_sequence(db, pgm)
+            batch::execute_sequence(db, /*auth,*/ pgm)
                 .await?;
             proto::StreamResponse::Sequence(proto::SequenceStreamResp {})
         }
         proto::StreamRequest::Describe(req) => {
-            let db = stream_guard.get_db()?;
+            let db = stream_guard.get_conn()?;
             let sqls = stream_guard.sqls();
             let sql =
                 stmt::proto_sql_to_sql(req.sql.as_deref(), req.sql_id, sqls, Version::Hrana2)?;
-            let result = stmt::describe_stmt(db, sql.into())
+            let result = stmt::describe_stmt(db, /* auth,*/ sql.into())
                 .await?;
             proto::StreamResponse::Describe(proto::DescribeStreamResp { result })
         }

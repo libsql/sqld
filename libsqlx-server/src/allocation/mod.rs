@@ -21,12 +21,9 @@ use crate::allocation::primary::FrameStreamer;
 use crate::allocation::timeout_notifier::timeout_monitor;
 use crate::compactor::CompactionQueue;
 use crate::error::Error;
-use crate::hrana;
-use crate::hrana::error::HranaError;
-use crate::hrana::http::handle_pipeline;
-use crate::hrana::http::proto::{PipelineRequestBody, PipelineResponseBody};
+use crate::hrana::proto::DescribeResult;
 use crate::linc::bus::Dispatch;
-use crate::linc::proto::{Frames, Message};
+use crate::linc::proto::{Message, Frames};
 use crate::linc::{Inbound, NodeId};
 use crate::meta::DatabaseId;
 use crate::replica_commit_store::ReplicaCommitStore;
@@ -56,9 +53,8 @@ pub enum ConnectionMessage {
 }
 
 pub enum AllocationMessage {
-    HranaPipelineReq {
-        req: PipelineRequestBody,
-        ret: oneshot::Sender<crate::Result<PipelineResponseBody, HranaError>>,
+    Connect {
+        ret: oneshot::Sender<crate::Result<ConnectionHandle>>,
     },
     Inbound(Inbound),
 }
@@ -254,7 +250,6 @@ pub struct Allocation {
     pub max_concurrent_connections: u32,
     pub connections: HashMap<NodeId, HashMap<u32, ConnectionHandle>>,
 
-    pub hrana_server: Arc<hrana::http::Server>,
     /// handle to the message bus
     pub dispatcher: Arc<dyn Dispatch>,
     pub db_name: String,
@@ -274,6 +269,10 @@ impl ConnectionHandle {
             builder.finnalize_error("connection closed".to_string());
         }
     }
+
+    pub async fn describe(&self, sql: String) -> crate::Result<DescribeResult> {
+        todo!()
+    }
 }
 
 impl Allocation {
@@ -284,14 +283,8 @@ impl Allocation {
                 _ = fut => (),
                 Some(msg) = self.inbox.recv() => {
                     match msg {
-                        AllocationMessage::HranaPipelineReq { req, ret } => {
-                            let server = self.hrana_server.clone();
-                            if let Err(e) = handle_pipeline(server, req, ret, || async {
-                                let conn = self.new_conn(None).await?;
-                                Ok(conn)
-                            }).await {
-                                tracing::error!("error handling request: {e}")
-                            };
+                        AllocationMessage::Connect { ret } => {
+                            let _ = ret.send(self.new_conn(None).await);
                         }
                         AllocationMessage::Inbound(msg) => {
                             if let Err(e) = self.handle_inbound(msg).await {

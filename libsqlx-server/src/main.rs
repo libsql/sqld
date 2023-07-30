@@ -63,8 +63,16 @@ async fn spawn_user_api(
     bus: Arc<Bus<Arc<Manager>>>,
 ) -> color_eyre::Result<()> {
     let user_api_listener = TcpListener::bind(config.addr).await?;
+    let hrana_server = Arc::new(hrana::http::Server::new(None));
+    set.spawn({
+        let hrana_server = hrana_server.clone();
+        async move {
+            hrana_server.run_expire().await;
+            Ok(())
+        }
+    });
     set.spawn(run_user_api(
-        http::user::Config { manager, bus },
+        http::user::Config { manager, bus, hrana_server },
         AddrIncoming::from_listener(user_api_listener)?,
     ));
 
