@@ -44,6 +44,7 @@ async fn backup_restore() {
             bucket_name: BUCKET.to_string(),
             max_batch_interval: Duration::from_millis(250),
             restore_transaction_page_swap_after: 1, // in this test swap should happen at least once
+            aws_endpoint: Some(S3_URL.to_string()),
             ..bottomless::replicator::Options::from_env().unwrap()
         }),
         db_path: PATH.into(),
@@ -230,6 +231,7 @@ async fn rollback_restore() {
             bucket_name: BUCKET.to_string(),
             max_batch_interval: Duration::from_millis(250),
             restore_transaction_page_swap_after: 1, // in this test swap should happen at least once
+            aws_endpoint: Some(S3_URL.to_string()),
             ..bottomless::replicator::Options::from_env().unwrap()
         }),
         db_path: PATH.into(),
@@ -417,7 +419,7 @@ impl S3BucketCleaner {
 impl Drop for S3BucketCleaner {
     fn drop(&mut self) {
         tokio::task::block_in_place(|| {
-            let _  = tokio::runtime::Handle::current().block_on(Self::cleanup(self.0));
+            let _ = tokio::runtime::Handle::current().block_on(Self::cleanup(self.0));
         });
     }
 }
