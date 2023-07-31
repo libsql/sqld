@@ -10,6 +10,7 @@ use enclose::enclose;
 use futures::never::Never;
 use libsql::wal_hook::TRANSPARENT_METHODS;
 use once_cell::sync::Lazy;
+use replication::http::ReplicationHandlerState;
 use rpc::run_rpc_server;
 use tokio::sync::{mpsc, Notify};
 use tokio::task::JoinSet;
@@ -104,7 +105,6 @@ pub struct Config {
     pub allow_replica_overwrite: bool,
     pub max_response_size: u64,
     pub snapshot_exec: Option<String>,
-    pub http_replication_addr: Option<SocketAddr>,
 }
 
 impl Default for Config {
@@ -144,7 +144,6 @@ impl Default for Config {
             allow_replica_overwrite: false,
             max_response_size: 10 * 1024 * 1024, // 10MiB
             snapshot_exec: None,
-            http_replication_addr: None,
         }
     }
 }
@@ -156,6 +155,7 @@ async fn run_service<D: Database>(
     idle_shutdown_layer: Option<IdleShutdownLayer>,
     stats: Stats,
     db_config_store: Arc<DatabaseConfigStore>,
+    replication: Option<ReplicationHandlerState>,
 ) -> anyhow::Result<()> {
     let auth = get_auth(config)?;
 
@@ -193,6 +193,7 @@ async fn run_service<D: Database>(
             config.enable_http_console,
             idle_shutdown_layer,
             stats.clone(),
+            replication,
         ));
         join_set.spawn(async move {
             hrana_http_srv.run_expire().await;
@@ -344,6 +345,7 @@ async fn start_replica(
         idle_shutdown_layer,
         stats,
         db_config_store,
+        None,
     )
     .await?;
 
@@ -502,11 +504,9 @@ async fn start_primary(
         ));
     }
 
-    if let Some(ref addr) = config.http_replication_addr {
-        // FIXME: let's bring it back once I figure out how Axum works
-        // let auth = get_auth(config)?;
-        join_set.spawn(replication::http::run(*addr, logger));
-    }
+    let auth = get_auth(config)?;
+
+    let replication = ReplicationHandlerState::new(logger, auth);
 
     run_service(
         db_factory,
@@ -515,6 +515,7 @@ async fn start_primary(
         idle_shutdown_layer,
         stats,
         db_config_store,
+        Some(replication),
     )
     .await?;
 

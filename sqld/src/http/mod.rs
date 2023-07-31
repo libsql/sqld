@@ -1,3 +1,4 @@
+mod either;
 mod hrana_over_http_1;
 mod result_builder;
 pub mod stats;
@@ -30,6 +31,7 @@ use crate::http::types::HttpQuery;
 use crate::query::{self, Query};
 use crate::query_analysis::{predict_final_state, State, Statement};
 use crate::query_result_builder::QueryResultBuilder;
+use crate::replication::http::ReplicationHandlerState;
 use crate::stats::Stats;
 use crate::utils::services::idle_shutdown::IdleShutdownLayer;
 use crate::version;
@@ -185,6 +187,38 @@ async fn handle_request<D: Database>(
     db_factory: Arc<dyn DbFactory<Db = D>>,
     enable_console: bool,
     stats: Stats,
+    replication: Option<ReplicationHandlerState>,
+) -> anyhow::Result<Response<either::Either<Body, axum::body::BoxBody>>> {
+    match (req.method(), req.uri().path(), replication) {
+        // Wrap axum based handlers
+        (_, path, Some(replication)) if path.starts_with("/v1/replication") => replication
+            .handle(req)
+            .await
+            .map(|r| r.map(either::Either::Right)),
+
+        // Wrap hyper based handlers
+        _ => handle_request2(
+            auth,
+            req,
+            upgrade_tx,
+            hrana_http_srv,
+            db_factory,
+            enable_console,
+            stats,
+        )
+        .await
+        .map(|r| r.map(either::Either::Left)),
+    }
+}
+
+async fn handle_request2<D: Database>(
+    auth: Arc<Auth>,
+    req: Request<Body>,
+    upgrade_tx: mpsc::Sender<hrana::ws::Upgrade>,
+    hrana_http_srv: Arc<hrana::http::Server<D>>,
+    db_factory: Arc<dyn DbFactory<Db = D>>,
+    enable_console: bool,
+    stats: Stats,
 ) -> anyhow::Result<Response<Body>> {
     if hyper_tungstenite::is_upgrade_request(&req) {
         return Ok(handle_upgrade(&upgrade_tx, req).await);
@@ -249,6 +283,7 @@ pub async fn run_http<D: Database>(
     enable_console: bool,
     idle_shutdown_layer: Option<IdleShutdownLayer>,
     stats: Stats,
+    replication: Option<ReplicationHandlerState>,
 ) -> anyhow::Result<()> {
     tracing::info!("listening for HTTP requests on {addr}");
 
@@ -282,6 +317,7 @@ pub async fn run_http<D: Database>(
                 db_factory.clone(),
                 enable_console,
                 stats.clone(),
+                replication.clone(),
             )
         });
 

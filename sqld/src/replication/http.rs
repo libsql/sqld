@@ -1,9 +1,9 @@
+use crate::auth::Auth;
 use crate::replication::LogReadError;
 use crate::replication::{frame::Frame, primary::frame_stream::FrameStream, ReplicationLogger};
-use anyhow::{Context, Result};
+use anyhow::Result;
 use axum::extract::State;
-use hyper::{Body, Response};
-use std::net::SocketAddr;
+use hyper::{Body, HeaderMap, Request, Response};
 use std::sync::Arc;
 
 #[derive(Debug, serde::Deserialize, serde::Serialize)]
@@ -42,23 +42,30 @@ impl<E: Into<anyhow::Error>> From<E> for AppError {
     }
 }
 
-pub async fn run(addr: SocketAddr, logger: Arc<ReplicationLogger>) -> Result<()> {
-    use axum::routing::{get, post};
-    let router = axum::Router::new()
-        .route("/hello", get(handle_hello))
-        .route("/frames", post(handle_frames))
-        .with_state(logger);
+#[derive(Clone)]
+pub struct ReplicationHandlerState {
+    logger: Arc<ReplicationLogger>,
+    auth: Arc<Auth>,
+}
 
-    let server = hyper::Server::try_bind(&addr)
-        .context("Could not bind admin HTTP API server")?
-        .serve(router.into_make_service());
+impl ReplicationHandlerState {
+    pub fn new(logger: Arc<ReplicationLogger>, auth: Arc<Auth>) -> Self {
+        Self { logger, auth }
+    }
 
-    tracing::info!(
-        "Listening for replication HTTP API requests on {}",
-        server.local_addr()
-    );
-    server.await?;
-    Ok(())
+    pub async fn handle(&self, request: Request<Body>) -> Result<Response<axum::body::BoxBody>> {
+        use axum::routing::{get, post};
+        // TODO: Cache the router so we don't init it every call
+        // this is complicated due to the routers generics and its
+        // inability to be boxable.
+        let mut router = axum::Router::new()
+            .route("/v1/replication/hello", get(handle_hello))
+            .route("/v1/replication/frames", post(handle_frames))
+            .with_state(self.clone());
+
+        use tower::Service;
+        router.call(request).await.map_err(Into::into)
+    }
 }
 
 impl Frames {
@@ -76,8 +83,10 @@ impl Frames {
 }
 
 async fn handle_hello(
-    State(logger): State<Arc<ReplicationLogger>>,
+    State(state): State<ReplicationHandlerState>,
 ) -> std::result::Result<Response<Body>, AppError> {
+    let logger = state.logger;
+
     let hello = Hello {
         generation_id: logger.generation.id,
         generation_start_index: logger.generation.start_index,
@@ -100,9 +109,23 @@ fn error(msg: &str, code: hyper::StatusCode) -> Response<Body> {
 }
 
 async fn handle_frames(
-    State(logger): State<Arc<ReplicationLogger>>,
+    State(state): State<ReplicationHandlerState>,
+    headers: HeaderMap,
     req: String, // it's a JSON, but Axum errors-out if Content-Type isn't set to json, which is too strict
 ) -> std::result::Result<Response<Body>, AppError> {
+    let (logger, auth) = (state.logger, state.auth);
+
+    let auth_header = headers.get(hyper::header::AUTHORIZATION);
+    let _auth = match auth.authenticate_http(auth_header) {
+        Ok(auth) => auth,
+        Err(err) => {
+            return Ok(Response::builder()
+                .status(hyper::StatusCode::UNAUTHORIZED)
+                .body(err.to_string().into())
+                .unwrap());
+        }
+    };
+
     const MAX_FRAMES_IN_SINGLE_RESPONSE: usize = 256;
 
     let FramesRequest { next_offset } = match serde_json::from_str(&req) {
