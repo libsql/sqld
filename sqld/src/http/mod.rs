@@ -179,6 +179,7 @@ async fn handle_upgrade(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn handle_request<D: Database>(
     auth: Arc<Auth>,
     req: Request<Body>,
