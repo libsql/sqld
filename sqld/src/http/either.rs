@@ -114,7 +114,7 @@ pub(crate) mod proj {
     //! This is the altered expansion from the following snippet, expanded by
     //! `cargo-expand`:
     //!
-    //! ```rust
+    //! ```rust,no_run,ignore
     //! use pin_project_lite::pin_project;
     //!
     //! pin_project! {
