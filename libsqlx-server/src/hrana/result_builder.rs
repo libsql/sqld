@@ -5,19 +5,20 @@ use bytes::Bytes;
 use libsqlx::{result_builder::*, FrameNo};
 use tokio::sync::oneshot;
 
-use crate::hrana::stmt::{proto_error_from_stmt_error, stmt_error_from_sqld_error};
+use crate::hrana::stmt::proto_error_from_stmt_error;
 
+use super::error::HranaError;
 use super::proto;
 
 pub struct SingleStatementBuilder {
     builder: StatementBuilder,
-    ret: Option<oneshot::Sender<Result<proto::StmtResult, libsqlx::error::Error>>>,
+    ret: Option<oneshot::Sender<crate::Result<proto::StmtResult, HranaError>>>,
 }
 
 impl SingleStatementBuilder {
     pub fn new() -> (
         Self,
-        oneshot::Receiver<Result<proto::StmtResult, libsqlx::error::Error>>,
+        oneshot::Receiver<crate::Result<proto::StmtResult, HranaError>>,
     ) {
         let (ret, rcv) = oneshot::channel();
         (
@@ -199,9 +200,9 @@ impl StatementBuilder {
         Ok(())
     }
 
-    pub fn take_ret(&mut self) -> Result<proto::StmtResult, libsqlx::error::Error> {
+    pub fn take_ret(&mut self) -> crate::Result<proto::StmtResult, HranaError> {
         match self.err.take() {
-            Some(err) => Err(err),
+            Some(err) => Err(crate::error::Error::from(err))?,
             None => Ok(proto::StmtResult {
                 cols: std::mem::take(&mut self.cols),
                 rows: std::mem::take(&mut self.rows),
@@ -270,7 +271,7 @@ pub struct HranaBatchProtoBuilder {
     current_size: u64,
     max_response_size: u64,
     step_empty: bool,
-    ret: oneshot::Sender<proto::BatchResult>,
+    ret: Option<oneshot::Sender<proto::BatchResult>>,
 }
 
 impl HranaBatchProtoBuilder {
@@ -284,15 +285,16 @@ impl HranaBatchProtoBuilder {
                 current_size: 0,
                 max_response_size: u64::MAX,
                 step_empty: false,
-                ret,
+                ret: Some(ret),
             },
             rcv,
         )
     }
-    pub fn into_ret(self) -> proto::BatchResult {
+
+    pub fn into_ret(&mut self) -> proto::BatchResult {
         proto::BatchResult {
-            step_results: self.step_results,
-            step_errors: self.step_errors,
+            step_results: std::mem::take(&mut self.step_results),
+            step_errors: std::mem::take(&mut self.step_errors),
         }
     }
 }
@@ -331,7 +333,7 @@ impl ResultBuilder for HranaBatchProtoBuilder {
             Err(e) => {
                 self.step_results.push(None);
                 self.step_errors.push(Some(proto_error_from_stmt_error(
-                    &stmt_error_from_sqld_error(e).map_err(QueryResultBuilderError::from_any)?,
+                    Err(HranaError::from(e)).map_err(QueryResultBuilderError::from_any)?,
                 )));
             }
         }
@@ -357,6 +359,18 @@ impl ResultBuilder for HranaBatchProtoBuilder {
 
     fn add_row_value(&mut self, v: ValueRef) -> Result<(), QueryResultBuilderError> {
         self.stmt_builder.add_row_value(v)
+    }
+
+    fn finnalize(
+        &mut self,
+        _is_txn: bool,
+        _frame_no: Option<FrameNo>,
+    ) -> Result<bool, QueryResultBuilderError> {
+        if let Some(ret) = self.ret.take() {
+            let _ = ret.send(self.into_ret());
+        }
+
+        Ok(false)
     }
 
     fn finnalize_error(&mut self, _e: String) {

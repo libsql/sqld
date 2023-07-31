@@ -1,4 +1,4 @@
-use self::proto::{Enveloppe, Message};
+use self::proto::Enveloppe;
 
 pub mod bus;
 pub mod connection;
@@ -11,7 +11,6 @@ pub mod server;
 pub type NodeId = u64;
 
 const CURRENT_PROTO_VERSION: u32 = 1;
-const MAX_STREAM_MSG: usize = 64;
 
 #[derive(Debug)]
 pub struct Inbound {
@@ -19,18 +18,6 @@ pub struct Inbound {
     pub from: NodeId,
     /// payload
     pub enveloppe: Enveloppe,
-}
-
-impl Inbound {
-    pub fn respond(&self, message: Message) -> Outbound {
-        Outbound {
-            to: self.from,
-            enveloppe: Enveloppe {
-                database_id: None,
-                message,
-            },
-        }
-    }
 }
 
 #[derive(Debug)]

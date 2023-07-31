@@ -144,9 +144,7 @@ where
             // set the connection state to unknown before executing on the remote
             self.state.lock().state = State::Unknown;
 
-            self.conn
-                .execute_program(&self.pgm, Box::new(builder))
-                .unwrap();
+            self.conn.execute_program(&self.pgm, Box::new(builder));
 
             Ok(false)
         } else {
@@ -164,11 +162,7 @@ where
     R: Connection,
     W: Connection + Clone + Send + 'static,
 {
-    fn execute_program(
-        &mut self,
-        pgm: &Program,
-        builder: Box<dyn ResultBuilder>,
-    ) -> crate::Result<()> {
+    fn execute_program(&mut self, pgm: &Program, builder: Box<dyn ResultBuilder>) {
         if self.state.lock().state.is_idle() && pgm.is_read_only() {
             if let Some(frame_no) = self.state.lock().last_frame_no {
                 (self.wait_frame_no_cb)(frame_no);
@@ -183,9 +177,8 @@ where
             // We know that this program won't perform any writes. We attempt to run it on the
             // replica. If it leaves an open transaction, then this program is an interactive
             // transaction, so we rollback the replica, and execute again on the primary.
-            self.read_conn.execute_program(pgm, Box::new(builder))?;
+            self.read_conn.execute_program(pgm, Box::new(builder));
             // rollback(&mut self.conn.read_db);
-            Ok(())
         } else {
             // we set the state to unknown because until we have received from the actual
             // connection state from the primary.
@@ -194,8 +187,7 @@ where
                 builder,
                 state: self.state.clone(),
             };
-            self.write_conn.execute_program(pgm, Box::new(builder))?;
-            Ok(())
+            self.write_conn.execute_program(pgm, Box::new(builder));
         }
     }
 

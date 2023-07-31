@@ -1,12 +1,16 @@
 use std::collections::HashMap;
 
-use color_eyre::eyre::{anyhow, bail};
+use futures::FutureExt;
 use libsqlx::analysis::Statement;
+use libsqlx::program::Program;
 use libsqlx::query::{Params, Query, Value};
+use libsqlx::DescribeResponse;
 
+use super::error::HranaError;
 use super::result_builder::SingleStatementBuilder;
 use super::{proto, ProtocolError, Version};
 use crate::allocation::ConnectionHandle;
+// use crate::auth::Authenticated;
 use crate::hrana;
 
 /// An error during execution of an SQL statement.
@@ -18,8 +22,8 @@ pub enum StmtError {
     SqlNoStmt,
     #[error("SQL string contains more than one statement")]
     SqlManyStmts,
-    #[error("Arguments do not match SQL parameters: {msg}")]
-    ArgsInvalid { msg: String },
+    #[error("Arguments do not match SQL parameters: {source}")]
+    ArgsInvalid { source: color_eyre::eyre::Error },
     #[error("Specifying both positional and named arguments is not supported")]
     ArgsBothPositionalAndNamed,
 
@@ -34,7 +38,7 @@ pub enum StmtError {
     },
     #[error("SQL input error: {message} (at offset {offset})")]
     SqlInputError {
-        source: color_eyre::eyre::Error,
+        source: libsqlx::rusqlite::ffi::Error,
         message: String,
         offset: i32,
     },
@@ -45,31 +49,32 @@ pub enum StmtError {
 
 pub async fn execute_stmt(
     conn: &ConnectionHandle,
+    // auth: Authenticated,
     query: Query,
-) -> color_eyre::Result<proto::StmtResult> {
+) -> crate::Result<proto::StmtResult, HranaError> {
     let (builder, ret) = SingleStatementBuilder::new();
-    let pgm = libsqlx::program::Program::from_queries(std::iter::once(query));
-    conn.execute(pgm, Box::new(builder)).await?;
-    ret.await?
-        .map_err(|sqld_error| match stmt_error_from_sqld_error(sqld_error) {
-            Ok(stmt_error) => anyhow!(stmt_error),
-            Err(sqld_error) => anyhow!(sqld_error),
-        })
+    conn.execute(
+        Program::from_queries(Some(query)), /*, auth*/
+        Box::new(builder),
+    )
+    .await;
+    ret.await
+        .map_err(|_| crate::error::Error::ConnectionClosed)?
 }
 
 pub async fn describe_stmt(
-    _db: &ConnectionHandle,
-    _sql: String,
-) -> color_eyre::Result<proto::DescribeResult> {
-    todo!();
-    // match db.describe(sql).await? {
-    //     Ok(describe_response) => todo!(),
-    //     //     Ok(proto_describe_result_from_describe_response(
-    //     //     describe_response,
-    //     // )),
+    db: &ConnectionHandle,
+    // auth: Authenticated,
+    sql: String,
+) -> crate::Result<proto::DescribeResult, HranaError> {
+    todo!()
+    // match db.describe(sql/*, auth*/).await? {
+    //     Ok(describe_response) => Ok(proto_describe_result_from_describe_response(
+    //         describe_response,
+    //     )),
     //     Err(sqld_error) => match stmt_error_from_sqld_error(sqld_error) {
-    //         Ok(stmt_error) => bail!(stmt_error),
-    //         Err(sqld_error) => bail!(sqld_error),
+    //         Ok(stmt_error) => Err(stmt_error)?,
+    //         Err(sqld_error) => Err(sqld_error)?,
     //     },
     // }
 }
@@ -77,19 +82,19 @@ pub async fn describe_stmt(
 pub fn proto_stmt_to_query(
     proto_stmt: &proto::Stmt,
     sqls: &HashMap<i32, String>,
-    version: Version,
-) -> color_eyre::Result<Query> {
-    let sql = proto_sql_to_sql(proto_stmt.sql.as_deref(), proto_stmt.sql_id, sqls, version)?;
+    verion: Version,
+) -> crate::Result<Query, HranaError> {
+    let sql = proto_sql_to_sql(proto_stmt.sql.as_deref(), proto_stmt.sql_id, sqls, verion)?;
 
     let mut stmt_iter = Statement::parse(sql);
     let stmt = match stmt_iter.next() {
         Some(Ok(stmt)) => stmt,
-        Some(Err(err)) => bail!(StmtError::SqlParse { source: err.into() }),
-        None => bail!(StmtError::SqlNoStmt),
+        Some(Err(err)) => Err(StmtError::SqlParse { source: err.into() })?,
+        None => Err(StmtError::SqlNoStmt)?,
     };
 
     if stmt_iter.next().is_some() {
-        bail!(StmtError::SqlManyStmts)
+        Err(StmtError::SqlManyStmts)?
     }
 
     let params = if proto_stmt.named_args.is_empty() {
@@ -103,7 +108,7 @@ pub fn proto_stmt_to_query(
             .collect();
         Params::Named(values)
     } else {
-        bail!(StmtError::ArgsBothPositionalAndNamed)
+        Err(StmtError::ArgsBothPositionalAndNamed)?
     };
 
     let want_rows = proto_stmt.want_rows.unwrap_or(true);
@@ -162,63 +167,78 @@ fn proto_value_from_value(value: Value) -> proto::Value {
     }
 }
 
-// fn proto_describe_result_from_describe_response(
-//     response: DescribeResponse,
-// ) -> proto::DescribeResult {
-//     proto::DescribeResult {
-//         params: response
-//             .params
-//             .into_iter()
-//             .map(|p| proto::DescribeParam { name: p.name })
-//             .collect(),
-//         cols: response
-//             .cols
-//             .into_iter()
-//             .map(|c| proto::DescribeCol {
-//                 name: c.name,
-//                 decltype: c.decltype,
-//             })
-//             .collect(),
-//         is_explain: response.is_explain,
-//         is_readonly: response.is_readonly,
-//     }
-// }
+fn proto_describe_result_from_describe_response(
+    response: DescribeResponse,
+) -> proto::DescribeResult {
+    proto::DescribeResult {
+        params: response
+            .params
+            .into_iter()
+            .map(|p| proto::DescribeParam { name: p.name })
+            .collect(),
+        cols: response
+            .cols
+            .into_iter()
+            .map(|c| proto::DescribeCol {
+                name: c.name,
+                decltype: c.decltype,
+            })
+            .collect(),
+        is_explain: response.is_explain,
+        is_readonly: response.is_readonly,
+    }
+}
 
-pub fn stmt_error_from_sqld_error(
-    sqld_error: libsqlx::error::Error,
-) -> Result<StmtError, libsqlx::error::Error> {
-    Ok(match sqld_error {
-        libsqlx::error::Error::LibSqlInvalidQueryParams(msg) => StmtError::ArgsInvalid { msg },
-        libsqlx::error::Error::LibSqlTxTimeout => StmtError::TransactionTimeout,
-        libsqlx::error::Error::LibSqlTxBusy => StmtError::TransactionBusy,
-        libsqlx::error::Error::Blocked(reason) => StmtError::Blocked { reason },
-        libsqlx::error::Error::RusqliteError(rusqlite_error) => match rusqlite_error {
-            libsqlx::error::RusqliteError::SqliteFailure(sqlite_error, Some(message)) => {
-                StmtError::SqliteError {
-                    source: sqlite_error,
-                    message,
+impl From<crate::error::Error> for HranaError {
+    fn from(error: crate::error::Error) -> Self {
+        if let crate::error::Error::Libsqlx(e) = error {
+            match e {
+                libsqlx::error::Error::LibSqlInvalidQueryParams(source) => StmtError::ArgsInvalid {
+                    source: color_eyre::eyre::anyhow!("{source}"),
                 }
+                .into(),
+                libsqlx::error::Error::LibSqlTxTimeout => StmtError::TransactionTimeout.into(),
+                libsqlx::error::Error::LibSqlTxBusy => StmtError::TransactionBusy.into(),
+                libsqlx::error::Error::Blocked(reason) => StmtError::Blocked { reason }.into(),
+                libsqlx::error::Error::RusqliteError(rusqlite_error) => match rusqlite_error {
+                    libsqlx::error::RusqliteError::SqliteFailure(sqlite_error, Some(message)) => {
+                        StmtError::SqliteError {
+                            source: sqlite_error,
+                            message,
+                        }
+                        .into()
+                    }
+                    libsqlx::error::RusqliteError::SqliteFailure(sqlite_error, None) => {
+                        StmtError::SqliteError {
+                            message: sqlite_error.to_string(),
+                            source: sqlite_error,
+                        }
+                        .into()
+                    }
+                    libsqlx::error::RusqliteError::SqlInputError {
+                        error: sqlite_error,
+                        msg: message,
+                        offset,
+                        ..
+                    } => StmtError::SqlInputError {
+                        source: sqlite_error,
+                        message,
+                        offset,
+                    }
+                    .into(),
+                    rusqlite_error => {
+                        return crate::error::Error::from(libsqlx::error::Error::RusqliteError(
+                            rusqlite_error,
+                        ))
+                        .into()
+                    }
+                },
+                sqld_error => return crate::error::Error::from(sqld_error).into(),
             }
-            libsqlx::error::RusqliteError::SqliteFailure(sqlite_error, None) => {
-                StmtError::SqliteError {
-                    message: sqlite_error.to_string(),
-                    source: sqlite_error,
-                }
-            }
-            libsqlx::error::RusqliteError::SqlInputError {
-                error: sqlite_error,
-                msg: message,
-                offset,
-                ..
-            } => StmtError::SqlInputError {
-                source: sqlite_error.into(),
-                message,
-                offset,
-            },
-            rusqlite_error => return Err(libsqlx::error::Error::RusqliteError(rusqlite_error)),
-        },
-        sqld_error => return Err(sqld_error),
-    })
+        } else {
+            Self::Libsqlx(error)
+        }
+    }
 }
 
 pub fn proto_error_from_stmt_error(error: &StmtError) -> hrana::proto::Error {

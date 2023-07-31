@@ -21,7 +21,7 @@ pub trait Database {
 }
 
 pub trait InjectableDatabase {
-    fn injector(&mut self) -> crate::Result<Box<dyn Injector + Send + 'static>>;
+    fn injector(&self) -> crate::Result<Box<dyn Injector + Send + 'static>>;
 }
 
 // Trait implemented by databases that support frame injection

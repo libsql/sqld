@@ -1,22 +1,20 @@
 use tokio::sync::{mpsc, oneshot};
 
-use crate::allocation::AllocationMessage;
-use crate::hrana::http::proto::{PipelineRequestBody, PipelineResponseBody};
+use crate::allocation::{AllocationMessage, ConnectionHandle};
 
 pub struct Database {
     pub sender: mpsc::Sender<AllocationMessage>,
 }
 
 impl Database {
-    pub async fn hrana_pipeline(
-        &self,
-        req: PipelineRequestBody,
-    ) -> crate::Result<PipelineResponseBody> {
-        let (sender, ret) = oneshot::channel();
+    pub async fn connect(&self) -> crate::Result<ConnectionHandle> {
+        let (ret, conn) = oneshot::channel();
         self.sender
-            .send(AllocationMessage::HranaPipelineReq { req, ret: sender })
+            .send(AllocationMessage::Connect { ret })
             .await
-            .unwrap();
-        ret.await.unwrap()
+            .map_err(|_| crate::error::Error::AllocationClosed)?;
+
+        conn.await
+            .map_err(|_| crate::error::Error::ConnectionClosed)?
     }
 }

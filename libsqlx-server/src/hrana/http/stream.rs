@@ -1,19 +1,18 @@
-use std::cmp::Reverse;
-use std::collections::{HashMap, VecDeque};
-use std::pin::Pin;
-use std::sync::Arc;
-use std::{future, mem, task};
-
 use base64::prelude::{Engine as _, BASE64_STANDARD_NO_PAD};
-use color_eyre::eyre::{anyhow, WrapErr};
 use futures::Future;
 use hmac::Mac as _;
 use priority_queue::PriorityQueue;
+use std::cmp::Reverse;
+use std::collections::{HashMap, VecDeque};
+use std::pin::Pin;
+use std::{future, mem, task};
 use tokio::time::{Duration, Instant};
 
 use super::super::ProtocolError;
 use super::Server;
 use crate::allocation::ConnectionHandle;
+use crate::database::Database;
+use crate::hrana::error::HranaError;
 
 /// Mutable state related to streams, owned by [`Server`] and protected with a mutex.
 pub struct ServerStreamState {
@@ -68,8 +67,8 @@ struct Stream {
 /// Guard object that is used to access a stream from the outside. The guard makes sure that the
 /// stream's entry in [`ServerStreamState::handles`] is either removed or replaced with
 /// [`Handle::Available`] after the guard goes out of scope.
-pub struct Guard {
-    server: Arc<Server>,
+pub struct Guard<'srv> {
+    server: &'srv Server,
     /// The guarded stream. This is only set to `None` in the destructor.
     stream: Option<Box<Stream>>,
     /// If set to `true`, the destructor will release the stream for further use (saving it as
@@ -102,42 +101,37 @@ impl ServerStreamState {
 
 /// Acquire a guard to a new or existing stream. If baton is `Some`, we try to look up the stream,
 /// otherwise we create a new stream.
-pub async fn acquire<F, Fut>(
-    server: Arc<Server>,
+pub async fn acquire<'srv>(
+    server: &'srv Server,
     baton: Option<&str>,
-    mk_conn: F,
-) -> color_eyre::Result<Guard>
-where
-    F: FnOnce() -> Fut,
-    Fut: Future<Output = crate::Result<ConnectionHandle>>,
-{
+    db: Database,
+) -> Result<Guard<'srv>, HranaError> {
     let stream = match baton {
         Some(baton) => {
-            let (stream_id, baton_seq) = decode_baton(&server, baton)?;
+            let (stream_id, baton_seq) = decode_baton(server, baton)?;
 
             let mut state = server.stream_state.lock();
             let handle = state.handles.get_mut(&stream_id);
             match handle {
                 None => {
-                    return Err(ProtocolError::BatonInvalid(format!(
-                        "Stream handle for {stream_id} was not found"
-                    ))
-                    .into())
+                    Err(ProtocolError::BatonInvalid {
+                        reason: format!("Stream handle for {stream_id} was not found"),
+                    })?;
                 }
                 Some(Handle::Acquired) => {
-                    return Err(ProtocolError::BatonReused)
-                        .context(format!("Stream handle for {stream_id} is acquired"));
+                    Err(ProtocolError::BatonReused {
+                        reason: format!("Stream handle for {stream_id} is acquired"),
+                    })?;
                 }
-                Some(Handle::Expired) => {
-                    return Err(StreamError::StreamExpired)
-                        .context(format!("Stream handle for {stream_id} is expired"));
-                }
+                Some(Handle::Expired) => Err(StreamError::StreamExpired)?,
                 Some(Handle::Available(stream)) => {
                     if stream.baton_seq != baton_seq {
-                        return Err(ProtocolError::BatonReused).context(format!(
-                            "Expected baton seq {}, received {baton_seq}",
-                            stream.baton_seq
-                        ));
+                        Err(ProtocolError::BatonReused {
+                            reason: format!(
+                                "Expected baton seq {}, received {baton_seq}",
+                                stream.baton_seq
+                            ),
+                        })?;
                     }
                 }
             };
@@ -154,10 +148,7 @@ where
             stream
         }
         None => {
-            let conn = mk_conn()
-                .await
-                .context("Could not create a database connection")?;
-
+            let conn = db.connect().await?;
             let mut state = server.stream_state.lock();
             let stream = Box::new(Stream {
                 conn: Some(conn),
@@ -183,15 +174,15 @@ where
     })
 }
 
-impl Guard {
-    pub fn get_db(&self) -> Result<&ConnectionHandle, ProtocolError> {
+impl<'srv> Guard<'srv> {
+    pub fn get_conn(&self) -> Result<&ConnectionHandle, ProtocolError> {
         let stream = self.stream.as_ref().unwrap();
         stream.conn.as_ref().ok_or(ProtocolError::BatonStreamClosed)
     }
 
     /// Closes the database connection. The next call to [`Guard::release()`] will then remove the
     /// stream.
-    pub fn close_db(&mut self) {
+    pub fn close_conn(&mut self) {
         let stream = self.stream.as_mut().unwrap();
         stream.conn = None;
     }
@@ -212,7 +203,7 @@ impl Guard {
         if stream.conn.is_some() {
             self.release = true; // tell destructor to make the stream available again
             Some(encode_baton(
-                &self.server,
+                self.server,
                 stream.stream_id,
                 stream.baton_seq,
             ))
@@ -222,7 +213,7 @@ impl Guard {
     }
 }
 
-impl Drop for Guard {
+impl<'srv> Drop for Guard<'srv> {
     fn drop(&mut self) {
         let stream = self.stream.take().unwrap();
         let stream_id = stream.stream_id;
@@ -289,17 +280,18 @@ fn encode_baton(server: &Server, stream_id: u64, baton_seq: u64) -> String {
 /// Decodes a baton encoded with `encode_baton()` and returns `(stream_id, baton_seq)`. Always
 /// returns a [`ProtocolError::BatonInvalid`] if the baton is invalid, but it attaches an anyhow
 /// context that describes the precise cause.
-fn decode_baton(server: &Server, baton_str: &str) -> color_eyre::Result<(u64, u64)> {
-    let baton_data = BASE64_STANDARD_NO_PAD.decode(baton_str).map_err(|err| {
-        ProtocolError::BatonInvalid(format!("Could not base64-decode baton: {err}"))
-    })?;
+fn decode_baton(server: &Server, baton_str: &str) -> crate::Result<(u64, u64), HranaError> {
+    let baton_data =
+        BASE64_STANDARD_NO_PAD
+            .decode(baton_str)
+            .map_err(|err| ProtocolError::BatonInvalid {
+                reason: format!("Could not base64-decode baton: {err}"),
+            })?;
 
     if baton_data.len() != 48 {
-        return Err(ProtocolError::BatonInvalid(format!(
-            "Baton has invalid size of {} bytes",
-            baton_data.len()
-        ))
-        .into());
+        Err(ProtocolError::BatonInvalid {
+            reason: format!("Baton has invalid size of {} bytes", baton_data.len()),
+        })?;
     }
 
     let payload = &baton_data[0..16];
@@ -307,11 +299,10 @@ fn decode_baton(server: &Server, baton_str: &str) -> color_eyre::Result<(u64, u6
 
     let mut hmac = hmac::Hmac::<sha2::Sha256>::new_from_slice(&server.baton_key).unwrap();
     hmac.update(payload);
-    hmac.verify_slice(received_mac).map_err(|_| {
-        anyhow!(ProtocolError::BatonInvalid(
-            "Invalid MAC on baton".to_string()
-        ))
-    })?;
+    hmac.verify_slice(received_mac)
+        .map_err(|_| ProtocolError::BatonInvalid {
+            reason: "Invalid MAC on baton".into(),
+        })?;
 
     let stream_id = u64::from_be_bytes(payload[0..8].try_into().unwrap());
     let baton_seq = u64::from_be_bytes(payload[8..16].try_into().unwrap());

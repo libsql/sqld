@@ -184,7 +184,7 @@ impl<T: LibsqlDbType> Database for LibsqlDatabase<T> {
 }
 
 impl InjectableDatabase for LibsqlDatabase<ReplicaType> {
-    fn injector(&mut self) -> crate::Result<Box<dyn super::Injector + Send + 'static>> {
+    fn injector(&self) -> crate::Result<Box<dyn super::Injector + Send + 'static>> {
         Ok(Box::new(Injector::new(
             &self.db_path,
             self.ty.on_commit_cb.clone(),
@@ -228,7 +228,7 @@ mod test {
             on_commit_cb: Arc::new(|_| ()),
             injector_buffer_capacity: 10,
         };
-        let mut db = LibsqlDatabase::new(temp.path().to_path_buf(), replica);
+        let db = LibsqlDatabase::new(temp.path().to_path_buf(), replica);
 
         let mut conn = db.connect().unwrap();
         let row: Arc<Mutex<Vec<Value>>> = Default::default();
@@ -265,7 +265,7 @@ mod test {
             },
         );
 
-        let mut replica = LibsqlDatabase::new(
+        let replica = LibsqlDatabase::new(
             temp_replica.path().to_path_buf(),
             ReplicaType {
                 on_commit_cb: Arc::new(|_| ()),

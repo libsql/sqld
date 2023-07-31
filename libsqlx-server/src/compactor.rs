@@ -47,7 +47,7 @@ impl CompactionQueue {
         env: heed::Env,
         db_path: PathBuf,
         snapshot_store: Arc<SnapshotStore>,
-    ) -> color_eyre::Result<Self> {
+    ) -> crate::Result<Self> {
         let mut txn = env.write_txn()?;
         let queue = env.create_database(&mut txn, Some(Self::COMPACTION_QUEUE_DB_NAME))?;
         let next_id = match queue.last(&mut txn)? {
@@ -67,43 +67,47 @@ impl CompactionQueue {
         })
     }
 
-    pub fn push(&self, job: &CompactionJob) {
+    pub fn push(&self, job: &CompactionJob) -> crate::Result<()> {
         tracing::debug!("new compaction job available: {job:?}");
-        let mut txn = self.env.write_txn().unwrap();
+        let mut txn = self.env.write_txn()?;
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-        self.queue.put(&mut txn, &id, job).unwrap();
-        txn.commit().unwrap();
+        self.queue.put(&mut txn, &id, job)?;
+        txn.commit()?;
         self.notify.send_replace(Some(id));
+
+        Ok(())
     }
 
-    pub async fn peek(&self) -> (u64, CompactionJob) {
+    pub async fn peek(&self) -> crate::Result<(u64, CompactionJob)> {
         let id = self.next_id.load(Ordering::Relaxed);
-        let txn = block_in_place(|| self.env.read_txn().unwrap());
-        match block_in_place(|| self.queue.first(&txn).unwrap()) {
-            Some(job) => job,
-            None => {
-                drop(txn);
-                self.notify
-                    .subscribe()
-                    .wait_for(|x| x.map(|x| x >= id).unwrap_or_default())
-                    .await
-                    .unwrap();
-                block_in_place(|| {
-                    let txn = self.env.read_txn().unwrap();
-                    self.queue.first(&txn).unwrap().unwrap()
-                })
+        let peek = || {
+            block_in_place(|| -> crate::Result<_> {
+                let txn = self.env.read_txn()?;
+                Ok(self.queue.first(&txn)?)
+            })
+        };
+
+        loop {
+            match peek()? {
+                Some(job) => return Ok(job),
+                None => {
+                    self.notify
+                        .subscribe()
+                        .wait_for(|x| x.map(|x| x >= id).unwrap_or_default())
+                        .await
+                        .expect("we're holding the other side of the channel!");
+                }
             }
         }
     }
 
-    fn complete(&self, txn: &mut heed::RwTxn, job_id: u64) {
-        block_in_place(|| {
-            self.queue.delete(txn, &job_id).unwrap();
-        });
+    fn complete(&self, txn: &mut heed::RwTxn, job_id: u64) -> crate::Result<()> {
+        block_in_place(|| self.queue.delete(txn, &job_id))?;
+        Ok(())
     }
 
-    async fn compact(&self) -> color_eyre::Result<()> {
-        let (job_id, job) = self.peek().await;
+    async fn compact(&self) -> crate::Result<()> {
+        let (job_id, job) = self.peek().await?;
         tracing::debug!("starting new compaction job: {job:?}");
         let to_compact_path = self.snapshot_queue_dir().join(job.log_id.to_string());
         let (start_fno, end_fno) = tokio::task::spawn_blocking({
@@ -127,12 +131,15 @@ impl CompactionQueue {
                 builder.finish()
             }
         })
-        .await??;
+        .await
+        .map_err(|_| {
+            crate::error::Error::Internal(color_eyre::eyre::anyhow!("compaction thread panicked"))
+        })??;
 
         let mut txn = self.env.write_txn()?;
-        self.complete(&mut txn, job_id);
+        self.complete(&mut txn, job_id)?;
         self.snapshot_store
-            .register(&mut txn, job.database_id, start_fno, end_fno, job.log_id);
+            .register(&mut txn, job.database_id, start_fno, end_fno, job.log_id)?;
         txn.commit()?;
 
         std::fs::remove_file(to_compact_path)?;
@@ -193,6 +200,7 @@ pub struct SnapshotFrame {
 impl SnapshotFrame {
     const SIZE: usize = size_of::<SnapshotFrameHeader>() + 4096;
 
+    #[cfg(test)]
     pub fn try_from_bytes(data: Bytes) -> crate::Result<Self> {
         if data.len() != Self::SIZE {
             color_eyre::eyre::bail!("invalid snapshot frame")
@@ -220,7 +228,7 @@ impl SnapshotBuilder {
         snapshot_id: Uuid,
         start_fno: FrameNo,
         end_fno: FrameNo,
-    ) -> color_eyre::Result<Self> {
+    ) -> crate::Result<Self> {
         let temp_dir = db_path.join("tmp");
         let mut target = BufWriter::new(NamedTempFile::new_in(&temp_dir)?);
         // reserve header space
@@ -242,7 +250,7 @@ impl SnapshotBuilder {
         })
     }
 
-    pub fn push_frame(&mut self, frame: Frame) -> color_eyre::Result<()> {
+    pub fn push_frame(&mut self, frame: Frame) -> crate::Result<()> {
         assert!(frame.header().frame_no < self.last_seen_frame_no);
         self.last_seen_frame_no = frame.header().frame_no;
 
@@ -265,16 +273,21 @@ impl SnapshotBuilder {
     }
 
     /// Persist the snapshot, and returns the name and size is frame on the snapshot.
-    pub fn finish(mut self) -> color_eyre::Result<(FrameNo, FrameNo)> {
+    pub fn finish(mut self) -> crate::Result<(FrameNo, FrameNo)> {
         self.snapshot_file.flush()?;
-        let file = self.snapshot_file.into_inner()?;
+        let file = self
+            .snapshot_file
+            .into_inner()
+            .map_err(|e| crate::error::Error::Internal(e.into()))?;
+
         file.as_file().write_all_at(bytes_of(&self.header), 0)?;
 
         let path = self
             .db_path
             .join("snapshots")
             .join(self.snapshot_id.to_string());
-        file.persist(path)?;
+        file.persist(path)
+            .map_err(|e| crate::error::Error::Internal(e.into()))?;
 
         Ok((self.header.start_frame_no, self.header.end_frame_no))
     }
@@ -286,7 +299,7 @@ pub struct SnapshotFile {
 }
 
 impl SnapshotFile {
-    pub fn open(path: &Path) -> color_eyre::Result<Self> {
+    pub fn open(path: &Path) -> crate::Result<Self> {
         let file = File::open(path)?;
         let mut header_buf = [0; size_of::<SnapshotFileHeader>()];
         file.read_exact_at(&mut header_buf, 0)?;

@@ -1,7 +1,5 @@
-use crate::auth::Auth;
+// use crate::auth::Auth;
 use crate::database::Database;
-use crate::utils::services::idle_shutdown::IdleKicker;
-use anyhow::{Context as _, Result};
 use enclose::enclose;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -14,10 +12,9 @@ mod conn;
 mod handshake;
 mod session;
 
-struct Server<D> {
-    db_factory: Arc<dyn DbFactory<Db = D>>,
+struct Server {
     auth: Arc<Auth>,
-    idle_kicker: Option<IdleKicker>,
+    // idle_kicker: Option<IdleKicker>,
     next_conn_id: AtomicU64,
 }
 

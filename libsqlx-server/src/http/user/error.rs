@@ -11,6 +11,8 @@ pub enum UserApiError {
     InvalidHost,
     #[error("Database `{0}` doesn't exist")]
     UnknownDatabase(String),
+    #[error(transparent)]
+    LibsqlxServer(#[from] crate::error::Error),
 }
 
 impl UserApiError {
@@ -19,6 +21,7 @@ impl UserApiError {
             UserApiError::MissingHost
             | UserApiError::InvalidHost
             | UserApiError::UnknownDatabase(_) => StatusCode::BAD_REQUEST,
+            UserApiError::LibsqlxServer(_) => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }
 }

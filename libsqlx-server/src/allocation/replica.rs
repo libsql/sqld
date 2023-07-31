@@ -60,7 +60,7 @@ impl libsqlx::Connection for RemoteConn {
         &mut self,
         program: &libsqlx::program::Program,
         builder: Box<dyn ResultBuilder>,
-    ) -> libsqlx::Result<()> {
+    ) {
         // When we need to proxy a query, we place it in the current request slot. When we are
         // back in a async context, we'll send it to the primary, and asynchrously drive the
         // builder.
@@ -75,8 +75,6 @@ impl libsqlx::Connection for RemoteConn {
                 timeout: Box::pin(tokio::time::sleep(self.inner.request_timeout_duration)),
             }),
         };
-
-        Ok(())
     }
 
     fn describe(&self, _sql: String) -> libsqlx::Result<DescribeResponse> {
@@ -130,7 +128,15 @@ impl Replicator {
     }
 
     pub async fn run(mut self) {
-        self.query_replicate().await;
+        macro_rules! ok_or_log {
+            ($e:expr) => {
+                if let Err(e) = $e {
+                    tracing::warn!("failed to start replication process: {e}");
+                }
+            };
+        }
+
+        ok_or_log!(self.query_replicate().await);
         loop {
             match timeout(Duration::from_secs(5), self.receiver.recv()).await {
                 Ok(Some(Frames {
@@ -147,7 +153,7 @@ impl Replicator {
                         // this is not the batch of frame we were expecting, drop what we have, and
                         // ask again from last checkpoint
                         tracing::debug!(seq, self.next_seq, "wrong seq");
-                        self.query_replicate().await;
+                        ok_or_log!(self.query_replicate().await);
                         continue;
                     };
                     self.next_seq += 1;
@@ -155,23 +161,32 @@ impl Replicator {
                     tracing::debug!("injecting {} frames", frames.len());
 
                     for bytes in frames {
-                        let frame = Frame::try_from_bytes(bytes).unwrap();
-                        block_in_place(|| {
-                            if let Some(last_committed) = self.injector.inject(frame).unwrap() {
-                                tracing::debug!(last_committed);
-                                self.next_frame_no = last_committed + 1;
-                            }
-                        });
+                        let inject = || -> crate::Result<()> {
+                            let frame = Frame::try_from_bytes(bytes)?;
+                            block_in_place(|| {
+                                if let Some(last_committed) = self.injector.inject(frame).unwrap() {
+                                    tracing::debug!(last_committed);
+                                    self.next_frame_no = last_committed + 1;
+                                }
+                                Ok(())
+                            })
+                        };
+
+                        if let Err(e) = inject() {
+                            tracing::error!("error injecting frames: {e}");
+                            ok_or_log!(self.query_replicate().await);
+                            break;
+                        }
                     }
                 }
                 // no news from primary for the past 5 secs, send a request again
-                Err(_) => self.query_replicate().await,
+                Err(_) => ok_or_log!(self.query_replicate().await),
                 Ok(None) => break,
             }
         }
     }
 
-    async fn query_replicate(&mut self) {
+    async fn query_replicate(&mut self) -> crate::Result<()> {
         tracing::debug!("seinding replication request");
         self.req_id += 1;
         self.next_seq = 0;
@@ -188,7 +203,9 @@ impl Replicator {
                     },
                 },
             })
-            .await;
+            .await?;
+
+        Ok(())
     }
 }
 
@@ -290,7 +307,7 @@ impl ConnectionHandler for ReplicaConnection {
     async fn handle_conn_message(&mut self, msg: ConnectionMessage) {
         match msg {
             ConnectionMessage::Execute { pgm, builder } => {
-                self.conn.execute_program(&pgm, builder).unwrap();
+                self.conn.execute_program(&pgm, builder);
                 let msg = {
                     let mut lock = self.conn.writer().inner.current_req.lock();
                     match *lock {

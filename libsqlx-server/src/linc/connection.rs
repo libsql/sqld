@@ -62,13 +62,24 @@ impl SendQueue {
         }
     }
 
-    pub async fn enqueue(&self, msg: Outbound) {
+    pub async fn enqueue(&self, msg: Outbound) -> crate::Result<()> {
         let sender = match self.senders.read().get(&msg.to) {
             Some(sender) => sender.clone(),
-            None => todo!("no queue"),
+            None => {
+                return Err(crate::error::Error::Internal(color_eyre::eyre::anyhow!(
+                    "failed to deliver message: unknown node id `{}`",
+                    msg.to
+                )))
+            }
         };
 
-        sender.send(msg.enveloppe).unwrap();
+        sender.send(msg.enveloppe).map_err(|_| {
+            crate::error::Error::Internal(color_eyre::eyre::anyhow!(
+                "failed to deliver message: connection closed"
+            ))
+        })?;
+
+        Ok(())
     }
 
     pub fn register(&self, node_id: NodeId) -> mpsc::UnboundedReceiver<Enveloppe> {
@@ -155,14 +166,22 @@ where
                     }
                 }
             },
-            // TODO: pop send queue
-            Some(m) = self.send_queue.as_mut().unwrap().recv() => {
-                self.conn.feed(m).await.unwrap();
-                // send as many as possible
-                while let Ok(m) = self.send_queue.as_mut().unwrap().try_recv() {
-                    self.conn.feed(m).await.unwrap();
+            Some(m) = self.send_queue.as_mut().expect("no send_queue in connected sate").recv() => {
+                let feed = || async {
+                    self.conn.feed(m).await?;
+                    // send as many as possible
+                    while let Ok(m) = self.send_queue.as_mut().expect("no send_queue in connected sate").try_recv() {
+                        self.conn.feed(m).await?;
+                    }
+                    self.conn.flush().await?;
+
+                    Ok(())
+                };
+
+                if let Err(e) = feed().await {
+                    tracing::error!("error flusing send queue for {}; closing connection", self.peer.unwrap());
+                    self.state = ConnectionState::CloseError(e)
                 }
-                self.conn.flush().await.unwrap();
             },
             else => {
                 self.state = ConnectionState::Close;

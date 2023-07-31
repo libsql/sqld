@@ -18,7 +18,7 @@ mod headers;
 mod hook;
 
 pub type FrameBuffer = Arc<Mutex<VecDeque<Frame>>>;
-pub type OnCommitCb = Arc<dyn Fn(FrameNo) + Send + Sync + 'static>;
+pub type OnCommitCb = Arc<dyn Fn(FrameNo) -> bool + Send + Sync + 'static>;
 
 pub struct Injector {
     /// The injector is in a transaction state
@@ -85,7 +85,7 @@ impl Injector {
         self.buffer.lock().push_back(frame);
         if frame_close_txn || self.buffer.lock().len() >= self.capacity {
             if !self.is_txn {
-                self.begin_txn();
+                self.begin_txn()?;
             }
             return self.flush();
         }
@@ -135,14 +135,14 @@ impl Injector {
 
     fn commit(&mut self) {
         // TODO: error?
-        let _ = self.connection.execute("COMMIT", ());
+        let _ = dbg!(self.connection.execute("COMMIT", ()));
     }
 
-    fn begin_txn(&mut self) {
-        self.connection.execute("BEGIN IMMEDIATE", ()).unwrap();
+    fn begin_txn(&mut self) -> crate::Result<()> {
+        self.connection.execute("BEGIN IMMEDIATE", ())?;
         self.connection
-            .execute("CREATE TABLE __DUMMY__ (__dummy__)", ())
-            .unwrap();
+            .execute("CREATE TABLE __DUMMY__ (__dummy__)", ())?;
+        Ok(())
     }
 }
 

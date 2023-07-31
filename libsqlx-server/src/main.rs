@@ -3,7 +3,6 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use clap::Parser;
-use color_eyre::eyre::Result;
 use compactor::{run_compactor_loop, CompactionQueue};
 use config::{AdminApiConfig, ClusterConfig, UserApiConfig};
 use http::admin::run_admin_api;
@@ -24,6 +23,7 @@ mod allocation;
 mod compactor;
 mod config;
 mod database;
+mod error;
 mod hrana;
 mod http;
 mod linc;
@@ -31,6 +31,8 @@ mod manager;
 mod meta;
 mod replica_commit_store;
 mod snapshot_store;
+
+pub type Result<T, E = error::Error> = std::result::Result<T, E>;
 
 #[derive(Debug, Parser)]
 struct Args {
@@ -40,10 +42,10 @@ struct Args {
 }
 
 async fn spawn_admin_api(
-    set: &mut JoinSet<Result<()>>,
+    set: &mut JoinSet<color_eyre::Result<()>>,
     config: &AdminApiConfig,
     bus: Arc<Bus<Arc<Manager>>>,
-) -> Result<()> {
+) -> color_eyre::Result<()> {
     let admin_api_listener = TcpListener::bind(config.addr).await?;
     let fut = run_admin_api(
         http::admin::Config { bus },
@@ -55,14 +57,26 @@ async fn spawn_admin_api(
 }
 
 async fn spawn_user_api(
-    set: &mut JoinSet<Result<()>>,
+    set: &mut JoinSet<color_eyre::Result<()>>,
     config: &UserApiConfig,
     manager: Arc<Manager>,
     bus: Arc<Bus<Arc<Manager>>>,
-) -> Result<()> {
+) -> color_eyre::Result<()> {
     let user_api_listener = TcpListener::bind(config.addr).await?;
+    let hrana_server = Arc::new(hrana::http::Server::new(None));
+    set.spawn({
+        let hrana_server = hrana_server.clone();
+        async move {
+            hrana_server.run_expire().await;
+            Ok(())
+        }
+    });
     set.spawn(run_user_api(
-        http::user::Config { manager, bus },
+        http::user::Config {
+            manager,
+            bus,
+            hrana_server,
+        },
         AddrIncoming::from_listener(user_api_listener)?,
     ));
 
@@ -70,10 +84,10 @@ async fn spawn_user_api(
 }
 
 async fn spawn_cluster_networking(
-    set: &mut JoinSet<Result<()>>,
+    set: &mut JoinSet<color_eyre::Result<()>>,
     config: &ClusterConfig,
     bus: Arc<Bus<Arc<Manager>>>,
-) -> Result<()> {
+) -> color_eyre::Result<()> {
     let server = linc::server::Server::new(bus.clone());
 
     let listener = TcpListener::bind(config.addr).await?;
@@ -102,8 +116,9 @@ async fn init_dirs(db_path: &Path) -> color_eyre::Result<()> {
 }
 
 #[tokio::main(flavor = "multi_thread", worker_threads = 10)]
-async fn main() -> Result<()> {
-    init();
+async fn main() -> color_eyre::Result<()> {
+    init()?;
+
     let args = Args::parse();
     let config_str = read_to_string(args.config)?;
     let config: config::Config = toml::from_str(&config_str)?;
@@ -124,8 +139,8 @@ async fn main() -> Result<()> {
         config.db_path.clone(),
         snapshot_store,
     )?);
-    let store = Arc::new(Store::new(env.clone()));
-    let replica_commit_store = Arc::new(ReplicaCommitStore::new(env.clone()));
+    let store = Arc::new(Store::new(env.clone())?);
+    let replica_commit_store = Arc::new(ReplicaCommitStore::new(env.clone())?);
     let manager = Arc::new(Manager::new(
         config.db_path.clone(),
         store.clone(),
@@ -145,7 +160,7 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-fn init() {
+fn init() -> color_eyre::Result<()> {
     let registry = tracing_subscriber::registry();
 
     registry
@@ -160,5 +175,7 @@ fn init() {
         )
         .init();
 
-    color_eyre::install().unwrap();
+    color_eyre::install()?;
+
+    Ok(())
 }

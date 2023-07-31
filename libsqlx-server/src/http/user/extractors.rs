@@ -20,7 +20,7 @@ impl FromRequestParts<Arc<UserApiState>> for Database {
         let Ok(host_str) = std::str::from_utf8(host.as_bytes()) else {return Err(UserApiError::MissingHost)};
         let db_name = parse_host(host_str)?;
         let db_id = DatabaseId::from_name(db_name);
-        let Some(sender) = state.manager.schedule(db_id, state.bus.clone()).await else { return Err(UserApiError::UnknownDatabase(db_name.to_owned())) };
+        let Some(sender) = state.manager.schedule(db_id, state.bus.clone()).await? else { return Err(UserApiError::UnknownDatabase(db_name.to_owned())) };
 
         Ok(Database { sender })
     }

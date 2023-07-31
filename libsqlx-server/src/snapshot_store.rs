@@ -10,6 +10,8 @@ use uuid::Uuid;
 
 use crate::{compactor::SnapshotFile, meta::DatabaseId};
 
+/// Equivalent to a u64, but stored in big-endian ordering.
+/// Used for storing values whose bytes need to be lexically ordered.
 #[derive(Clone, Copy, Zeroable, Pod, Debug)]
 #[repr(transparent)]
 struct BEU64([u8; size_of::<u64>()]);
@@ -48,8 +50,8 @@ pub struct SnapshotStore {
 impl SnapshotStore {
     const SNAPSHOT_STORE_NAME: &str = "snapshot-store-db";
 
-    pub fn new(db_path: PathBuf, env: heed::Env) -> color_eyre::Result<Self> {
-        let mut txn = env.write_txn().unwrap();
+    pub fn new(db_path: PathBuf, env: heed::Env) -> crate::Result<Self> {
+        let mut txn = env.write_txn()?;
         let database = env.create_database(&mut txn, Some(Self::SNAPSHOT_STORE_NAME))?;
         txn.commit()?;
 
@@ -67,7 +69,7 @@ impl SnapshotStore {
         start_frame_no: FrameNo,
         end_frame_no: FrameNo,
         snapshot_id: Uuid,
-    ) {
+    ) -> crate::Result<()> {
         let key = SnapshotKey {
             database_id,
             start_frame_no: start_frame_no.into(),
@@ -76,13 +78,19 @@ impl SnapshotStore {
 
         let data = SnapshotMeta { snapshot_id };
 
-        block_in_place(|| self.database.put(txn, &key, &data).unwrap());
+        block_in_place(|| self.database.put(txn, &key, &data))?;
+
+        Ok(())
     }
 
     /// Locate a snapshot for `database_id` that contains `frame_no`
-    pub fn locate(&self, database_id: DatabaseId, frame_no: FrameNo) -> Option<SnapshotMeta> {
-        let txn = self.env.read_txn().unwrap();
-        // Snapshot keys being lexicographically ordered, looking for the first key less than of
+    pub fn locate(
+        &self,
+        database_id: DatabaseId,
+        frame_no: FrameNo,
+    ) -> crate::Result<Option<SnapshotMeta>> {
+        let txn = self.env.read_txn()?;
+        // Snapshot keys are lexicographically ordered, looking for the first key less than of
         // equal to (db_id, frame_no, FrameNo::MAX) will always return the entry we're looking for
         // if it exists.
         let key = SnapshotKey {
@@ -91,14 +99,10 @@ impl SnapshotStore {
             end_frame_no: u64::MAX.into(),
         };
 
-        match self
-            .database
-            .get_lower_than_or_equal_to(&txn, &key)
-            .transpose()?
-        {
-            Ok((key, v)) => {
+        match self.database.get_lower_than_or_equal_to(&txn, &key)? {
+            Some((key, v)) => {
                 if key.database_id != database_id {
-                    return None;
+                    return Ok(None);
                 } else if frame_no >= key.start_frame_no.into()
                     && frame_no <= key.end_frame_no.into()
                 {
@@ -107,22 +111,26 @@ impl SnapshotStore {
                         u64::from(key.start_frame_no),
                         u64::from(key.end_frame_no)
                     );
-                    return Some(v);
+                    return Ok(Some(v));
                 } else {
-                    None
+                    Ok(None)
                 }
             }
-            Err(_) => todo!(),
+            None => Ok(None),
         }
     }
 
-    pub fn locate_file(&self, database_id: DatabaseId, frame_no: FrameNo) -> Option<SnapshotFile> {
-        let meta = self.locate(database_id, frame_no)?;
+    pub fn locate_file(
+        &self,
+        database_id: DatabaseId,
+        frame_no: FrameNo,
+    ) -> crate::Result<Option<SnapshotFile>> {
+        let Some(meta) = self.locate(database_id, frame_no)? else { return Ok(None) };
         let path = self
             .db_path
             .join("snapshots")
             .join(meta.snapshot_id.to_string());
-        Some(SnapshotFile::open(&path).unwrap())
+        Ok(Some(SnapshotFile::open(&path)?))
     }
 }
 

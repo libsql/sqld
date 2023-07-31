@@ -24,11 +24,7 @@ pub struct DescribeCol {
 
 pub trait Connection {
     /// Executes a query program
-    fn execute_program(
-        &mut self,
-        pgm: &Program,
-        result_builder: Box<dyn ResultBuilder>,
-    ) -> crate::Result<()>;
+    fn execute_program(&mut self, pgm: &Program, result_builder: Box<dyn ResultBuilder>);
 
     /// Parse the SQL statement and return information about it.
     fn describe(&self, sql: String) -> crate::Result<DescribeResponse>;
@@ -39,11 +35,7 @@ where
     T: Connection,
     X: Connection,
 {
-    fn execute_program(
-        &mut self,
-        pgm: &Program,
-        result_builder: Box<dyn ResultBuilder>,
-    ) -> crate::Result<()> {
+    fn execute_program(&mut self, pgm: &Program, result_builder: Box<dyn ResultBuilder>) {
         match self {
             Either::Left(c) => c.execute_program(pgm, result_builder),
             Either::Right(c) => c.execute_program(pgm, result_builder),

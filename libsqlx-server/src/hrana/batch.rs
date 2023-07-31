@@ -1,20 +1,22 @@
 use std::collections::HashMap;
+use std::sync::Arc;
 
-use crate::allocation::ConnectionHandle;
-use crate::hrana::stmt::StmtError;
+// use crate::auth::Authenticated;
 
-use super::result_builder::HranaBatchProtoBuilder;
-use super::stmt::{proto_stmt_to_query, stmt_error_from_sqld_error};
-use super::{proto, ProtocolError, Version};
-
-use color_eyre::eyre::anyhow;
 use libsqlx::analysis::Statement;
 use libsqlx::program::{Cond, Program, Step};
 use libsqlx::query::{Params, Query};
 use libsqlx::result_builder::{StepResult, StepResultsBuilder};
 use tokio::sync::oneshot;
 
-fn proto_cond_to_cond(cond: &proto::BatchCond, max_step_i: usize) -> color_eyre::Result<Cond> {
+use crate::allocation::ConnectionHandle;
+
+use super::error::HranaError;
+use super::result_builder::HranaBatchProtoBuilder;
+use super::stmt::{proto_stmt_to_query, StmtError};
+use super::{proto, ProtocolError, Version};
+
+fn proto_cond_to_cond(cond: &proto::BatchCond, max_step_i: usize) -> Result<Cond, HranaError> {
     let try_convert_step = |step: i32| -> Result<usize, ProtocolError> {
         let step = usize::try_from(step).map_err(|_| ProtocolError::BatchCondBadStep)?;
         if step >= max_step_i {
@@ -22,6 +24,7 @@ fn proto_cond_to_cond(cond: &proto::BatchCond, max_step_i: usize) -> color_eyre:
         }
         Ok(step)
     };
+
     let cond = match cond {
         proto::BatchCond::Ok { step } => Cond::Ok {
             step: try_convert_step(*step)?,
@@ -36,13 +39,13 @@ fn proto_cond_to_cond(cond: &proto::BatchCond, max_step_i: usize) -> color_eyre:
             conds: conds
                 .iter()
                 .map(|cond| proto_cond_to_cond(cond, max_step_i))
-                .collect::<color_eyre::Result<_>>()?,
+                .collect::<crate::Result<_, HranaError>>()?,
         },
         proto::BatchCond::Or { conds } => Cond::Or {
             conds: conds
                 .iter()
                 .map(|cond| proto_cond_to_cond(cond, max_step_i))
-                .collect::<color_eyre::Result<_>>()?,
+                .collect::<crate::Result<_, HranaError>>()?,
         },
     };
 
@@ -53,7 +56,7 @@ pub fn proto_batch_to_program(
     batch: &proto::Batch,
     sqls: &HashMap<i32, String>,
     version: Version,
-) -> color_eyre::Result<Program> {
+) -> Result<Program, HranaError> {
     let mut steps = Vec::with_capacity(batch.steps.len());
     for (step_i, step) in batch.steps.iter().enumerate() {
         let query = proto_stmt_to_query(&step.stmt, sqls, version)?;
@@ -71,19 +74,27 @@ pub fn proto_batch_to_program(
 }
 
 pub async fn execute_batch(
-    db: &ConnectionHandle,
+    conn: &ConnectionHandle,
+    // auth: Authenticated,
     pgm: Program,
-) -> color_eyre::Result<proto::BatchResult> {
+) -> Result<proto::BatchResult, HranaError> {
     let (builder, ret) = HranaBatchProtoBuilder::new();
-    db.execute(pgm, Box::new(builder)).await?;
+    conn.execute(
+        pgm,
+        // auth,
+        Box::new(builder),
+    )
+    .await;
 
-    Ok(ret.await?)
+    Ok(ret
+        .await
+        .map_err(|_| crate::error::Error::ConnectionClosed)?)
 }
 
-pub fn proto_sequence_to_program(sql: &str) -> color_eyre::Result<Program> {
+pub fn proto_sequence_to_program(sql: &str) -> Result<Program, HranaError> {
     let stmts = Statement::parse(sql)
-        .collect::<libsqlx::Result<Vec<_>>>()
-        .map_err(|err| anyhow!(StmtError::SqlParse { source: err.into() }))?;
+        .collect::<crate::Result<Vec<_>, libsqlx::error::Error>>()
+        .map_err(|err| StmtError::SqlParse { source: err.into() })?;
 
     let steps = stmts
         .into_iter()
@@ -100,25 +111,32 @@ pub fn proto_sequence_to_program(sql: &str) -> color_eyre::Result<Program> {
             };
             Step { cond, query }
         })
-        .collect();
+        .collect::<Arc<[Step]>>();
 
     Ok(Program { steps })
 }
 
-pub async fn execute_sequence(conn: &ConnectionHandle, pgm: Program) -> color_eyre::Result<()> {
-    let (snd, rcv) = oneshot::channel();
-    let builder = StepResultsBuilder::new(snd);
-    conn.execute(pgm, Box::new(builder)).await?;
+pub async fn execute_sequence(
+    conn: &ConnectionHandle,
+    // auth: Authenticated,
+    pgm: Program,
+) -> Result<(), HranaError> {
+    let (send, ret) = oneshot::channel();
+    let builder = StepResultsBuilder::new(send);
+    conn.execute(
+        pgm,
+        // auth,
+        Box::new(builder),
+    )
+    .await;
 
-    rcv.await?
-        .map_err(|e| anyhow!("{e}"))?
+    ret.await
+        .unwrap()
+        .unwrap()
         .into_iter()
         .try_for_each(|result| match result {
             StepResult::Ok => Ok(()),
-            StepResult::Err(e) => match stmt_error_from_sqld_error(e) {
-                Ok(stmt_err) => Err(anyhow!(stmt_err)),
-                Err(sqld_err) => Err(anyhow!(sqld_err)),
-            },
-            StepResult::Skipped => Err(anyhow!("Statement in sequence was not executed")),
+            StepResult::Err(e) => Err(crate::error::Error::from(e))?,
+            StepResult::Skipped => todo!(), // Err(anyhow!("Statement in sequence was not executed")),
         })
 }

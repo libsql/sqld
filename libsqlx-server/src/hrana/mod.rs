@@ -6,6 +6,7 @@ pub mod proto;
 mod result_builder;
 pub mod stmt;
 // pub mod ws;
+pub mod error;
 
 #[derive(Debug, Copy, Clone, PartialOrd, Ord, PartialEq, Eq)]
 pub enum Version {
@@ -50,10 +51,10 @@ pub enum ProtocolError {
     #[error("Invalid reference to step in a batch condition")]
     BatchCondBadStep,
 
-    #[error("Received an invalid baton: {0}")]
-    BatonInvalid(String),
-    #[error("Received a baton that has already been used")]
-    BatonReused,
+    #[error("Received an invalid baton: {reason}")]
+    BatonInvalid { reason: String },
+    #[error("Received a baton that has already been used: {reason}")]
+    BatonReused { reason: String },
     #[error("Stream for this baton was closed")]
     BatonStreamClosed,
 

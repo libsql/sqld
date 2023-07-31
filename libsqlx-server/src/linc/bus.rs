@@ -36,11 +36,9 @@ impl<H: Handler> Bus<H> {
     }
 
     pub async fn incomming(self: &Arc<Self>, incomming: Inbound) {
-        self.handler.handle(self.clone(), incomming).await;
-    }
-
-    pub fn send_queue(&self) -> &SendQueue {
-        &self.send_queue
+        if let Err(e) = self.handler.handle(self.clone(), incomming).await {
+            tracing::error!("error handling message: {e}")
+        }
     }
 
     pub fn connect(&self, node_id: NodeId) -> mpsc::UnboundedReceiver<Enveloppe> {
@@ -48,27 +46,26 @@ impl<H: Handler> Bus<H> {
         self.peers.write().insert(node_id);
         self.send_queue.register(node_id)
     }
-
-    pub fn disconnect(&self, node_id: NodeId) {
-        self.peers.write().remove(&node_id);
-    }
 }
 
 #[async_trait::async_trait]
 pub trait Dispatch: Send + Sync + 'static {
-    async fn dispatch(&self, msg: Outbound);
+    async fn dispatch(&self, msg: Outbound) -> crate::Result<()>;
+    /// id of the current node
     fn node_id(&self) -> NodeId;
 }
 
 #[async_trait::async_trait]
 impl<H: Handler> Dispatch for Bus<H> {
-    async fn dispatch(&self, msg: Outbound) {
+    async fn dispatch(&self, msg: Outbound) -> crate::Result<()> {
         assert!(
             msg.to != self.node_id(),
             "trying to send a message to ourself!"
         );
         // This message is outbound.
-        self.send_queue.enqueue(msg).await;
+        self.send_queue.enqueue(msg).await?;
+
+        Ok(())
     }
 
     fn node_id(&self) -> NodeId {
