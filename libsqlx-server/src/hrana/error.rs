@@ -18,13 +18,11 @@ pub enum HranaError {
 }
 
 impl HranaError {
-    pub fn code(&self) -> Option<&str>{
+    pub fn code(&self) -> Option<&str> {
         match self {
             HranaError::Stmt(e) => Some(e.code()),
             HranaError::StreamResponse(e) => Some(e.code()),
-            HranaError::Stream(_)
-            | HranaError::Libsqlx(_)
-            | HranaError::Proto(_) => None,
+            HranaError::Stream(_) | HranaError::Libsqlx(_) | HranaError::Proto(_) => None,
         }
     }
 }

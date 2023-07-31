@@ -12,7 +12,7 @@ use crate::compactor::CompactionQueue;
 use crate::linc::bus::Dispatch;
 use crate::linc::handler::Handler;
 use crate::linc::Inbound;
-use crate::meta::{DatabaseId, Store};
+use crate::meta::{AllocMeta, DatabaseId, Store};
 use crate::replica_commit_store::ReplicaCommitStore;
 
 pub struct Manager {
@@ -52,14 +52,14 @@ impl Manager {
             return Ok(Some(sender.clone()));
         }
 
-        if let Some(config) = self.meta_store.meta(&database_id)? {
+        if let Some(meta) = self.meta_store.meta(&database_id)? {
             let path = self.db_path.join("dbs").join(database_id.to_string());
             tokio::fs::create_dir_all(&path).await?;
             let (alloc_sender, inbox) = mpsc::channel(MAX_ALLOC_MESSAGE_QUEUE_LEN);
             let alloc = Allocation {
                 inbox,
                 database: Database::from_config(
-                    &config,
+                    &meta.config,
                     path,
                     dispatcher.clone(),
                     self.compaction_queue.clone(),
@@ -67,9 +67,9 @@ impl Manager {
                 )?,
                 connections_futs: JoinSet::new(),
                 next_conn_id: 0,
-                max_concurrent_connections: config.max_conccurent_connection,
+                max_concurrent_connections: meta.config.max_conccurent_connection,
                 dispatcher,
-                db_name: config.db_name,
+                db_name: meta.config.db_name,
                 connections: HashMap::new(),
             };
 
@@ -86,12 +86,13 @@ impl Manager {
     pub async fn allocate(
         self: &Arc<Self>,
         database_id: DatabaseId,
-        meta: &AllocConfig,
+        config: AllocConfig,
         dispatcher: Arc<dyn Dispatch>,
-    ) -> crate::Result<()> {
-        self.store().allocate(&database_id, meta)?;
+    ) -> crate::Result<AllocMeta> {
+        let meta = self.store().allocate(&database_id, config)?;
         self.schedule(database_id, dispatcher).await?;
-        Ok(())
+
+        Ok(meta)
     }
 
     pub async fn deallocate(&self, database_id: DatabaseId) -> crate::Result<()> {
