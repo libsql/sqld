@@ -1,3 +1,5 @@
+use crate::meta::AllocationError;
+
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error(transparent)]
@@ -11,5 +13,9 @@ pub enum Error {
     #[error("allocation closed")]
     AllocationClosed,
     #[error("internal error: {0}")]
-    Internal(String),
+    Internal(color_eyre::eyre::Error),
+    #[error(transparent)]
+    Heed(#[from] heed::Error),
+    #[error(transparent)]
+    Allocation(#[from] AllocationError),
 }

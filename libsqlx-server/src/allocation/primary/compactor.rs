@@ -57,7 +57,7 @@ impl LogCompactor for Compactor {
         self.queue.push(&CompactionJob {
             database_id: self.database_id,
             log_id,
-        });
+        })?;
 
         Ok(())
     }

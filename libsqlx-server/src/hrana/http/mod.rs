@@ -15,12 +15,6 @@ pub struct Server {
     stream_state: Mutex<stream::ServerStreamState>,
 }
 
-#[derive(Debug)]
-pub enum Route {
-    GetIndex,
-    PostPipeline,
-}
-
 impl Server {
     pub fn new(self_url: Option<String>) -> Self {
         Self {
@@ -40,8 +34,7 @@ pub async fn handle_pipeline(
     // auth: Authenticated,
     req: proto::PipelineRequestBody,
     db: Database,
-) -> crate::Result<proto::PipelineResponseBody, HranaError>
-{
+) -> crate::Result<proto::PipelineResponseBody, HranaError> {
     let mut stream_guard = stream::acquire(server, req.baton.as_deref(), db).await?;
 
     let mut results = Vec::with_capacity(req.requests.len());

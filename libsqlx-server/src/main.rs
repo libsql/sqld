@@ -72,7 +72,11 @@ async fn spawn_user_api(
         }
     });
     set.spawn(run_user_api(
-        http::user::Config { manager, bus, hrana_server },
+        http::user::Config {
+            manager,
+            bus,
+            hrana_server,
+        },
         AddrIncoming::from_listener(user_api_listener)?,
     ));
 
@@ -113,7 +117,8 @@ async fn init_dirs(db_path: &Path) -> color_eyre::Result<()> {
 
 #[tokio::main(flavor = "multi_thread", worker_threads = 10)]
 async fn main() -> color_eyre::Result<()> {
-    init();
+    init()?;
+
     let args = Args::parse();
     let config_str = read_to_string(args.config)?;
     let config: config::Config = toml::from_str(&config_str)?;
@@ -134,8 +139,8 @@ async fn main() -> color_eyre::Result<()> {
         config.db_path.clone(),
         snapshot_store,
     )?);
-    let store = Arc::new(Store::new(env.clone()));
-    let replica_commit_store = Arc::new(ReplicaCommitStore::new(env.clone()));
+    let store = Arc::new(Store::new(env.clone())?);
+    let replica_commit_store = Arc::new(ReplicaCommitStore::new(env.clone())?);
     let manager = Arc::new(Manager::new(
         config.db_path.clone(),
         store.clone(),
@@ -155,7 +160,7 @@ async fn main() -> color_eyre::Result<()> {
     Ok(())
 }
 
-fn init() {
+fn init() -> color_eyre::Result<()> {
     let registry = tracing_subscriber::registry();
 
     registry
@@ -170,5 +175,7 @@ fn init() {
         )
         .init();
 
-    color_eyre::install().unwrap();
+    color_eyre::install()?;
+
+    Ok(())
 }

@@ -23,7 +23,7 @@ use crate::compactor::CompactionQueue;
 use crate::error::Error;
 use crate::hrana::proto::DescribeResult;
 use crate::linc::bus::Dispatch;
-use crate::linc::proto::{Message, Frames};
+use crate::linc::proto::{Frames, Message};
 use crate::linc::{Inbound, NodeId};
 use crate::meta::DatabaseId;
 use crate::replica_commit_store::ReplicaCommitStore;
@@ -162,13 +162,12 @@ impl Database {
                 transaction_timeout_duration,
             } => {
                 let next_frame_no =
-                    block_in_place(|| replica_commit_store.get_commit_index(database_id))
+                    block_in_place(|| replica_commit_store.get_commit_index(database_id))?
                         .map(|fno| fno + 1)
                         .unwrap_or(0);
 
-                let commit_callback = Arc::new(move |fno| {
-                    replica_commit_store.commit(database_id, fno);
-                });
+                let commit_callback =
+                    Arc::new(move |fno| replica_commit_store.commit(database_id, fno).is_ok());
 
                 let rdb = LibsqlDatabase::new_replica(
                     path,

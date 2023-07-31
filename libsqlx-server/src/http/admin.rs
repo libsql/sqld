@@ -197,6 +197,7 @@ async fn list_allocs(
         .handler()
         .store()
         .list_allocs()
+        .unwrap()
         .into_iter()
         .map(|cfg| AllocView { id: cfg.db_name })
         .collect();

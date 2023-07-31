@@ -12,8 +12,7 @@ mod conn;
 mod handshake;
 mod session;
 
-struct Server<D> {
-    db_factory: Arc<dyn DbFactory<Db = D>>,
+struct Server {
     auth: Arc<Auth>,
     // idle_kicker: Option<IdleKicker>,
     next_conn_id: AtomicU64,

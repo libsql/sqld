@@ -249,12 +249,10 @@ fn eval_cond(cond: &Cond, results: &[bool]) -> Result<bool> {
 }
 
 impl<T: LibsqlDbType> Connection for LibsqlConnection<T> {
-    fn execute_program(
-        &mut self,
-        pgm: &Program,
-        mut builder: Box<dyn ResultBuilder>,
-    ) -> crate::Result<()> {
-        self.run(pgm, &mut *builder)
+    fn execute_program(&mut self, pgm: &Program, mut builder: Box<dyn ResultBuilder>) {
+        if let Err(e) = self.run(pgm, &mut *builder) {
+            builder.finnalize_error(e.to_string());
+        }
     }
 
     fn describe(&self, sql: String) -> crate::Result<DescribeResponse> {

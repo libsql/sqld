@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use libsqlx::libsql::{LibsqlDatabase, PrimaryType};
-use libsqlx::result_builder::ResultBuilder;
+use libsqlx::result_builder::{QueryResultBuilderError, ResultBuilder};
 use libsqlx::{Connection, Frame, FrameHeader, FrameNo, LogReadError, ReplicationLogger};
 use tokio::task::block_in_place;
 
@@ -58,7 +58,7 @@ impl ProxyResponseBuilder {
         }
     }
 
-    fn maybe_send(&mut self) {
+    fn maybe_send(&mut self) -> crate::Result<()> {
         // FIXME: this is stupid: compute current buffer size on the go instead
         let size = self
             .buffer
@@ -82,11 +82,13 @@ impl ProxyResponseBuilder {
             .sum::<usize>();
 
         if size > MAX_STEP_BATCH_SIZE {
-            self.send()
+            self.send()?;
         }
+
+        Ok(())
     }
 
-    fn send(&mut self) {
+    fn send(&mut self) -> crate::Result<()> {
         let msg = Outbound {
             to: self.to,
             enveloppe: Enveloppe {
@@ -101,7 +103,9 @@ impl ProxyResponseBuilder {
         };
 
         self.next_seq_no += 1;
-        tokio::runtime::Handle::current().block_on(self.dispatcher.dispatch(msg));
+        tokio::runtime::Handle::current().block_on(self.dispatcher.dispatch(msg))?;
+
+        Ok(())
     }
 }
 
@@ -109,15 +113,17 @@ impl ResultBuilder for ProxyResponseBuilder {
     fn init(
         &mut self,
         _config: &libsqlx::result_builder::QueryBuilderConfig,
-    ) -> Result<(), libsqlx::result_builder::QueryResultBuilderError> {
+    ) -> Result<(), QueryResultBuilderError> {
         self.buffer.push(BuilderStep::Init);
-        self.maybe_send();
+        self.maybe_send()
+            .map_err(QueryResultBuilderError::from_any)?;
         Ok(())
     }
 
-    fn begin_step(&mut self) -> Result<(), libsqlx::result_builder::QueryResultBuilderError> {
+    fn begin_step(&mut self) -> Result<(), QueryResultBuilderError> {
         self.buffer.push(BuilderStep::BeginStep);
-        self.maybe_send();
+        self.maybe_send()
+            .map_err(QueryResultBuilderError::from_any)?;
         Ok(())
     }
 
@@ -125,65 +131,70 @@ impl ResultBuilder for ProxyResponseBuilder {
         &mut self,
         affected_row_count: u64,
         last_insert_rowid: Option<i64>,
-    ) -> Result<(), libsqlx::result_builder::QueryResultBuilderError> {
+    ) -> Result<(), QueryResultBuilderError> {
         self.buffer.push(BuilderStep::FinishStep(
             affected_row_count,
             last_insert_rowid,
         ));
-        self.maybe_send();
+        self.maybe_send()
+            .map_err(QueryResultBuilderError::from_any)?;
         Ok(())
     }
 
-    fn step_error(
-        &mut self,
-        error: libsqlx::error::Error,
-    ) -> Result<(), libsqlx::result_builder::QueryResultBuilderError> {
+    fn step_error(&mut self, error: libsqlx::error::Error) -> Result<(), QueryResultBuilderError> {
         self.buffer
             .push(BuilderStep::StepError(StepError(error.to_string())));
-        self.maybe_send();
+        self.maybe_send()
+            .map_err(QueryResultBuilderError::from_any)?;
         Ok(())
     }
 
     fn cols_description(
         &mut self,
         cols: &mut dyn Iterator<Item = libsqlx::result_builder::Column>,
-    ) -> Result<(), libsqlx::result_builder::QueryResultBuilderError> {
+    ) -> Result<(), QueryResultBuilderError> {
         self.buffer
             .push(BuilderStep::ColsDesc(cols.map(Into::into).collect()));
-        self.maybe_send();
+        self.maybe_send()
+            .map_err(QueryResultBuilderError::from_any)?;
         Ok(())
     }
 
-    fn begin_rows(&mut self) -> Result<(), libsqlx::result_builder::QueryResultBuilderError> {
+    fn begin_rows(&mut self) -> Result<(), QueryResultBuilderError> {
         self.buffer.push(BuilderStep::BeginRows);
-        self.maybe_send();
+        self.maybe_send()
+            .map_err(QueryResultBuilderError::from_any)?;
         Ok(())
     }
 
-    fn begin_row(&mut self) -> Result<(), libsqlx::result_builder::QueryResultBuilderError> {
+    fn begin_row(&mut self) -> Result<(), QueryResultBuilderError> {
         self.buffer.push(BuilderStep::BeginRow);
-        self.maybe_send();
+        self.maybe_send()
+            .map_err(QueryResultBuilderError::from_any)?;
         Ok(())
     }
 
     fn add_row_value(
         &mut self,
         v: libsqlx::result_builder::ValueRef,
-    ) -> Result<(), libsqlx::result_builder::QueryResultBuilderError> {
+    ) -> Result<(), QueryResultBuilderError> {
         self.buffer.push(BuilderStep::AddRowValue(v.into()));
-        self.maybe_send();
+        self.maybe_send()
+            .map_err(QueryResultBuilderError::from_any)?;
         Ok(())
     }
 
-    fn finish_row(&mut self) -> Result<(), libsqlx::result_builder::QueryResultBuilderError> {
+    fn finish_row(&mut self) -> Result<(), QueryResultBuilderError> {
         self.buffer.push(BuilderStep::FinishRow);
-        self.maybe_send();
+        self.maybe_send()
+            .map_err(QueryResultBuilderError::from_any)?;
         Ok(())
     }
 
-    fn finish_rows(&mut self) -> Result<(), libsqlx::result_builder::QueryResultBuilderError> {
+    fn finish_rows(&mut self) -> Result<(), QueryResultBuilderError> {
         self.buffer.push(BuilderStep::FinishRows);
-        self.maybe_send();
+        self.maybe_send()
+            .map_err(QueryResultBuilderError::from_any)?;
         Ok(())
     }
 
@@ -191,10 +202,10 @@ impl ResultBuilder for ProxyResponseBuilder {
         &mut self,
         is_txn: bool,
         frame_no: Option<FrameNo>,
-    ) -> Result<bool, libsqlx::result_builder::QueryResultBuilderError> {
+    ) -> Result<bool, QueryResultBuilderError> {
         self.buffer
             .push(BuilderStep::Finnalize { is_txn, frame_no });
-        self.send();
+        self.send().map_err(QueryResultBuilderError::from_any)?;
         Ok(true)
     }
 }
@@ -238,26 +249,31 @@ impl FrameStreamer {
                     }
                 }
                 Err(LogReadError::Error(_)) => todo!("handle log read error"),
-                Err(LogReadError::SnapshotRequired) => self.send_snapshot().await,
+                Err(LogReadError::SnapshotRequired) => {
+                    if let Err(e) = self.send_snapshot().await {
+                        tracing::error!("error sending snapshot: {e}");
+                        break;
+                    }
+                }
             }
         }
     }
 
-    async fn send_snapshot(&mut self) {
+    async fn send_snapshot(&mut self) -> crate::Result<()> {
         tracing::debug!("sending frames from snapshot");
         loop {
             match self
                 .snapshot_store
-                .locate_file(self.database_id, self.next_frame_no)
+                .locate_file(self.database_id, self.next_frame_no)?
             {
                 Some(file) => {
                     let mut iter = file.frames_iter_from(self.next_frame_no).peekable();
 
                     while let Some(frame) = block_in_place(|| iter.next()) {
-                        let frame = frame.unwrap();
+                        let frame = frame?;
                         // TODO: factorize in maybe_send
                         if self.buffer.len() > FRAMES_MESSAGE_MAX_COUNT {
-                            self.send_frames().await;
+                            self.send_frames().await?;
                         }
                         let size_after = iter
                             .peek()
@@ -287,9 +303,11 @@ impl FrameStreamer {
                 }
             }
         }
+
+        Ok(())
     }
 
-    async fn send_frames(&mut self) {
+    async fn send_frames(&mut self) -> crate::Result<()> {
         let frames = std::mem::take(&mut self.buffer);
         let outbound = Outbound {
             to: self.node_id,
@@ -303,7 +321,9 @@ impl FrameStreamer {
             },
         };
         self.seq_no += 1;
-        self.dipatcher.dispatch(outbound).await;
+        self.dipatcher.dispatch(outbound).await?;
+
+        Ok(())
     }
 }
 
@@ -320,7 +340,7 @@ impl ConnectionHandler for PrimaryConnection {
     async fn handle_conn_message(&mut self, msg: ConnectionMessage) {
         match msg {
             ConnectionMessage::Execute { pgm, builder } => {
-                block_in_place(|| self.conn.execute_program(&pgm, builder).unwrap())
+                block_in_place(|| self.conn.execute_program(&pgm, builder))
             }
             ConnectionMessage::Describe => {
                 todo!()

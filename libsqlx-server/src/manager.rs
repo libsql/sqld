@@ -47,14 +47,14 @@ impl Manager {
         self: &Arc<Self>,
         database_id: DatabaseId,
         dispatcher: Arc<dyn Dispatch>,
-    ) -> Option<mpsc::Sender<AllocationMessage>> {
+    ) -> crate::Result<Option<mpsc::Sender<AllocationMessage>>> {
         if let Some(sender) = self.cache.get(&database_id) {
-            return Some(sender.clone());
+            return Ok(Some(sender.clone()));
         }
 
-        if let Some(config) = self.meta_store.meta(&database_id) {
+        if let Some(config) = self.meta_store.meta(&database_id)? {
             let path = self.db_path.join("dbs").join(database_id.to_string());
-            tokio::fs::create_dir_all(&path).await.unwrap();
+            tokio::fs::create_dir_all(&path).await?;
             let (alloc_sender, inbox) = mpsc::channel(MAX_ALLOC_MESSAGE_QUEUE_LEN);
             let alloc = Allocation {
                 inbox,
@@ -64,8 +64,7 @@ impl Manager {
                     dispatcher.clone(),
                     self.compaction_queue.clone(),
                     self.replica_commit_store.clone(),
-                )
-                .unwrap(),
+                )?,
                 connections_futs: JoinSet::new(),
                 next_conn_id: 0,
                 max_concurrent_connections: config.max_conccurent_connection,
@@ -78,10 +77,10 @@ impl Manager {
 
             self.cache.insert(database_id, alloc_sender.clone()).await;
 
-            return Some(alloc_sender);
+            return Ok(Some(alloc_sender));
         }
 
-        None
+        Ok(None)
     }
 
     pub async fn allocate(
@@ -89,16 +88,21 @@ impl Manager {
         database_id: DatabaseId,
         meta: &AllocConfig,
         dispatcher: Arc<dyn Dispatch>,
-    ) {
-        self.store().allocate(&database_id, meta);
-        self.schedule(database_id, dispatcher).await;
+    ) -> crate::Result<()> {
+        self.store().allocate(&database_id, meta)?;
+        self.schedule(database_id, dispatcher).await?;
+        Ok(())
     }
 
-    pub async fn deallocate(&self, database_id: DatabaseId) {
-        self.meta_store.deallocate(&database_id);
+    pub async fn deallocate(&self, database_id: DatabaseId) -> crate::Result<()> {
+        self.meta_store.deallocate(&database_id)?;
         self.cache.remove(&database_id).await;
         let db_path = self.db_path.join("dbs").join(database_id.to_string());
-        tokio::fs::remove_dir_all(db_path).await.unwrap();
+        if db_path.exists() {
+            tokio::fs::remove_dir_all(db_path).await?;
+        }
+
+        Ok(())
     }
 
     pub fn store(&self) -> &Store {
@@ -108,13 +112,15 @@ impl Manager {
 
 #[async_trait::async_trait]
 impl Handler for Arc<Manager> {
-    async fn handle(&self, bus: Arc<dyn Dispatch>, msg: Inbound) {
-        if let Some(sender) = self
-            .clone()
-            .schedule(msg.enveloppe.database_id.unwrap(), bus.clone())
-            .await
-        {
-            let _ = sender.send(AllocationMessage::Inbound(msg)).await;
+    async fn handle(&self, bus: Arc<dyn Dispatch>, msg: Inbound) -> crate::Result<()> {
+        if let Some(database_id) = msg.enveloppe.database_id {
+            if let Some(sender) = self.clone().schedule(database_id, bus.clone()).await? {
+                sender
+                    .send(AllocationMessage::Inbound(msg))
+                    .await
+                    .map_err(|_| crate::error::Error::AllocationClosed)?;
+            }
         }
+        Ok(())
     }
 }

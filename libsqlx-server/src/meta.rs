@@ -3,6 +3,7 @@ use std::mem::size_of;
 
 use heed::bytemuck::{Pod, Zeroable};
 use heed_types::{OwnedType, SerdeBincode};
+use itertools::Itertools;
 use serde::{Deserialize, Serialize};
 use sha3::digest::{ExtendableOutput, Update, XofReader};
 use sha3::Shake128;
@@ -52,64 +53,72 @@ impl AsRef<[u8]> for DatabaseId {
     }
 }
 
+#[derive(Debug, thiserror::Error)]
+pub enum AllocationError {
+    #[error("an allocation already exists for {0}")]
+    AlreadyExist(String),
+}
+
 impl Store {
     const ALLOC_CONFIG_DB_NAME: &'static str = "alloc_conf_db";
 
-    pub fn new(env: heed::Env) -> Self {
-        let mut txn = env.write_txn().unwrap();
-        let alloc_config_db = env
-            .create_database(&mut txn, Some(Self::ALLOC_CONFIG_DB_NAME))
-            .unwrap();
-        txn.commit().unwrap();
+    pub fn new(env: heed::Env) -> crate::Result<Self> {
+        let mut txn = env.write_txn()?;
+        let alloc_config_db = env.create_database(&mut txn, Some(Self::ALLOC_CONFIG_DB_NAME))?;
+        txn.commit()?;
 
-        Self {
+        Ok(Self {
             env,
             alloc_config_db,
-        }
-    }
-
-    pub fn allocate(&self, id: &DatabaseId, meta: &AllocConfig) {
-        //TODO: Handle conflict
-        block_in_place(|| {
-            let mut txn = self.env.write_txn().unwrap();
-            if self
-                .alloc_config_db
-                .lazily_decode_data()
-                .get(&txn, id)
-                .unwrap()
-                .is_some()
-            {
-                panic!("alloc already exists");
-            };
-            self.alloc_config_db.put(&mut txn, id, meta).unwrap();
-            txn.commit().unwrap();
-        });
-    }
-
-    pub fn deallocate(&self, id: &DatabaseId) {
-        block_in_place(|| {
-            let mut txn = self.env.write_txn().unwrap();
-            self.alloc_config_db.delete(&mut txn, id).unwrap();
-            txn.commit().unwrap();
-        });
-    }
-
-    pub fn meta(&self, id: &DatabaseId) -> Option<AllocConfig> {
-        block_in_place(|| {
-            let txn = self.env.read_txn().unwrap();
-            self.alloc_config_db.get(&txn, id).unwrap()
         })
     }
 
-    pub fn list_allocs(&self) -> Vec<AllocConfig> {
+    pub fn allocate(&self, id: &DatabaseId, meta: &AllocConfig) -> crate::Result<()> {
         block_in_place(|| {
-            let txn = self.env.read_txn().unwrap();
-            self.alloc_config_db
-                .iter(&txn)
-                .unwrap()
-                .map(Result::unwrap)
-                .map(|x| x.1)
-                .collect()
+            let mut txn = self.env.write_txn()?;
+            if self
+                .alloc_config_db
+                .lazily_decode_data()
+                .get(&txn, id)?
+                .is_some()
+            {
+                Err(AllocationError::AlreadyExist(meta.db_name.clone()))?;
+            };
+
+            self.alloc_config_db.put(&mut txn, id, meta)?;
+
+            txn.commit()?;
+
+            Ok(())
+        })
+    }
+
+    pub fn deallocate(&self, id: &DatabaseId) -> crate::Result<()> {
+        block_in_place(|| {
+            let mut txn = self.env.write_txn()?;
+            self.alloc_config_db.delete(&mut txn, id)?;
+            txn.commit()?;
+
+            Ok(())
+        })
+    }
+
+    pub fn meta(&self, id: &DatabaseId) -> crate::Result<Option<AllocConfig>> {
+        block_in_place(|| {
+            let txn = self.env.read_txn()?;
+            Ok(self.alloc_config_db.get(&txn, id)?)
+        })
+    }
+
+    pub fn list_allocs(&self) -> crate::Result<Vec<AllocConfig>> {
+        block_in_place(|| {
+            let txn = self.env.read_txn()?;
+            let res = self
+                .alloc_config_db
+                .iter(&txn)?
+                .map(|x| x.map(|x| x.1))
+                .try_collect()?;
+            Ok(res)
         })
     }
 }

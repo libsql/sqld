@@ -114,20 +114,24 @@ pub async fn acquire<'srv>(
             let handle = state.handles.get_mut(&stream_id);
             match handle {
                 None => {
-                    Err(ProtocolError::BatonInvalid { reason: format!("Stream handle for {stream_id} was not found")})?;
+                    Err(ProtocolError::BatonInvalid {
+                        reason: format!("Stream handle for {stream_id} was not found"),
+                    })?;
                 }
                 Some(Handle::Acquired) => {
-                    Err(ProtocolError::BatonReused { reason: format!("Stream handle for {stream_id} is acquired")})?;
+                    Err(ProtocolError::BatonReused {
+                        reason: format!("Stream handle for {stream_id} is acquired"),
+                    })?;
                 }
-                Some(Handle::Expired) => {
-                    Err(StreamError::StreamExpired)?
-                }
+                Some(Handle::Expired) => Err(StreamError::StreamExpired)?,
                 Some(Handle::Available(stream)) => {
                     if stream.baton_seq != baton_seq {
-                        Err(ProtocolError::BatonReused { reason: format!(
-                            "Expected baton seq {}, received {baton_seq}",
-                            stream.baton_seq
-                        )})?;
+                        Err(ProtocolError::BatonReused {
+                            reason: format!(
+                                "Expected baton seq {}, received {baton_seq}",
+                                stream.baton_seq
+                            ),
+                        })?;
                     }
                 }
             };
@@ -144,7 +148,7 @@ pub async fn acquire<'srv>(
             stream
         }
         None => {
-            let conn = db.connect().await.unwrap();
+            let conn = db.connect().await?;
             let mut state = server.stream_state.lock();
             let stream = Box::new(Stream {
                 conn: Some(conn),
@@ -277,15 +281,17 @@ fn encode_baton(server: &Server, stream_id: u64, baton_seq: u64) -> String {
 /// returns a [`ProtocolError::BatonInvalid`] if the baton is invalid, but it attaches an anyhow
 /// context that describes the precise cause.
 fn decode_baton(server: &Server, baton_str: &str) -> crate::Result<(u64, u64), HranaError> {
-    let baton_data = BASE64_STANDARD_NO_PAD.decode(baton_str).map_err(|err| {
-        ProtocolError::BatonInvalid { reason: format!("Could not base64-decode baton: {err}") }
-    })?;
+    let baton_data =
+        BASE64_STANDARD_NO_PAD
+            .decode(baton_str)
+            .map_err(|err| ProtocolError::BatonInvalid {
+                reason: format!("Could not base64-decode baton: {err}"),
+            })?;
 
     if baton_data.len() != 48 {
-        Err(ProtocolError::BatonInvalid { reason: format!(
-                "Baton has invalid size of {} bytes",
-                baton_data.len()
-        )})?;
+        Err(ProtocolError::BatonInvalid {
+            reason: format!("Baton has invalid size of {} bytes", baton_data.len()),
+        })?;
     }
 
     let payload = &baton_data[0..16];
@@ -294,7 +300,9 @@ fn decode_baton(server: &Server, baton_str: &str) -> crate::Result<(u64, u64), H
     let mut hmac = hmac::Hmac::<sha2::Sha256>::new_from_slice(&server.baton_key).unwrap();
     hmac.update(payload);
     hmac.verify_slice(received_mac)
-        .map_err(|_| ProtocolError::BatonInvalid { reason: "Invalid MAC on baton".into() })?;
+        .map_err(|_| ProtocolError::BatonInvalid {
+            reason: "Invalid MAC on baton".into(),
+        })?;
 
     let stream_id = u64::from_be_bytes(payload[0..8].try_into().unwrap());
     let baton_seq = u64::from_be_bytes(payload[8..16].try_into().unwrap());

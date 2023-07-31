@@ -1,5 +1,5 @@
-use crate::hrana::ProtocolError;
 use crate::hrana::error::HranaError;
+use crate::hrana::ProtocolError;
 
 use super::super::{batch, stmt, Version};
 use super::{proto, stream};
@@ -19,7 +19,7 @@ pub async fn handle(
     // auth: Authenticated,
     request: proto::StreamRequest,
 ) -> Result<proto::StreamResult, HranaError> {
-    let result = match try_handle(stream_guard/*, auth*/, request).await {
+    let result = match try_handle(stream_guard /*, auth*/, request).await {
         Ok(response) => proto::StreamResult::Ok { response },
         Err(err) => {
             if let HranaError::StreamResponse(err) = err {
@@ -50,8 +50,7 @@ async fn try_handle(
             let db = stream_guard.get_conn()?;
             let sqls = stream_guard.sqls();
             let query = stmt::proto_stmt_to_query(&req.stmt, sqls, Version::Hrana2)?;
-            let result = stmt::execute_stmt(db, /*auth,*/ query)
-                .await?;
+            let result = stmt::execute_stmt(db, /*auth,*/ query).await?;
             proto::StreamResponse::Execute(proto::ExecuteStreamResp { result })
         }
         proto::StreamRequest::Batch(req) => {
@@ -67,8 +66,7 @@ async fn try_handle(
             let sql =
                 stmt::proto_sql_to_sql(req.sql.as_deref(), req.sql_id, sqls, Version::Hrana2)?;
             let pgm = batch::proto_sequence_to_program(sql)?;
-            batch::execute_sequence(db, /*auth,*/ pgm)
-                .await?;
+            batch::execute_sequence(db, /*auth,*/ pgm).await?;
             proto::StreamResponse::Sequence(proto::SequenceStreamResp {})
         }
         proto::StreamRequest::Describe(req) => {
@@ -76,8 +74,7 @@ async fn try_handle(
             let sqls = stream_guard.sqls();
             let sql =
                 stmt::proto_sql_to_sql(req.sql.as_deref(), req.sql_id, sqls, Version::Hrana2)?;
-            let result = stmt::describe_stmt(db, /* auth,*/ sql.into())
-                .await?;
+            let result = stmt::describe_stmt(db, /* auth,*/ sql.into()).await?;
             proto::StreamResponse::Describe(proto::DescribeStreamResp { result })
         }
         proto::StreamRequest::StoreSql(req) => {

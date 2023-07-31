@@ -1,9 +1,10 @@
 use std::collections::HashMap;
 
-use libsqlx::DescribeResponse;
+use futures::FutureExt;
 use libsqlx::analysis::Statement;
 use libsqlx::program::Program;
-use libsqlx::query::{Query, Params, Value};
+use libsqlx::query::{Params, Query, Value};
+use libsqlx::DescribeResponse;
 
 use super::error::HranaError;
 use super::result_builder::SingleStatementBuilder;
@@ -52,9 +53,13 @@ pub async fn execute_stmt(
     query: Query,
 ) -> crate::Result<proto::StmtResult, HranaError> {
     let (builder, ret) = SingleStatementBuilder::new();
-    conn.execute(Program::from_queries(Some(query))/*, auth*/, Box::new(builder)).await;
-    let stmt_res = ret.await;
-    Ok(stmt_res.unwrap()?)
+    conn.execute(
+        Program::from_queries(Some(query)), /*, auth*/
+        Box::new(builder),
+    )
+    .await;
+    ret.await
+        .map_err(|_| crate::error::Error::ConnectionClosed)?
 }
 
 pub async fn describe_stmt(
@@ -188,19 +193,28 @@ impl From<crate::error::Error> for HranaError {
     fn from(error: crate::error::Error) -> Self {
         if let crate::error::Error::Libsqlx(e) = error {
             match e {
-                libsqlx::error::Error::LibSqlInvalidQueryParams(source) => StmtError::ArgsInvalid { source: color_eyre::eyre::anyhow!("{source}") }.into(),
+                libsqlx::error::Error::LibSqlInvalidQueryParams(source) => StmtError::ArgsInvalid {
+                    source: color_eyre::eyre::anyhow!("{source}"),
+                }
+                .into(),
                 libsqlx::error::Error::LibSqlTxTimeout => StmtError::TransactionTimeout.into(),
                 libsqlx::error::Error::LibSqlTxBusy => StmtError::TransactionBusy.into(),
                 libsqlx::error::Error::Blocked(reason) => StmtError::Blocked { reason }.into(),
                 libsqlx::error::Error::RusqliteError(rusqlite_error) => match rusqlite_error {
-                    libsqlx::error::RusqliteError::SqliteFailure(sqlite_error, Some(message)) => StmtError::SqliteError {
-                        source: sqlite_error,
-                        message,
-                    }.into(),
-                    libsqlx::error::RusqliteError::SqliteFailure(sqlite_error, None) => StmtError::SqliteError {
-                        message: sqlite_error.to_string(),
-                        source: sqlite_error,
-                    }.into(),
+                    libsqlx::error::RusqliteError::SqliteFailure(sqlite_error, Some(message)) => {
+                        StmtError::SqliteError {
+                            source: sqlite_error,
+                            message,
+                        }
+                        .into()
+                    }
+                    libsqlx::error::RusqliteError::SqliteFailure(sqlite_error, None) => {
+                        StmtError::SqliteError {
+                            message: sqlite_error.to_string(),
+                            source: sqlite_error,
+                        }
+                        .into()
+                    }
                     libsqlx::error::RusqliteError::SqlInputError {
                         error: sqlite_error,
                         msg: message,
@@ -210,8 +224,14 @@ impl From<crate::error::Error> for HranaError {
                         source: sqlite_error,
                         message,
                         offset,
-                    }.into(),
-                        rusqlite_error => return crate::error::Error::from(libsqlx::error::Error::RusqliteError(rusqlite_error)).into(),
+                    }
+                    .into(),
+                    rusqlite_error => {
+                        return crate::error::Error::from(libsqlx::error::Error::RusqliteError(
+                            rusqlite_error,
+                        ))
+                        .into()
+                    }
                 },
                 sqld_error => return crate::error::Error::from(sqld_error).into(),
             }

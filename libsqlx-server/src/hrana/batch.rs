@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use libsqlx::analysis::Statement;
 use libsqlx::program::{Cond, Program, Step};
-use libsqlx::query::{Query, Params};
+use libsqlx::query::{Params, Query};
 use libsqlx::result_builder::{StepResult, StepResultsBuilder};
 use tokio::sync::oneshot;
 
@@ -82,9 +82,13 @@ pub async fn execute_batch(
     conn.execute(
         pgm,
         // auth,
-        Box::new(builder)).await;
+        Box::new(builder),
+    )
+    .await;
 
-    Ok(ret.await.unwrap())
+    Ok(ret
+        .await
+        .map_err(|_| crate::error::Error::ConnectionClosed)?)
 }
 
 pub fn proto_sequence_to_program(sql: &str) -> Result<Program, HranaError> {
@@ -109,20 +113,22 @@ pub fn proto_sequence_to_program(sql: &str) -> Result<Program, HranaError> {
         })
         .collect::<Arc<[Step]>>();
 
-    Ok(Program {
-        steps,
-    })
+    Ok(Program { steps })
 }
 
 pub async fn execute_sequence(
     conn: &ConnectionHandle,
     // auth: Authenticated,
-    pgm: Program) -> Result<(), HranaError> {
+    pgm: Program,
+) -> Result<(), HranaError> {
     let (send, ret) = oneshot::channel();
     let builder = StepResultsBuilder::new(send);
-    conn.execute(pgm,
+    conn.execute(
+        pgm,
         // auth,
-        Box::new(builder)).await;
+        Box::new(builder),
+    )
+    .await;
 
     ret.await
         .unwrap()

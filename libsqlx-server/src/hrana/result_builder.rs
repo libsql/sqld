@@ -271,7 +271,7 @@ pub struct HranaBatchProtoBuilder {
     current_size: u64,
     max_response_size: u64,
     step_empty: bool,
-    ret: oneshot::Sender<proto::BatchResult>,
+    ret: Option<oneshot::Sender<proto::BatchResult>>,
 }
 
 impl HranaBatchProtoBuilder {
@@ -285,15 +285,16 @@ impl HranaBatchProtoBuilder {
                 current_size: 0,
                 max_response_size: u64::MAX,
                 step_empty: false,
-                ret,
+                ret: Some(ret),
             },
             rcv,
         )
     }
-    pub fn into_ret(self) -> proto::BatchResult {
+
+    pub fn into_ret(&mut self) -> proto::BatchResult {
         proto::BatchResult {
-            step_results: self.step_results,
-            step_errors: self.step_errors,
+            step_results: std::mem::take(&mut self.step_results),
+            step_errors: std::mem::take(&mut self.step_errors),
         }
     }
 }
@@ -358,6 +359,18 @@ impl ResultBuilder for HranaBatchProtoBuilder {
 
     fn add_row_value(&mut self, v: ValueRef) -> Result<(), QueryResultBuilderError> {
         self.stmt_builder.add_row_value(v)
+    }
+
+    fn finnalize(
+        &mut self,
+        _is_txn: bool,
+        _frame_no: Option<FrameNo>,
+    ) -> Result<bool, QueryResultBuilderError> {
+        if let Some(ret) = self.ret.take() {
+            let _ = ret.send(self.into_ret());
+        }
+
+        Ok(false)
     }
 
     fn finnalize_error(&mut self, _e: String) {
