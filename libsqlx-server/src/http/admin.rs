@@ -4,10 +4,13 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use axum::extract::{Path, State};
+use axum::response::IntoResponse;
 use axum::routing::{delete, post};
 use axum::{Json, Router};
+use chrono::{DateTime, Utc};
 use color_eyre::eyre::Result;
 use hyper::server::accept::Accept;
+use hyper::StatusCode;
 use serde::{Deserialize, Deserializer, Serialize};
 use tokio::io::{AsyncRead, AsyncWrite};
 
@@ -15,7 +18,35 @@ use crate::allocation::config::{AllocConfig, DbConfig};
 use crate::linc::bus::Bus;
 use crate::linc::NodeId;
 use crate::manager::Manager;
-use crate::meta::DatabaseId;
+use crate::meta::{AllocationError, DatabaseId};
+
+impl IntoResponse for crate::error::Error {
+    fn into_response(self) -> axum::response::Response {
+        #[derive(Serialize)]
+        struct ErrorBody {
+            message: String,
+        }
+
+        let mut resp = Json(ErrorBody {
+            message: self.to_string(),
+        })
+        .into_response();
+        *resp.status_mut() = match self {
+            crate::error::Error::Libsqlx(_)
+            | crate::error::Error::InjectorExited
+            | crate::error::Error::ConnectionClosed
+            | crate::error::Error::Io(_)
+            | crate::error::Error::AllocationClosed
+            | crate::error::Error::Internal(_)
+            | crate::error::Error::Heed(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            crate::error::Error::Allocation(AllocationError::AlreadyExist(_)) => {
+                StatusCode::BAD_REQUEST
+            }
+        };
+
+        resp
+    }
+}
 
 pub struct Config {
     pub bus: Arc<Bus<Arc<Manager>>>,
@@ -47,7 +78,19 @@ where
 struct ErrorResponse {}
 
 #[derive(Serialize, Debug)]
-struct AllocateResp {}
+#[serde(rename_all = "lowercase")]
+enum DbType {
+    Primary,
+    Replica,
+}
+
+#[derive(Serialize, Debug)]
+struct AllocationSummaryView {
+    created_at: DateTime<Utc>,
+    database_name: String,
+    #[serde(rename = "type")]
+    ty: DbType,
+}
 
 #[derive(Deserialize, Debug)]
 struct AllocateReq {
@@ -134,7 +177,7 @@ const fn default_txn_timeout() -> HumanDuration {
 async fn allocate(
     State(state): State<Arc<AdminServerState>>,
     Json(req): Json<AllocateReq>,
-) -> Result<Json<AllocateResp>, Json<ErrorResponse>> {
+) -> crate::Result<Json<AllocationSummaryView>> {
     let config = AllocConfig {
         max_conccurent_connection: req.max_conccurent_connection.unwrap_or(16),
         db_name: req.database_name.clone(),
@@ -164,19 +207,26 @@ async fn allocate(
 
     let dispatcher = state.bus.clone();
     let id = DatabaseId::from_name(&req.database_name);
-    state.bus.handler().allocate(id, &config, dispatcher).await;
+    let meta = state.bus.handler().allocate(id, config, dispatcher).await?;
 
-    Ok(Json(AllocateResp {}))
+    Ok(Json(AllocationSummaryView {
+        created_at: meta.created_at,
+        database_name: meta.config.db_name,
+        ty: match meta.config.db_config {
+            DbConfig::Primary {..} => DbType::Primary,
+            DbConfig::Replica {..} => DbType::Replica,
+        }
+    }))
 }
 
 async fn deallocate(
     State(state): State<Arc<AdminServerState>>,
     Path(database_name): Path<String>,
-) -> Result<Json<AllocateResp>, Json<ErrorResponse>> {
+) -> crate::Result<()> {
     let id = DatabaseId::from_name(&database_name);
-    state.bus.handler().deallocate(id).await;
+    state.bus.handler().deallocate(id).await?;
 
-    Ok(Json(AllocateResp {}))
+    Ok(())
 }
 
 #[derive(Serialize, Debug)]
@@ -191,15 +241,16 @@ struct AllocView {
 
 async fn list_allocs(
     State(state): State<Arc<AdminServerState>>,
-) -> Result<Json<ListAllocResp>, Json<ErrorResponse>> {
+) -> crate::Result<Json<ListAllocResp>> {
     let allocs = state
         .bus
         .handler()
         .store()
-        .list_allocs()
-        .unwrap()
+        .list_allocs()?
         .into_iter()
-        .map(|cfg| AllocView { id: cfg.db_name })
+        .map(|meta| AllocView {
+            id: meta.config.db_name,
+        })
         .collect();
 
     Ok(Json(ListAllocResp { allocs }))

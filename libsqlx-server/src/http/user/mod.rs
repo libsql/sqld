@@ -5,8 +5,8 @@ use axum::response::IntoResponse;
 use axum::routing::post;
 use axum::{Json, Router};
 use color_eyre::Result;
-use hyper::StatusCode;
 use hyper::server::accept::Accept;
+use hyper::StatusCode;
 use serde::Serialize;
 use tokio::io::{AsyncRead, AsyncWrite};
 
@@ -30,12 +30,12 @@ impl IntoResponse for HranaError {
     fn into_response(self) -> axum::response::Response {
         let (message, code) = match self.code() {
             Some(code) => (self.to_string(), code.to_owned()),
-            None => ("internal error, please check the logs".to_owned(), "INTERNAL_ERROR".to_owned()),
+            None => (
+                "internal error, please check the logs".to_owned(),
+                "INTERNAL_ERROR".to_owned(),
+            ),
         };
-        let resp = ErrorResponseBody {
-            message,
-            code,
-        };
+        let resp = ErrorResponseBody { message, code };
         let mut resp = Json(resp).into_response();
         *resp.status_mut() = StatusCode::BAD_REQUEST;
         resp

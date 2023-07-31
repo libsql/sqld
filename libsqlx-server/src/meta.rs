@@ -1,6 +1,7 @@
 use std::fmt;
 use std::mem::size_of;
 
+use chrono::{DateTime, Utc};
 use heed::bytemuck::{Pod, Zeroable};
 use heed_types::{OwnedType, SerdeBincode};
 use itertools::Itertools;
@@ -11,9 +12,15 @@ use tokio::task::block_in_place;
 
 use crate::allocation::config::AllocConfig;
 
+#[derive(Debug, Serialize, Deserialize)]
+pub struct AllocMeta {
+    pub config: AllocConfig,
+    pub created_at: DateTime<Utc>,
+}
+
 pub struct Store {
     env: heed::Env,
-    alloc_config_db: heed::Database<OwnedType<DatabaseId>, SerdeBincode<AllocConfig>>,
+    alloc_config_db: heed::Database<OwnedType<DatabaseId>, SerdeBincode<AllocMeta>>,
 }
 
 #[derive(Serialize, Deserialize, PartialEq, Eq, Debug, Hash, Clone, Copy, Pod, Zeroable)]
@@ -73,7 +80,7 @@ impl Store {
         })
     }
 
-    pub fn allocate(&self, id: &DatabaseId, meta: &AllocConfig) -> crate::Result<()> {
+    pub fn allocate(&self, id: &DatabaseId, config: AllocConfig) -> crate::Result<AllocMeta> {
         block_in_place(|| {
             let mut txn = self.env.write_txn()?;
             if self
@@ -82,14 +89,19 @@ impl Store {
                 .get(&txn, id)?
                 .is_some()
             {
-                Err(AllocationError::AlreadyExist(meta.db_name.clone()))?;
+                Err(AllocationError::AlreadyExist(config.db_name.clone()))?;
             };
 
-            self.alloc_config_db.put(&mut txn, id, meta)?;
+            let meta = AllocMeta {
+                config,
+                created_at: Utc::now(),
+            };
+
+            self.alloc_config_db.put(&mut txn, id, &meta)?;
 
             txn.commit()?;
 
-            Ok(())
+            Ok(meta)
         })
     }
 
@@ -103,14 +115,14 @@ impl Store {
         })
     }
 
-    pub fn meta(&self, id: &DatabaseId) -> crate::Result<Option<AllocConfig>> {
+    pub fn meta(&self, id: &DatabaseId) -> crate::Result<Option<AllocMeta>> {
         block_in_place(|| {
             let txn = self.env.read_txn()?;
             Ok(self.alloc_config_db.get(&txn, id)?)
         })
     }
 
-    pub fn list_allocs(&self) -> crate::Result<Vec<AllocConfig>> {
+    pub fn list_allocs(&self) -> crate::Result<Vec<AllocMeta>> {
         block_in_place(|| {
             let txn = self.env.read_txn()?;
             let res = self
