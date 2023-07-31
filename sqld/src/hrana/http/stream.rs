@@ -1,7 +1,3 @@
-//! Stream allows connections to be grouped together using a baton value.
-//! A baton value is sent by sqld to the client to be used in subsequent
-//! requests.
-
 use anyhow::{anyhow, Context, Result};
 use base64::prelude::{Engine as _, BASE64_STANDARD_NO_PAD};
 use hmac::Mac as _;

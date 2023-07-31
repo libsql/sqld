@@ -1,5 +1,3 @@
-//! This file handles web socket handshakes.
-
 use anyhow::{anyhow, bail, Context as _, Result};
 use bytes::Bytes;
 use futures::{SinkExt as _, StreamExt as _};
@@ -31,6 +29,10 @@ pub async fn handshake_tcp(
     disable_default_ns: bool,
     disable_namespaces: bool,
 ) -> Result<(WebSocket, Version, Encoding, Bytes)> {
+    socket
+        .set_nodelay(true)
+        .context("Could not disable Nagle's algorithm")?;
+
     let mut subproto = None;
     let mut namespace = None;
     let callback = |req: &http::Request<()>, resp: http::Response<()>| {
@@ -142,6 +144,12 @@ fn negotiate_subproto(
             return Err(format!("Only these WebSocket subprotocols are supported: {}", supported))
         };
 
+        tracing::debug!(
+            "Client subprotocols {:?}, selected {:?}",
+            client_subprotos,
+            subproto
+        );
+
         resp_headers.append(
             "sec-websocket-protocol",
             http::HeaderValue::from_str(subproto.as_str()).unwrap(),
@@ -155,8 +163,8 @@ fn negotiate_subproto(
 }
 
 fn select_subproto(client_subprotos: &[&str], server_subprotos: &[Subproto]) -> Option<Subproto> {
-    for server_subproto in server_subprotos.iter().copied() {
-        for client_subproto in client_subprotos.iter().copied() {
+    for &server_subproto in server_subprotos.iter() {
+        for client_subproto in client_subprotos.iter() {
             if client_subproto.eq_ignore_ascii_case(server_subproto.as_str()) {
                 return Some(server_subproto);
             }

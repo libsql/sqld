@@ -443,7 +443,7 @@ impl Replicator {
         Self::generation_from_timestamp(ts)
     }
 
-    fn generation_from_timestamp(_ts: uuid::Timestamp) -> Uuid {
+    fn generation_from_timestamp(ts: uuid::Timestamp) -> Uuid {
         let (seconds, nanos) = ts.to_unix();
         let (seconds, nanos) = (253370761200 - seconds, 999999999 - nanos);
         let synthetic_ts = uuid::Timestamp::from_unix(uuid::NoContext, seconds, nanos);

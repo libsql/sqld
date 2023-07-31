@@ -264,6 +264,6 @@ pub struct GetAutocommitReq {
 
 #[derive(Serialize, prost::Message)]
 pub struct GetAutocommitResp {
-    #[prost(message, required, tag = "1")]
+    #[prost(bool, required, tag = "1")]
     pub is_autocommit: bool,
 }

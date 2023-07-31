@@ -177,21 +177,6 @@ async fn handle_version() -> Response<Body> {
     Response::new(Body::from(version))
 }
 
-async fn handle_hrana_v2<F: MakeNamespace>(
-    MakeConnectionExtractor(connection_maker): MakeConnectionExtractor<
-        <F::Database as Database>::Connection,
-    >,
-    AxumState(state): AxumState<AppState<F>>,
-    auth: Authenticated,
-    req: Request<Body>,
-) -> Result<Response<Body>, Error> {
-    let server = state.hrana_http_srv;
-
-    let res = server.handle_pipeline(auth, req, connection_maker).await?;
-
-    Ok(res)
-}
-
 async fn handle_fallback() -> impl IntoResponse {
     (StatusCode::NOT_FOUND).into_response()
 }
@@ -265,6 +250,22 @@ where
         tracing::debug!("got request: {} {}", req.method(), req.uri());
     }
 
+    macro_rules! handle_hrana {
+        ($endpoint:expr, $version:expr, $encoding:expr,) => {{
+            async fn handle_hrana<D: Database>(
+                AxumState(state): AxumState<AppState<D>>,
+                auth: Authenticated,
+                req: Request<Body>,
+            ) -> Result<Response<Body>, Error> {
+                Ok(state
+                    .hrana_http_srv
+                    .handle_request(auth, req, $endpoint, $version, $encoding)
+                    .await?)
+            }
+            handle_hrana
+        }};
+    }
+
     let app = Router::new()
         .route("/", post(handle_query))
         .route("/", get(handle_upgrade))
@@ -276,7 +277,48 @@ where
         .route("/v1/execute", post(hrana_over_http_1::handle_execute))
         .route("/v1/batch", post(hrana_over_http_1::handle_batch))
         .route("/v2", get(crate::hrana::http::handle_index))
-        .route("/v2/pipeline", post(handle_hrana_v2))
+        .route(
+            "/v2/pipeline",
+            post(handle_hrana!(
+                hrana::http::Endpoint::Pipeline,
+                hrana::Version::Hrana2,
+                hrana::Encoding::Json,
+            )),
+        )
+        .route("/v3", get(crate::hrana::http::handle_index))
+        .route(
+            "/v3/pipeline",
+            post(handle_hrana!(
+                hrana::http::Endpoint::Pipeline,
+                hrana::Version::Hrana3,
+                hrana::Encoding::Json,
+            )),
+        )
+        .route(
+            "/v3/cursor",
+            post(handle_hrana!(
+                hrana::http::Endpoint::Cursor,
+                hrana::Version::Hrana3,
+                hrana::Encoding::Json,
+            )),
+        )
+        .route("/v3-protobuf", get(crate::hrana::http::handle_index))
+        .route(
+            "/v3-protobuf/pipeline",
+            post(handle_hrana!(
+                hrana::http::Endpoint::Pipeline,
+                hrana::Version::Hrana3,
+                hrana::Encoding::Protobuf,
+            )),
+        )
+        .route(
+            "/v3-protobuf/cursor",
+            post(handle_hrana!(
+                hrana::http::Endpoint::Cursor,
+                hrana::Version::Hrana3,
+                hrana::Encoding::Protobuf,
+            )),
+        )
         .with_state(state);
 
     let layered_app = app

@@ -1,6 +1,3 @@
-//! This file contains functions to deal with the connection of the Hrana protocol
-//! over web sockets
-
 use std::borrow::Cow;
 use std::future::Future;
 use std::pin::Pin;
@@ -202,6 +199,7 @@ async fn handle_client_msg<F: MakeNamespace>(
     conn: &mut Conn<F>,
     client_msg: proto::ClientMsg,
 ) -> Result<bool> {
+    tracing::trace!("Received client msg: {:?}", client_msg);
     match client_msg {
         proto::ClientMsg::None => bail!(ProtocolError::NoneClientMsg),
         proto::ClientMsg::Hello(msg) => handle_hello_msg(conn, msg.jwt).await,

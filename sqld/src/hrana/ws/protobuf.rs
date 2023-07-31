@@ -35,6 +35,7 @@ impl prost::Message for ClientMsg {
                     _ => HelloMsg::default(),
                 };
                 message::merge(wire_type, &mut msg, buf, ctx)?;
+                *self = ClientMsg::Hello(msg);
             }
             2 => {
                 let mut msg = match replace(self, ClientMsg::None) {
@@ -42,6 +43,7 @@ impl prost::Message for ClientMsg {
                     _ => RequestMsg::default(),
                 };
                 message::merge(wire_type, &mut msg, buf, ctx)?;
+                *self = ClientMsg::Request(msg);
             }
             _ => {
                 skip_field(wire_type, tag, buf, ctx)?;

@@ -1,20 +1,27 @@
 use std::sync::Arc;
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use parking_lot::Mutex;
 use serde::{de::DeserializeOwned, Serialize};
 
-use super::ProtocolError;
+use super::{Encoding, ProtocolError, Version};
 use crate::auth::Authenticated;
 use crate::connection::{Connection, MakeConnection};
 mod proto;
+mod protobuf;
 mod request;
 mod stream;
 
-pub struct Server<D> {
+pub struct Server<C> {
     self_url: Option<String>,
     baton_key: [u8; 32],
-    stream_state: Mutex<stream::ServerStreamState<D>>,
+    stream_state: Mutex<stream::ServerStreamState<C>>,
+}
+
+#[derive(Debug, Copy, Clone)]
+pub enum Endpoint {
+    Pipeline,
+    Cursor,
 }
 
 impl<C: Connection> Server<C> {
@@ -30,17 +37,19 @@ impl<C: Connection> Server<C> {
         stream::run_expire(self).await
     }
 
-    pub async fn handle_pipeline(
+    pub async fn handle_request(
         &self,
         auth: Authenticated,
         req: hyper::Request<hyper::Body>,
-        connection_maker: Arc<dyn MakeConnection<Connection = C>>,
+        endpoint: Endpoint,
+        version: Version,
+        encoding: Encoding,
     ) -> Result<hyper::Response<hyper::Body>> {
-        handle_pipeline(self, connection_maker, auth, req)
+        handle_request(self, auth, req, endpoint, version, encoding)
             .await
             .or_else(|err| {
                 err.downcast::<stream::StreamError>()
-                    .map(stream_error_response)
+                    .map(|err| stream_error_response(err, encoding))
             })
             .or_else(|err| err.downcast::<ProtocolError>().map(protocol_error_response))
     }
@@ -53,19 +62,34 @@ pub(crate) async fn handle_index() -> hyper::Response<hyper::Body> {
     )
 }
 
-async fn handle_pipeline<D: Connection>(
+async fn handle_request<D: Database>(
+    server: &Server<D>,
+    auth: Authenticated,
+    req: hyper::Request<hyper::Body>,
+    endpoint: Endpoint,
+    version: Version,
+    encoding: Encoding,
+) -> Result<hyper::Response<hyper::Body>> {
+    match endpoint {
+        Endpoint::Pipeline => handle_pipeline(server, auth, req, version, encoding).await,
+        Endpoint::Cursor => handle_cursor(server, auth, req, version, encoding).await,
+    }
+}
+
+async fn handle_pipeline<D: Database>(
     server: &Server<D>,
     connection_maker: Arc<dyn MakeConnection<Connection = D>>,
     auth: Authenticated,
     req: hyper::Request<hyper::Body>,
+    version: Version,
+    encoding: Encoding,
 ) -> Result<hyper::Response<hyper::Body>> {
-    let req_body: proto::PipelineRequestBody = read_request_json(req).await?;
-    let mut stream_guard =
-        stream::acquire(server, req_body.baton.as_deref(), connection_maker).await?;
+    let req_body: proto::PipelineRequestBody = read_decode_request(req, encoding).await?;
+    let mut stream_guard = stream::acquire(server, req_body.baton.as_deref()).await?;
 
     let mut results = Vec::with_capacity(req_body.requests.len());
     for request in req_body.requests.into_iter() {
-        let result = request::handle(&mut stream_guard, auth, request)
+        let result = request::handle(&mut stream_guard, auth, request, version)
             .await
             .context("Could not execute a request in pipeline")?;
         results.push(result);
@@ -76,41 +100,70 @@ async fn handle_pipeline<D: Connection>(
         base_url: server.self_url.clone(),
         results,
     };
-    Ok(json_response(hyper::StatusCode::OK, &resp_body))
+    Ok(encode_response(hyper::StatusCode::OK, &resp_body, encoding))
 }
 
-async fn read_request_json<T: DeserializeOwned>(req: hyper::Request<hyper::Body>) -> Result<T> {
+async fn handle_cursor<D: Database>(
+    _server: &Server<D>,
+    _auth: Authenticated,
+    _req: hyper::Request<hyper::Body>,
+    _version: Version,
+    _encoding: Encoding,
+) -> Result<hyper::Response<hyper::Body>> {
+    bail!("Cursor over HTTP not implemented")
+}
+
+async fn read_decode_request<T: DeserializeOwned + prost::Message + Default>(
+    req: hyper::Request<hyper::Body>,
+    encoding: Encoding,
+) -> Result<T> {
     let req_body = hyper::body::to_bytes(req.into_body())
         .await
         .context("Could not read request body")?;
-    let req_body = serde_json::from_slice(&req_body)
-        .map_err(|err| ProtocolError::JsonDeserialize { source: err })
-        .context("Could not deserialize JSON request body")?;
-    Ok(req_body)
+    match encoding {
+        Encoding::Json => serde_json::from_slice(&req_body)
+            .map_err(|err| ProtocolError::JsonDeserialize { source: err })
+            .context("Could not deserialize JSON request body"),
+        Encoding::Protobuf => <T as prost::Message>::decode(req_body)
+            .map_err(|err| ProtocolError::ProtobufDecode { source: err })
+            .context("Could not decode Protobuf request body"),
+    }
 }
 
 fn protocol_error_response(err: ProtocolError) -> hyper::Response<hyper::Body> {
     text_response(hyper::StatusCode::BAD_REQUEST, err.to_string())
 }
 
-fn stream_error_response(err: stream::StreamError) -> hyper::Response<hyper::Body> {
-    json_response(
+fn stream_error_response(
+    err: stream::StreamError,
+    encoding: Encoding,
+) -> hyper::Response<hyper::Body> {
+    encode_response(
         hyper::StatusCode::INTERNAL_SERVER_ERROR,
         &proto::Error {
             message: err.to_string(),
             code: err.code().into(),
         },
+        encoding,
     )
 }
 
-fn json_response<T: Serialize>(
+fn encode_response<T: Serialize + prost::Message>(
     status: hyper::StatusCode,
     resp_body: &T,
+    encoding: Encoding,
 ) -> hyper::Response<hyper::Body> {
-    let resp_body = serde_json::to_vec(resp_body).unwrap();
+    let (resp_body, content_type) = match encoding {
+        Encoding::Json => (serde_json::to_vec(resp_body).unwrap(), "application/json"),
+        Encoding::Protobuf => (
+            <T as prost::Message>::encode_to_vec(resp_body),
+            "application/x-protobuf",
+        ),
+    };
+
     hyper::Response::builder()
         .status(status)
-        .header(hyper::http::header::CONTENT_TYPE, "application/json")
+        .header(hyper::http::header::CONTENT_TYPE, content_type)
         .body(hyper::Body::from(resp_body))
         .unwrap()
 }

@@ -77,14 +77,16 @@ pub enum ProtocolError {
     #[error("{0}")]
     ResponseTooLarge(String),
 
-    #[error("BatchCond variant not recognized")]
+    #[error("BatchCond type not recognized")]
     NoneBatchCond,
-    #[error("Value variant not recognized")]
+    #[error("Value type not recognized")]
     NoneValue,
-    #[error("ClientMsg variant not recognized")]
+    #[error("ClientMsg type not recognized")]
     NoneClientMsg,
-    #[error("Request variant not recognized")]
+    #[error("Request type not recognized")]
     NoneRequest,
+    #[error("StreamRequest type not recognized")]
+    NoneStreamRequest,
 }
 
 impl fmt::Display for Version {

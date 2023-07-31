@@ -1,6 +1,6 @@
 use anyhow::{anyhow, Result};
 use rusqlite::types::ValueRef;
-use std::mem::replace;
+use std::mem::take;
 use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot};
 
@@ -210,7 +210,7 @@ impl QueryResultBuilder for CursorResultBuilder {
 
     fn finish_row(&mut self) -> Result<(), QueryResultBuilderError> {
         if self.step_state.emitted_begin && !self.step_state.emitted_error {
-            let values = replace(&mut self.step_state.row, Vec::new());
+            let values = take(&mut self.step_state.row);
             self.emit_entry(Ok(SizedEntry {
                 entry: proto::CursorEntry::Row {
                     row: proto::Row { values },

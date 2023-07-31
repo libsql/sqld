@@ -622,15 +622,23 @@ given Hrana version by sending an HTTP request (described later).
 The client communicates with the server by sending HTTP requests with a
 specified method and URL.
 
-#### Check support for version 3
+#### Check support for version 3 (JSON)
 
 ```
 GET v3
 ```
 
-If the server supports version 3 of Hrana over HTTP, it should return a 2xx
-response to this request. The client can use this endpoint to check support for
-version 3.
+If the server supports version 3 of Hrana over HTTP with JSON encoding, it
+should return a 2xx response to this request.
+
+#### Check support for version 3 (Protobuf)
+
+```
+GET v3-protobuf
+```
+
+If the server supports version 3 of Hrana over HTTP with Protobuf encoding, it
+should return a 2xx response to this request.
 
 #### Execute a pipeline of requests (JSON)
 
@@ -911,7 +919,7 @@ stream.
 
 > This request was introduced in Hrana 2.
 
-#### Get the stream state
+#### Get the autocommit state
 
 ```typescript
 type GetAutocommitStreamReq = {
@@ -968,8 +976,8 @@ implementation.
 
 ```typescript
 type Stmt = {
-    "sql"?: string | undefined,
-    "sql_id"?: int32 | undefined,
+    "sql"?: string | null,
+    "sql_id"?: int32 | null,
     "args"?: Array<Value>,
     "named_args"?: Array<NamedArg>,
     "want_rows"?: boolean,
