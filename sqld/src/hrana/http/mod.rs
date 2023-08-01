@@ -46,7 +46,7 @@ impl<D: Database> Server<D> {
         req: hyper::Request<hyper::Body>,
     ) -> Result<hyper::Response<hyper::Body>> {
         let res = match route {
-            Route::GetIndex => handle_index(),
+            Route::GetIndex => Ok(handle_index().await),
             Route::PostPipeline => handle_pipeline(self, auth, req).await,
         };
         res.or_else(|err| {
@@ -57,11 +57,11 @@ impl<D: Database> Server<D> {
     }
 }
 
-fn handle_index() -> Result<hyper::Response<hyper::Body>> {
-    Ok(text_response(
+pub(crate) async fn handle_index() -> hyper::Response<hyper::Body> {
+    text_response(
         hyper::StatusCode::OK,
         "Hello, this is HTTP API v2 (Hrana over HTTP)".into(),
-    ))
+    )
 }
 
 async fn handle_pipeline<D: Database>(

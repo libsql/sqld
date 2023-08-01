@@ -1,4 +1,5 @@
 use anyhow::{anyhow, Context, Result};
+use axum::extract::State as AxumState;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::collections::HashMap;
 use std::future::Future;
@@ -7,7 +8,9 @@ use std::sync::Arc;
 use crate::auth::Authenticated;
 use crate::database::factory::DbFactory;
 use crate::database::Database;
-use crate::hrana::{self};
+use crate::hrana;
+
+use super::AppState;
 
 #[derive(thiserror::Error, Debug)]
 enum ResponseError {
@@ -15,21 +18,19 @@ enum ResponseError {
     Stmt(hrana::stmt::StmtError),
 }
 
-pub async fn handle_index(
-    _req: hyper::Request<hyper::Body>,
-) -> Result<hyper::Response<hyper::Body>> {
+pub async fn handle_index() -> hyper::Response<hyper::Body> {
     let body = "This is sqld HTTP API v1";
-    Ok(hyper::Response::builder()
+    hyper::Response::builder()
         .header("content-type", "text/plain")
         .body(hyper::Body::from(body))
-        .unwrap())
+        .unwrap()
 }
 
-pub async fn handle_execute<D: Database>(
-    db_factory: Arc<dyn DbFactory<Db = D>>,
+pub(crate) async fn handle_execute<D: Database>(
+    AxumState(AppState { db_factory, .. }): AxumState<AppState<D>>,
     auth: Authenticated,
     req: hyper::Request<hyper::Body>,
-) -> Result<hyper::Response<hyper::Body>> {
+) -> hyper::Response<hyper::Body> {
     #[derive(Debug, Deserialize)]
     struct ReqBody {
         stmt: hrana::proto::Stmt,
@@ -54,13 +55,15 @@ pub async fn handle_execute<D: Database>(
             .context("Could not execute statement")
     })
     .await
+    // TODO(lucio): Handle error
+    .unwrap()
 }
 
-pub async fn handle_batch<D: Database>(
-    db_factory: Arc<dyn DbFactory<Db = D>>,
+pub(crate) async fn handle_batch<D: Database>(
+    AxumState(AppState { db_factory, .. }): AxumState<AppState<D>>,
     auth: Authenticated,
     req: hyper::Request<hyper::Body>,
-) -> Result<hyper::Response<hyper::Body>> {
+) -> hyper::Response<hyper::Body> {
     #[derive(Debug, Deserialize)]
     struct ReqBody {
         batch: hrana::proto::Batch,
@@ -84,6 +87,8 @@ pub async fn handle_batch<D: Database>(
             .context("Could not execute batch")
     })
     .await
+    // TODO(lucio): handle errors
+    .unwrap()
 }
 
 async fn handle_request<ReqBody, RespBody, F, Fut, FT>(
