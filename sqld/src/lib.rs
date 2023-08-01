@@ -48,6 +48,7 @@ pub mod rpc;
 mod stats;
 #[cfg(test)]
 mod test;
+mod namespace;
 mod utils;
 pub mod version;
 

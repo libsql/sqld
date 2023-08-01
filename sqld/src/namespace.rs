@@ -1,0 +1,225 @@
+use std::collections::HashMap;
+use std::collections::hash_map::Entry;
+use std::path::{PathBuf};
+use std::sync::Arc;
+use std::time::Duration;
+
+use bytes::Bytes;
+use hyper::Uri;
+use tokio::sync::Mutex;
+use tokio::task::JoinSet;
+use tonic::transport::Channel;
+
+use crate::database::Database;
+use crate::database::config::DatabaseConfigStore;
+use crate::database::dump::loader::DumpLoader;
+use crate::database::libsql::{LibSqlDb, LibSqlDbFactory};
+use crate::replication::primary::logger::{REPLICATION_METHODS, ReplicationLoggerHookCtx};
+use crate::replication::{ReplicationLogger, SnapshotCallback};
+use crate::stats::Stats;
+use crate::{MAX_CONCCURENT_DBS, DB_CREATE_TIMEOUT, run_periodic_compactions, check_fresh_db, init_bottomless_replicator};
+use crate::replication::replica::Replicator;
+use crate::database::write_proxy::{WriteProxyDatabase, WriteProxyDbFactory};
+use crate::database::factory::{DbFactory, TrackedDb};
+
+#[async_trait::async_trait]
+pub trait NamespaceFactory: Sync + Send + 'static {
+    type Database: Database;
+    type Meta: Send + Sync + 'static;
+
+    async fn create(&self, name: Bytes) -> anyhow::Result<Namespace<Self::Database, Self::Meta>>;
+}
+
+pub struct PrimaryNamespaceFactory { 
+    config: PrimaryNamespaceConfig,
+}
+
+
+#[async_trait::async_trait]
+impl NamespaceFactory for PrimaryNamespaceFactory {
+    type Database = TrackedDb<LibSqlDb>;
+    type Meta = PrimaryMeta;
+
+    async fn create(&self, name: Bytes) -> anyhow::Result<Namespace<Self::Database, Self::Meta>> {
+        Namespace::new_primary(&self.config, name).await
+    }
+}
+
+pub struct ReplicaNamespaceFactory {
+    config: ReplicaNamespaceConfig,
+}
+
+#[async_trait::async_trait]
+impl NamespaceFactory for ReplicaNamespaceFactory {
+    type Database = TrackedDb<WriteProxyDatabase>;
+    type Meta = ();
+
+    async fn create(&self, name: Bytes) -> anyhow::Result<Namespace<Self::Database, Self::Meta>> {
+        Namespace::new_replica(&self.config, name).await
+    }
+}
+
+pub struct Namespaces<F: NamespaceFactory> {
+    inner: Mutex<HashMap<Bytes, Arc<Namespace<F::Database, F::Meta>>>>,
+    factory: F,
+}
+
+impl<F: NamespaceFactory> Namespaces<F> {
+    pub async fn get_or_create(&self, namespace: Bytes) -> anyhow::Result<Arc<Namespace<F::Database, F::Meta>>> {
+        let mut lock = self.inner.lock().await;
+        match lock.entry(namespace.clone()) {
+            Entry::Occupied(e) => {
+                Ok(e.get().clone())
+            },
+            Entry::Vacant(e) => {
+                let f = Arc::new(self.factory.create(namespace).await?);
+                Ok(e.insert(f).clone())
+            },
+        }
+    }
+}
+
+pub struct Namespace<D, T> {
+    name: Bytes,
+    pub db_factory: Arc<dyn DbFactory<Db = D>>,
+    tasks: JoinSet<anyhow::Result<()>>,
+    pub meta: T,
+}
+
+pub struct ReplicaNamespaceConfig {
+    base_path: PathBuf,
+    channel: Channel,
+    uri: Uri,
+    allow_replica_overwrite: bool,
+    extensions: Vec<PathBuf>,
+    stats: Stats,
+    config_store: Arc<DatabaseConfigStore>,
+    max_response_size: u64,
+}
+
+impl Namespace<TrackedDb<WriteProxyDatabase>, ()> {
+    pub async fn new_replica(config: &ReplicaNamespaceConfig, name: Bytes) -> anyhow::Result<Self> {
+        let name_str = std::str::from_utf8(&name)?;
+        let db_path = config.base_path.join("dbs").join(name_str);
+        let mut join_set = JoinSet::new();
+        let replicator = Replicator::new(
+            db_path.clone(),
+            config.channel.clone(),
+            config.uri.clone(),
+            config.allow_replica_overwrite,
+            name.clone(),
+        )?;
+
+        let applied_frame_no_receiver = replicator.current_frame_no_notifier.clone();
+
+        join_set.spawn(replicator.run());
+
+        let db_factory = WriteProxyDbFactory::new(
+            db_path.clone(),
+            config.extensions.clone(),
+            config.channel.clone(),
+            config.uri.clone(),
+            config.stats.clone(),
+            config.config_store.clone(),
+            applied_frame_no_receiver,
+            config.max_response_size,
+            name.clone(),
+        )
+            .throttled(MAX_CONCCURENT_DBS, Some(DB_CREATE_TIMEOUT));
+
+
+        Ok(Self {
+            name,
+            db_factory: Arc::new(db_factory),
+            tasks: join_set,
+            meta: (),
+        })
+    }
+}
+
+pub struct PrimaryNamespaceConfig {
+    base_path: PathBuf,
+    max_log_size: u64,
+    db_is_dirty: bool,
+    max_log_duration: Option<Duration>,
+    snapshot_callback: SnapshotCallback,
+    bottomless_replication: Option<bottomless::replicator::Options>,
+    extensions: Vec<PathBuf>,
+    stats: Stats,
+    config_store: Arc<DatabaseConfigStore>,
+    max_response_size: u64,
+    load_from_dump: Option<PathBuf>,
+}
+
+pub struct PrimaryMeta {
+    pub logger: Arc<ReplicationLogger>,
+}
+
+impl Namespace<TrackedDb<LibSqlDb>, PrimaryMeta> {
+    pub async fn new_primary(config: &PrimaryNamespaceConfig, name: Bytes) -> anyhow::Result<Self> {
+        let mut join_set = JoinSet::new();
+        let name_str = std::str::from_utf8(&name)?;
+        let db_path = config.base_path.join("dbs").join(name_str);
+        let is_fresh_db = check_fresh_db(&db_path);
+        let logger = Arc::new(ReplicationLogger::open(
+                &db_path,
+                config.max_log_size,
+                config.max_log_duration,
+                config.db_is_dirty,
+                Box::new({ 
+                    let name = name.clone();
+                    let cb = config.snapshot_callback.clone();
+                    move |path| cb(path, &name)
+                }),
+        )?);
+
+        join_set.spawn(run_periodic_compactions(logger.clone()));
+
+        let bottomless_replicator = if let Some(options) = &config.bottomless_replication {
+            Some(Arc::new(std::sync::Mutex::new(
+                        init_bottomless_replicator(db_path.join("data"), options.clone()).await?,
+            )))
+        } else {
+            None
+        };
+
+        // load dump is necessary
+        let dump_loader = DumpLoader::new(
+            db_path.clone(),
+            logger.clone(),
+            bottomless_replicator.clone(),
+        )
+            .await?;
+        if let Some(ref path) = config.load_from_dump {
+            if !is_fresh_db {
+                anyhow::bail!("cannot load from a dump if a database already exists.\nIf you're sure you want to load from a dump, delete your database folder at `{}`", db_path.display());
+            }
+            dump_loader.load_dump(path.into()).await?;
+        }
+
+        let db_factory: Arc<_> = LibSqlDbFactory::new(
+            db_path.clone(),
+            &REPLICATION_METHODS,
+            {
+                let logger = logger.clone();
+                let bottomless_replicator = bottomless_replicator.clone();
+                move || ReplicationLoggerHookCtx::new(logger.clone(), bottomless_replicator.clone())
+            },
+            config.stats.clone(),
+            config.config_store.clone(),
+            config.extensions.clone(),
+            config.max_response_size,
+        )
+            .await?
+            .throttled(MAX_CONCCURENT_DBS, Some(DB_CREATE_TIMEOUT))
+            .into();
+
+        Ok(Self {
+            name,
+            db_factory,
+            tasks: join_set,
+            meta: PrimaryMeta { logger }
+        })
+    }
+
+}
