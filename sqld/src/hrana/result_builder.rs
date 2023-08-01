@@ -2,7 +2,7 @@ use std::fmt::{self, Write as _};
 use std::io;
 
 use bytes::Bytes;
-use rusqlite::types::ValueRef;
+use libsql::params::ValueRef;
 
 use crate::hrana::stmt::{proto_error_from_stmt_error, stmt_error_from_sqld_error};
 use crate::query_result_builder::{
@@ -115,7 +115,7 @@ impl QueryResultBuilder for SingleStatementBuilder {
             cols_size += estimate_cols_json_size(&c);
             proto::Col {
                 name: Some(c.name.to_owned()),
-                decltype: c.decl_ty.map(ToString::to_string),
+                decltype: c.decl_type.map(ToString::to_string),
             }
         }));
 
@@ -207,7 +207,7 @@ fn estimate_cols_json_size(c: &Column) -> u64 {
         &mut f,
         r#"{{"name":"{}","decltype":"{}"}}"#,
         c.name,
-        c.decl_ty.unwrap_or("null")
+        c.decl_type.unwrap_or("null")
     )
     .unwrap();
     f.0

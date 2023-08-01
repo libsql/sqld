@@ -227,7 +227,7 @@ fn get_methods<T>(wal: &mut Wal) -> &mut WalMethodsHook<T> {
 #[allow(non_snake_case)]
 pub extern "C" fn xClose<T: WalHook>(
     wal: *mut Wal,
-    db: *mut rusqlite::ffi::sqlite3,
+    db: *mut libsql::ffi::sqlite3,
     sync_flags: i32,
     n_buf: c_int,
     z_buf: *mut u8,
@@ -343,7 +343,7 @@ pub extern "C" fn xFrames<T: WalHook>(
 #[allow(non_snake_case)]
 pub extern "C" fn xCheckpoint<T: WalHook>(
     wal: *mut Wal,
-    db: *mut rusqlite::ffi::sqlite3,
+    db: *mut libsql::ffi::sqlite3,
     emode: c_int,
     busy_handler: Option<unsafe extern "C" fn(busy_param: *mut c_void) -> c_int>,
     busy_arg: *mut c_void,
@@ -395,7 +395,7 @@ pub extern "C" fn xFile<T: WalHook>(wal: *mut Wal) -> *mut sqlite3_file {
 }
 
 #[allow(non_snake_case)]
-pub extern "C" fn xDb<T: WalHook>(wal: *mut Wal, db: *mut rusqlite::ffi::sqlite3) {
+pub extern "C" fn xDb<T: WalHook>(wal: *mut Wal, db: *mut libsql::ffi::sqlite3) {
     let orig_methods = unsafe { get_orig_methods::<T>(&mut *wal) };
     unsafe { (orig_methods.xDb.unwrap())(wal, db) }
 }

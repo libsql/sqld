@@ -312,7 +312,7 @@ fn perform_dump(dump_path: Option<&Path>, db_path: &Path) -> anyhow::Result<()> 
         }
         None => Box::new(stdout()),
     };
-    let conn = rusqlite::Connection::open(db_path.join("data"))?;
+    let conn = libsql::Database::open(db_path.join("data").to_str().unwrap())?.connect()?;
 
     export_dump(conn, out)?;
 
@@ -329,9 +329,11 @@ fn enable_libsql_logging() {
         tracing::error!("sqlite error {code}: {msg}");
     }
 
+    /* FIXME: introduce tracing to libsql/libsql_sys
     ONCE.call_once(|| unsafe {
         rusqlite::trace::config_log(Some(libsql_log)).unwrap();
     });
+    */
 }
 
 #[tokio::main]

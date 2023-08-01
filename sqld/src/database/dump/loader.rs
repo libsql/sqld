@@ -5,14 +5,13 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::anyhow;
-use rusqlite::ErrorCode;
 use tokio::sync::{mpsc, oneshot};
 
 use crate::database::libsql::open_db;
 use crate::replication::primary::logger::{ReplicationLoggerHookCtx, REPLICATION_METHODS};
 use crate::replication::ReplicationLogger;
 
-type OpMsg = Box<dyn FnOnce(&rusqlite::Connection) + 'static + Send + Sync>;
+type OpMsg = Box<dyn FnOnce(&libsql::Connection) + 'static + Send + Sync>;
 
 #[derive(Debug)]
 pub struct DumpLoader {
@@ -25,6 +24,7 @@ impl DumpLoader {
         logger: Arc<ReplicationLogger>,
         bottomless_replicator: Option<Arc<std::sync::Mutex<bottomless::replicator::Replicator>>>,
     ) -> anyhow::Result<Self> {
+        const BUSY: i32 = sqld_libsql_bindings::ffi::SQLITE_BUSY as i32;
         let (sender, mut receiver) = mpsc::channel::<OpMsg>(1);
 
         let (ok_snd, ok_rcv) = oneshot::channel::<anyhow::Result<()>>();
@@ -43,13 +43,7 @@ impl DumpLoader {
                     // Creating the loader database can, in rare occurences, return sqlite busy,
                     // because of a race condition opening the monitor thread db. This is there to
                     // retry a bunch of times if that happens.
-                    Err(rusqlite::Error::SqliteFailure(
-                        rusqlite::ffi::Error {
-                            code: ErrorCode::DatabaseBusy,
-                            ..
-                        },
-                        _,
-                    )) if retries < 10 => {
+                    Err(libsql::Error::LibError(BUSY)) if retries < 10 => {
                         retries += 1;
                         std::thread::sleep(Duration::from_millis(100));
                     }
@@ -93,7 +87,7 @@ impl DumpLoader {
 const WASM_TABLE_CREATE: &str =
     "CREATE TABLE libsql_wasm_func_table (name text PRIMARY KEY, body text) WITHOUT ROWID;";
 
-fn perform_load_dump(conn: &rusqlite::Connection, path: PathBuf) -> anyhow::Result<()> {
+fn perform_load_dump(conn: &libsql::Connection, path: PathBuf) -> anyhow::Result<()> {
     let mut f = BufReader::new(File::open(path)?);
     let mut curr = String::new();
     let mut line = String::new();

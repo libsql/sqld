@@ -10,9 +10,4 @@ members = [
 ]
 
 [workspace.dependencies]
-rusqlite = { version = "0.29.0", git = "https://github.com/psarna/rusqlite", rev = "477264453b", default-features = false, features = [
-    "buildtime_bindgen",
-    "bundled-libsql-wasm-experimental",
-    "column_decltype",
-    "load_extension"
-] }
+libsql = { version = "0.1.6", default-features = false }

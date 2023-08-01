@@ -12,7 +12,7 @@ pub enum Error {
     #[error(transparent)]
     IOError(#[from] std::io::Error),
     #[error(transparent)]
-    RusqliteError(#[from] rusqlite::Error),
+    LibSqlError(#[from] libsql::Error),
     #[error("Failed to execute query via RPC. Error code: {}, message: {}", .0.code, .0.message)]
     RpcQueryError(crate::rpc::proxy::rpc::Error),
     #[error("Failed to execute queries via RPC protocol: `{0}`")]

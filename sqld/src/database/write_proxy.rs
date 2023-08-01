@@ -2,7 +2,6 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use parking_lot::Mutex as PMutex;
-use rusqlite::types::ValueRef;
 use sqld_libsql_bindings::wal_hook::TRANSPARENT_METHODS;
 use tokio::sync::{watch, Mutex};
 use tonic::transport::Channel;
@@ -25,6 +24,7 @@ use crate::Result;
 use super::config::DatabaseConfigStore;
 use super::Program;
 use super::{factory::DbFactory, libsql::LibSqlDb, Database, DescribeResult};
+use libsql::params::ValueRef;
 
 #[derive(Clone)]
 pub struct WriteProxyDbFactory {
@@ -108,7 +108,7 @@ fn execute_results_to_builder<B: QueryResultBuilder>(
                 builder.begin_step()?;
                 builder.cols_description(rows.column_descriptions.iter().map(|c| Column {
                     name: &c.name,
-                    decl_ty: c.decltype.as_deref(),
+                    decl_type: c.decltype.as_deref(),
                 }))?;
 
                 builder.begin_rows()?;

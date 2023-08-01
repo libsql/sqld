@@ -137,7 +137,6 @@ fn response_error_response(err: ResponseError) -> hyper::Response<hyper::Body> {
             | StmtError::SqlNoStmt
             | StmtError::SqlManyStmts
             | StmtError::ArgsInvalid { .. }
-            | StmtError::SqlInputError { .. }
             | StmtError::ResponseTooLarge
             | StmtError::Blocked { .. } => hyper::StatusCode::BAD_REQUEST,
             StmtError::ArgsBothPositionalAndNamed => hyper::StatusCode::NOT_IMPLEMENTED,

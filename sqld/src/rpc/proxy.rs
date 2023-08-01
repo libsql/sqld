@@ -353,7 +353,7 @@ impl QueryResultBuilder for ExecuteResultBuilder {
         for col in cols {
             let col = col.into();
             let col_len =
-                (col.decl_ty.map(|s| s.len()).unwrap_or_default() + col.name.len()) as u64;
+                (col.decl_type.map(|s| s.len()).unwrap_or_default() + col.name.len()) as u64;
             if col_len + self.current_step_size + self.current_size > self.max_size {
                 return Err(QueryResultBuilderError::ResponseTooLarge(self.max_size));
             }
@@ -361,7 +361,7 @@ impl QueryResultBuilder for ExecuteResultBuilder {
 
             let col = rpc::Column {
                 name: col.name.to_owned(),
-                decltype: col.decl_ty.map(ToString::to_string),
+                decltype: col.decl_type.map(ToString::to_string),
             };
 
             self.current_col_description.push(col);
@@ -380,7 +380,7 @@ impl QueryResultBuilder for ExecuteResultBuilder {
 
     fn add_row_value(
         &mut self,
-        v: rusqlite::types::ValueRef,
+        v: libsql::params::ValueRef,
     ) -> Result<(), QueryResultBuilderError> {
         let data = bincode::serialize(
             &crate::query::Value::try_from(v).map_err(QueryResultBuilderError::from_any)?,
