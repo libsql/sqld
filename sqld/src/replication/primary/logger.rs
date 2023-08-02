@@ -712,6 +712,7 @@ pub struct ReplicationLogger {
     /// a notifier channel other tasks can subscribe to, and get notified when new frames become
     /// available.
     pub new_frame_notifier: watch::Sender<FrameNo>,
+    pub auto_checkpoint: u32,
 }
 
 impl ReplicationLogger {
@@ -720,7 +721,7 @@ impl ReplicationLogger {
         max_log_size: u64,
         max_log_duration: Option<Duration>,
         dirty: bool,
-        disable_auto_checkpoint: bool,
+        auto_checkpoint: u32,
         callback: SnapshotCallback,
     ) -> anyhow::Result<Self> {
         let log_path = db_path.join("wallog");
@@ -752,9 +753,9 @@ impl ReplicationLogger {
         };
 
         if should_recover {
-            Self::recover(log_file, data_path, callback, disable_auto_checkpoint)
+            Self::recover(log_file, data_path, callback, auto_checkpoint)
         } else {
-            Self::from_log_file(db_path.to_path_buf(), log_file, callback)
+            Self::from_log_file(db_path.to_path_buf(), log_file, callback, auto_checkpoint)
         }
     }
 
@@ -762,18 +763,32 @@ impl ReplicationLogger {
         db_path: PathBuf,
         log_file: LogFile,
         callback: SnapshotCallback,
+        auto_checkpoint: u32,
     ) -> anyhow::Result<Self> {
         let header = log_file.header();
         let generation_start_frame_no = header.start_frame_no + header.frame_count;
 
         let (new_frame_notifier, _) = watch::channel(generation_start_frame_no);
-
+        unsafe {
+            let conn = rusqlite::Connection::open(&db_path)?;
+            let rc = rusqlite::ffi::sqlite3_wal_autocheckpoint(conn.handle(), auto_checkpoint as _);
+            if rc != 0 {
+                bail!(
+                    "Failed to set WAL autocheckpoint to {} - error code: {}",
+                    auto_checkpoint,
+                    rc
+                )
+            } else {
+                tracing::info!("SQLite autocheckpoint: {}", auto_checkpoint);
+            }
+        }
         Ok(Self {
             generation: Generation::new(generation_start_frame_no),
             compactor: LogCompactor::new(&db_path, log_file.header.db_id, callback)?,
             log_file: RwLock::new(log_file),
             db_path,
             new_frame_notifier,
+            auto_checkpoint,
         })
     }
 
@@ -781,11 +796,11 @@ impl ReplicationLogger {
         log_file: LogFile,
         mut data_path: PathBuf,
         callback: SnapshotCallback,
-        disable_auto_checkpoint: bool,
+        auto_checkpoint: u32,
     ) -> anyhow::Result<Self> {
         // It is necessary to checkpoint before we restore the replication log, since the WAL may
         // contain pages that are not in the database file.
-        checkpoint_db(&data_path, disable_auto_checkpoint)?;
+        checkpoint_db(&data_path)?;
         let mut log_file = log_file.reset()?;
         let snapshot_path = data_path.parent().unwrap().join("snapshots");
         // best effort, there may be no snapshots
@@ -814,7 +829,7 @@ impl ReplicationLogger {
 
         assert!(data_path.pop());
 
-        Self::from_log_file(data_path, log_file, callback)
+        Self::from_log_file(data_path, log_file, callback, auto_checkpoint)
     }
 
     pub fn database_id(&self) -> anyhow::Result<Uuid> {
@@ -888,7 +903,7 @@ impl ReplicationLogger {
     }
 }
 
-fn checkpoint_db(data_path: &Path, disable_auto_checkpoint: bool) -> anyhow::Result<()> {
+fn checkpoint_db(data_path: &Path) -> anyhow::Result<()> {
     unsafe {
         let conn = rusqlite::Connection::open(data_path)?;
         conn.query_row("PRAGMA journal_mode=WAL", (), |_| Ok(()))?;
@@ -902,15 +917,6 @@ fn checkpoint_db(data_path: &Path, disable_auto_checkpoint: bool) -> anyhow::Res
             );
             Ok(())
         })?;
-        // turn off auto_checkpointing - we'll use a fiber to checkpoint in time steps instead
-        if disable_auto_checkpoint {
-            let rc = rusqlite::ffi::sqlite3_wal_autocheckpoint(conn.handle(), 0);
-            if rc != 0 {
-                bail!("Failed to disable WAL autocheckpoint - error code: {}", rc)
-            } else {
-                tracing::info!("SQLite autocheckpoint disabled");
-            }
-        }
         let mut num_checkpointed: c_int = 0;
         let rc = rusqlite::ffi::sqlite3_wal_checkpoint_v2(
             conn.handle(),
@@ -934,13 +940,20 @@ fn checkpoint_db(data_path: &Path, disable_auto_checkpoint: bool) -> anyhow::Res
 #[cfg(test)]
 mod test {
     use super::*;
+    use crate::DEFAULT_AUTO_CHECKPOINT;
 
     #[test]
     fn write_and_read_from_frame_log() {
         let dir = tempfile::tempdir().unwrap();
-        let logger =
-            ReplicationLogger::open(dir.path(), 0, None, false, false, Box::new(|_| Ok(())))
-                .unwrap();
+        let logger = ReplicationLogger::open(
+            dir.path(),
+            0,
+            None,
+            false,
+            DEFAULT_AUTO_CHECKPOINT,
+            Box::new(|_| Ok(())),
+        )
+        .unwrap();
 
         let frames = (0..10)
             .map(|i| WalPage {
@@ -968,9 +981,15 @@ mod test {
     #[test]
     fn index_out_of_bounds() {
         let dir = tempfile::tempdir().unwrap();
-        let logger =
-            ReplicationLogger::open(dir.path(), 0, None, false, false, Box::new(|_| Ok(())))
-                .unwrap();
+        let logger = ReplicationLogger::open(
+            dir.path(),
+            0,
+            None,
+            false,
+            DEFAULT_AUTO_CHECKPOINT,
+            Box::new(|_| Ok(())),
+        )
+        .unwrap();
         let log_file = logger.log_file.write();
         assert!(matches!(log_file.frame(1), Err(LogReadError::Ahead)));
     }
@@ -979,9 +998,15 @@ mod test {
     #[should_panic]
     fn incorrect_frame_size() {
         let dir = tempfile::tempdir().unwrap();
-        let logger =
-            ReplicationLogger::open(dir.path(), 0, None, false, false, Box::new(|_| Ok(())))
-                .unwrap();
+        let logger = ReplicationLogger::open(
+            dir.path(),
+            0,
+            None,
+            false,
+            DEFAULT_AUTO_CHECKPOINT,
+            Box::new(|_| Ok(())),
+        )
+        .unwrap();
         let entry = WalPage {
             page_no: 0,
             size_after: 0,

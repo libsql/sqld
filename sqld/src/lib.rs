@@ -64,7 +64,11 @@ pub mod version;
 
 const MAX_CONCURRENT_DBS: usize = 128;
 const DB_CREATE_TIMEOUT: Duration = Duration::from_secs(1);
+<<<<<<< HEAD
 const DEFAULT_NAMESPACE_NAME: &str = "default";
+=======
+const DEFAULT_AUTO_CHECKPOINT: u32 = 1000;
+>>>>>>> f5e8cc6 (made auto_checkpoint configurable at Connection::open level)
 
 #[derive(clap::ValueEnum, Clone, Debug, PartialEq)]
 pub enum Backend {
@@ -535,7 +539,7 @@ async fn run_storage_monitor(db_path: PathBuf, stats: Stats) -> anyhow::Result<(
             // initialize a connection here, and keep it alive for the entirety of the program. If we
             // fail to open it, we wait for `duration` and try again later.
             let ctx = &mut ();
-            let maybe_conn = match open_db(&db_path, &TRANSPARENT_METHODS, ctx, Some(rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)) {
+            let maybe_conn = match open_db(&db_path, &TRANSPARENT_METHODS, ctx, Some(rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY), DEFAULT_AUTO_CHECKPOINT) {
                 Ok(conn) => Some(conn),
                 Err(e) => {
                     tracing::warn!("failed to open connection for storager monitor: {e}, trying again in {duration:?}");

@@ -15,7 +15,7 @@ use crate::query::Query;
 use crate::query_analysis::{State, StmtKind};
 use crate::query_result_builder::{QueryBuilderConfig, QueryResultBuilder};
 use crate::stats::Stats;
-use crate::Result;
+use crate::{Result, DEFAULT_AUTO_CHECKPOINT};
 
 use super::config::DatabaseConfigStore;
 use super::program::{Cond, DescribeCol, DescribeParam, DescribeResponse, DescribeResult};
@@ -115,6 +115,7 @@ where
             QueryBuilderConfig {
                 max_size: Some(self.max_response_size),
                 max_total_size: Some(self.max_total_response_size),
+                auto_checkpoint: DEFAULT_AUTO_CHECKPOINT,
             },
         )
         .await
@@ -144,6 +145,7 @@ pub fn open_db<'a, W>(
     wal_methods: &'static WalMethodsHook<W>,
     hook_ctx: &'a mut W::Context,
     flags: Option<OpenFlags>,
+    auto_checkpoint: u32,
 ) -> Result<sqld_libsql_bindings::Connection<'a>, rusqlite::Error>
 where
     W: WalHook,
@@ -154,7 +156,7 @@ where
             | OpenFlags::SQLITE_OPEN_URI
             | OpenFlags::SQLITE_OPEN_NO_MUTEX,
     );
-    sqld_libsql_bindings::Connection::open(path, flags, wal_methods, hook_ctx)
+    sqld_libsql_bindings::Connection::open(path, flags, wal_methods, hook_ctx, auto_checkpoint)
 }
 
 impl LibSqlConnection {
@@ -253,7 +255,13 @@ impl<'a> Connection<'a> {
         builder_config: QueryBuilderConfig,
     ) -> Result<Self> {
         let this = Self {
-            conn: open_db(path, wal_methods, hook_ctx, None)?,
+            conn: open_db(
+                path,
+                wal_methods,
+                hook_ctx,
+                None,
+                builder_config.auto_checkpoint,
+            )?,
             timeout_deadline: None,
             timed_out: false,
             stats,
