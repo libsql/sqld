@@ -1,9 +1,14 @@
 //! This file handles web socket handshakes.
 
 use anyhow::{anyhow, bail, Context as _, Result};
+use bytes::Bytes;
 use futures::{SinkExt as _, StreamExt as _};
+use hyper::Request;
 use tokio_tungstenite::tungstenite;
 use tungstenite::http;
+
+use crate::database::Database;
+use crate::http::db_factory::split_namespace;
 
 use super::super::Version;
 use super::Upgrade;
@@ -14,13 +19,24 @@ pub enum WebSocket {
     Upgraded(tokio_tungstenite::WebSocketStream<hyper::upgrade::Upgraded>),
 }
 
-pub async fn handshake_tcp(socket: tokio::net::TcpStream) -> Result<(WebSocket, Version)> {
+fn extract_namespace<B>(req: &Request<B>) -> anyhow::Result<Bytes> {
+    let host = req.headers().get("host").context("missing host header")?;
+    Ok(split_namespace(std::str::from_utf8(host.as_bytes())?)?)
+}
+
+pub async fn handshake_tcp<D: Database>(socket: tokio::net::TcpStream) -> Result<(WebSocket, Version, Bytes)> {
     let mut version = None;
+    let mut namespace = None;
     let callback = |req: &http::Request<()>, resp: http::Response<()>| {
         let (mut resp_parts, _) = resp.into_parts();
         resp_parts
             .headers
             .insert("server", http::HeaderValue::from_static("sqld-hrana-tcp"));
+        
+        match extract_namespace(&req) {
+            Ok(ns) => { namespace = Some(ns); },
+            Err(e) => return Err(http::Response::from_parts(resp_parts, Some(e.to_string()))),
+        }
 
         match negotiate_version(req.headers(), &mut resp_parts.headers) {
             Ok(version_) => {
@@ -34,16 +50,19 @@ pub async fn handshake_tcp(socket: tokio::net::TcpStream) -> Result<(WebSocket, 
     let ws_config = Some(get_ws_config());
     let stream =
         tokio_tungstenite::accept_hdr_async_with_config(socket, callback, ws_config).await?;
-    Ok((WebSocket::Tcp(stream), version.unwrap()))
+    Ok((WebSocket::Tcp(stream), version.unwrap(), namespace.unwrap()))
 }
 
-pub async fn handshake_upgrade(upgrade: Upgrade) -> Result<(WebSocket, Version)> {
+pub async fn handshake_upgrade(upgrade: Upgrade) -> Result<(WebSocket, Version, Bytes)> {
     let mut req = upgrade.request;
+
+    let host = req.headers().get("host").context("missing host header")?;
+    let ns = split_namespace(std::str::from_utf8(host.as_bytes())?)?;
 
     let ws_config = Some(get_ws_config());
     let (mut resp, stream_fut_version_res) = match hyper_tungstenite::upgrade(&mut req, ws_config) {
         Ok((mut resp, stream_fut)) => match negotiate_version(req.headers(), resp.headers_mut()) {
-            Ok(version) => (resp, Ok((stream_fut, version))),
+            Ok(version) => (resp, Ok((stream_fut, version, ns))),
             Err(msg) => {
                 *resp.status_mut() = http::StatusCode::BAD_REQUEST;
                 *resp.body_mut() = hyper::Body::from(msg.clone());
@@ -73,11 +92,11 @@ pub async fn handshake_upgrade(upgrade: Upgrade) -> Result<(WebSocket, Version)>
         bail!("Could not send the HTTP upgrade response")
     }
 
-    let (stream_fut, version) = stream_fut_version_res?;
+    let (stream_fut, version, ns) = stream_fut_version_res?;
     let stream = stream_fut
         .await
         .context("Could not upgrade HTTP request to a WebSocket")?;
-    Ok((WebSocket::Upgraded(stream), version))
+    Ok((WebSocket::Upgraded(stream), version, ns))
 }
 
 fn negotiate_version(

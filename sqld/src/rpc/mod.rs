@@ -25,7 +25,7 @@ pub async fn run_rpc_server(
     namespaces: Arc<Namespaces<PrimaryNamespaceFactory>>,
 ) -> anyhow::Result<()> {
     let proxy_service = ProxyService::new(namespaces.clone());
-    let logger_service = ReplicationLogService::new(namespaces, idle_shutdown_layer.clone(), None);
+    let logger_service = ReplicationLogService::new(namespaces.clone(), idle_shutdown_layer.clone(), None);
 
     tracing::info!("serving write proxy server at {addr}");
 

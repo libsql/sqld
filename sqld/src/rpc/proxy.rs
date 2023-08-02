@@ -6,7 +6,6 @@ use async_lock::{RwLock, RwLockUpgradableReadGuard};
 use uuid::Uuid;
 
 use crate::auth::{Authenticated, Authorized};
-use crate::database::factory::DbFactory;
 use crate::database::{Database, Program};
 use crate::namespace::{Namespaces, NamespaceFactory, PrimaryNamespaceFactory};
 use crate::query_result_builder::{

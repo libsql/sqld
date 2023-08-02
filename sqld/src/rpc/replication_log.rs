@@ -16,6 +16,7 @@ use tokio_stream::StreamExt;
 use tonic::Status;
 
 use crate::auth::Auth;
+use crate::namespace::{PrimaryNamespaceFactory, Namespaces};
 use crate::replication::primary::frame_stream::FrameStream;
 use crate::replication::LogReadError;
 use crate::utils::services::idle_shutdown::IdleShutdownLayer;

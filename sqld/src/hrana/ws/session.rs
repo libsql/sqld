@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use anyhow::{anyhow, bail, Context as _, Result};
 use futures::future::BoxFuture;
@@ -8,6 +9,8 @@ use super::super::{batch, stmt, ProtocolError, Version};
 use super::{proto, Server};
 use crate::auth::{AuthError, Authenticated};
 use crate::database::Database;
+use crate::database::factory::DbFactory;
+use crate::namespace::NamespaceFactory;
 
 /// Session-level state of an authenticated Hrana connection.
 pub struct Session<D> {
@@ -56,11 +59,11 @@ pub enum ResponseError {
     Batch(batch::BatchError),
 }
 
-pub(super) fn handle_initial_hello<D: Database>(
-    server: &Server<D>,
+pub(super) fn handle_initial_hello<F: NamespaceFactory>(
+    server: &Server<F>,
     version: Version,
     jwt: Option<String>,
-) -> Result<Session<D>> {
+) -> Result<Session<F::Database>> {
     let authenticated = server
         .auth
         .authenticate_jwt(jwt.as_deref())
@@ -74,9 +77,9 @@ pub(super) fn handle_initial_hello<D: Database>(
     })
 }
 
-pub(super) fn handle_repeated_hello<DB: Database>(
-    server: &Server<DB>,
-    session: &mut Session<DB>,
+pub(super) fn handle_repeated_hello<F: NamespaceFactory>(
+    server: &Server<F>,
+    session: &mut Session<F::Database>,
     jwt: Option<String>,
 ) -> Result<()> {
     if session.version < Version::Hrana2 {
@@ -93,11 +96,11 @@ pub(super) fn handle_repeated_hello<DB: Database>(
     Ok(())
 }
 
-pub(super) async fn handle_request<DB: Database>(
-    server: &Server<DB>,
-    session: &mut Session<DB>,
+pub(super) async fn handle_request<D: Database>(
+    session: &mut Session<D>,
     join_set: &mut tokio::task::JoinSet<()>,
     req: proto::Request,
+    factory: Arc<dyn DbFactory<Db = D>>,
 ) -> Result<oneshot::Receiver<Result<proto::Response>>> {
     // TODO: this function has rotten: it is too long and contains too much duplicated code. It
     // should be refactored at the next opportunity, together with code in stmt.rs and batch.rs
@@ -160,10 +163,9 @@ pub(super) async fn handle_request<DB: Database>(
             }
 
             let mut stream_hnd = stream_spawn(join_set, Stream { db: None });
-            let db_factory = server.db_factory.clone();
 
             stream_respond!(&mut stream_hnd, async move |stream| {
-                let db = db_factory
+                let db = factory
                     .create()
                     .await
                     .context("Could not create a database connection")?;

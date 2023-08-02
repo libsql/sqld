@@ -17,7 +17,7 @@ use crate::database::libsql::{LibSqlDb, LibSqlDbFactory};
 use crate::replication::primary::logger::{REPLICATION_METHODS, ReplicationLoggerHookCtx};
 use crate::replication::{ReplicationLogger, SnapshotCallback};
 use crate::stats::Stats;
-use crate::{MAX_CONCCURENT_DBS, DB_CREATE_TIMEOUT, run_periodic_compactions, check_fresh_db, init_bottomless_replicator};
+use crate::{DB_CREATE_TIMEOUT, run_periodic_compactions, check_fresh_db, init_bottomless_replicator, MAX_CONCURRENT_DBS};
 use crate::replication::replica::Replicator;
 use crate::database::write_proxy::{WriteProxyDatabase, WriteProxyDbFactory};
 use crate::database::factory::{DbFactory, TrackedDb};
@@ -34,6 +34,14 @@ pub struct PrimaryNamespaceFactory {
     config: PrimaryNamespaceConfig,
 }
 
+impl PrimaryNamespaceFactory {
+    pub fn new(config: PrimaryNamespaceConfig) -> Self {
+        Self {
+            config
+        }
+    }
+}
+
 
 #[async_trait::async_trait]
 impl NamespaceFactory for PrimaryNamespaceFactory {
@@ -47,6 +55,10 @@ impl NamespaceFactory for PrimaryNamespaceFactory {
 
 pub struct ReplicaNamespaceFactory {
     config: ReplicaNamespaceConfig,
+}
+
+impl ReplicaNamespaceFactory {
+    pub fn new(config: ReplicaNamespaceConfig) -> Self { Self { config } }
 }
 
 #[async_trait::async_trait]
@@ -65,7 +77,15 @@ pub struct Namespaces<F: NamespaceFactory> {
 }
 
 impl<F: NamespaceFactory> Namespaces<F> {
-    pub async fn get_or_create(&self, namespace: Bytes) -> anyhow::Result<Arc<Namespace<F::Database, F::Meta>>> {
+    pub fn new(factory: F) -> Self {
+        Self {
+            inner: Default::default(),
+            factory,
+        }
+
+    }
+
+    pub async fn get_or_create(&self, namespace: Bytes) -> crate::Result<Arc<Namespace<F::Database, F::Meta>>> {
         let mut lock = self.inner.lock().await;
         match lock.entry(namespace.clone()) {
             Entry::Occupied(e) => {
@@ -79,6 +99,7 @@ impl<F: NamespaceFactory> Namespaces<F> {
     }
 }
 
+#[allow(dead_code)]
 pub struct Namespace<D, T> {
     name: Bytes,
     pub db_factory: Arc<dyn DbFactory<Db = D>>,
@@ -87,20 +108,22 @@ pub struct Namespace<D, T> {
 }
 
 pub struct ReplicaNamespaceConfig {
-    base_path: PathBuf,
-    channel: Channel,
-    uri: Uri,
-    allow_replica_overwrite: bool,
-    extensions: Vec<PathBuf>,
-    stats: Stats,
-    config_store: Arc<DatabaseConfigStore>,
-    max_response_size: u64,
+    pub base_path: PathBuf,
+    pub channel: Channel,
+    pub uri: Uri,
+    pub allow_replica_overwrite: bool,
+    pub extensions: Vec<PathBuf>,
+    pub stats: Stats,
+    pub config_store: Arc<DatabaseConfigStore>,
+    pub max_response_size: u64,
+    pub max_total_response_size: u64,
 }
 
 impl Namespace<TrackedDb<WriteProxyDatabase>, ()> {
     pub async fn new_replica(config: &ReplicaNamespaceConfig, name: Bytes) -> anyhow::Result<Self> {
         let name_str = std::str::from_utf8(&name)?;
         let db_path = config.base_path.join("dbs").join(name_str);
+        tokio::fs::create_dir_all(&db_path).await?;
         let mut join_set = JoinSet::new();
         let replicator = Replicator::new(
             db_path.clone(),
@@ -108,7 +131,7 @@ impl Namespace<TrackedDb<WriteProxyDatabase>, ()> {
             config.uri.clone(),
             config.allow_replica_overwrite,
             name.clone(),
-        )?;
+        ).await?;
 
         let applied_frame_no_receiver = replicator.current_frame_no_notifier.clone();
 
@@ -123,9 +146,10 @@ impl Namespace<TrackedDb<WriteProxyDatabase>, ()> {
             config.config_store.clone(),
             applied_frame_no_receiver,
             config.max_response_size,
+            config.max_total_response_size,
             name.clone(),
         )
-            .throttled(MAX_CONCCURENT_DBS, Some(DB_CREATE_TIMEOUT));
+            .throttled(MAX_CONCURRENT_DBS, Some(DB_CREATE_TIMEOUT), config.max_total_response_size);
 
 
         Ok(Self {
@@ -138,17 +162,18 @@ impl Namespace<TrackedDb<WriteProxyDatabase>, ()> {
 }
 
 pub struct PrimaryNamespaceConfig {
-    base_path: PathBuf,
-    max_log_size: u64,
-    db_is_dirty: bool,
-    max_log_duration: Option<Duration>,
-    snapshot_callback: SnapshotCallback,
-    bottomless_replication: Option<bottomless::replicator::Options>,
-    extensions: Vec<PathBuf>,
-    stats: Stats,
-    config_store: Arc<DatabaseConfigStore>,
-    max_response_size: u64,
-    load_from_dump: Option<PathBuf>,
+    pub base_path: PathBuf,
+    pub max_log_size: u64,
+    pub db_is_dirty: bool,
+    pub max_log_duration: Option<Duration>,
+    pub snapshot_callback: SnapshotCallback,
+    pub bottomless_replication: Option<bottomless::replicator::Options>,
+    pub extensions: Vec<PathBuf>,
+    pub stats: Stats,
+    pub config_store: Arc<DatabaseConfigStore>,
+    pub max_response_size: u64,
+    pub load_from_dump: Option<PathBuf>,
+    pub max_total_response_size: u64,
 }
 
 pub struct PrimaryMeta {
@@ -160,6 +185,7 @@ impl Namespace<TrackedDb<LibSqlDb>, PrimaryMeta> {
         let mut join_set = JoinSet::new();
         let name_str = std::str::from_utf8(&name)?;
         let db_path = config.base_path.join("dbs").join(name_str);
+        tokio::fs::create_dir_all(&db_path).await?;
         let is_fresh_db = check_fresh_db(&db_path);
         let logger = Arc::new(ReplicationLogger::open(
                 &db_path,
@@ -209,9 +235,10 @@ impl Namespace<TrackedDb<LibSqlDb>, PrimaryMeta> {
             config.config_store.clone(),
             config.extensions.clone(),
             config.max_response_size,
+            config.max_total_response_size,
         )
             .await?
-            .throttled(MAX_CONCCURENT_DBS, Some(DB_CREATE_TIMEOUT))
+            .throttled(MAX_CONCURRENT_DBS, Some(DB_CREATE_TIMEOUT), config.max_total_response_size)
             .into();
 
         Ok(Self {

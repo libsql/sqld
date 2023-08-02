@@ -8,32 +8,35 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 
 use anyhow::{bail, Context as _, Result};
+use bytes::Bytes;
 use futures::stream::FuturesUnordered;
 use futures::{ready, FutureExt as _, StreamExt as _};
 use tokio::sync::oneshot;
 use tokio_tungstenite::tungstenite;
 use tungstenite::protocol::frame::coding::CloseCode;
 
-use crate::database::Database;
+use crate::database::factory::DbFactory;
+use crate::namespace::NamespaceFactory;
 
 use super::super::{ProtocolError, Version};
 use super::handshake::WebSocket;
 use super::{handshake, proto, session, Server, Upgrade};
 
 /// State of a Hrana connection.
-struct Conn<D> {
+struct Conn<F: NamespaceFactory> {
     conn_id: u64,
-    server: Arc<Server<D>>,
+    server: Arc<Server<F>>,
     ws: WebSocket,
     ws_closed: bool,
     /// The version of the protocol that has been negotiated in the WebSocket handshake.
     version: Version,
     /// After a successful authentication, this contains the session-level state of the connection.
-    session: Option<session::Session<D>>,
+    session: Option<session::Session<F::Database>>,
     /// Join set for all tasks that were spawned to handle the connection.
     join_set: tokio::task::JoinSet<()>,
     /// Future responses to requests that we have received but are evaluating asynchronously.
     responses: FuturesUnordered<ResponseFuture>,
+    factory: Arc<dyn DbFactory<Db = F::Database>>,
 }
 
 /// A `Future` that stores a handle to a future response to request which is being evaluated
@@ -45,34 +48,36 @@ struct ResponseFuture {
     response_rx: futures::future::Fuse<oneshot::Receiver<Result<proto::Response>>>,
 }
 
-pub(super) async fn handle_tcp(
-    server: Arc<Server<impl Database>>,
+pub(super) async fn handle_tcp<F: NamespaceFactory>(
+    server: Arc<Server<F>>,
     socket: tokio::net::TcpStream,
     conn_id: u64,
 ) -> Result<()> {
-    let (ws, version) = handshake::handshake_tcp(socket)
+    let (ws, version, ns) = handshake::handshake_tcp::<F::Database>(socket)
         .await
         .context("Could not perform the WebSocket handshake on TCP connection")?;
-    handle_ws(server, ws, version, conn_id).await
+    handle_ws(server, ws, version, conn_id, ns).await
 }
 
-pub(super) async fn handle_upgrade(
-    server: Arc<Server<impl Database>>,
+pub(super) async fn handle_upgrade<F: NamespaceFactory>(
+    server: Arc<Server<F>>,
     upgrade: Upgrade,
     conn_id: u64,
 ) -> Result<()> {
-    let (ws, version) = handshake::handshake_upgrade(upgrade)
+    let (ws, version, ns) = handshake::handshake_upgrade(upgrade)
         .await
         .context("Could not perform the WebSocket handshake on HTTP connection")?;
-    handle_ws(server, ws, version, conn_id).await
+    handle_ws(server, ws, version, conn_id, ns).await
 }
 
-async fn handle_ws<D: Database>(
-    server: Arc<Server<D>>,
+async fn handle_ws<F: NamespaceFactory>(
+    server: Arc<Server<F>>,
     ws: WebSocket,
     version: Version,
     conn_id: u64,
+    namespace: Bytes,
 ) -> Result<()> {
+    let factory = server.namespaces.get_or_create(namespace).await?.db_factory.clone();
     let mut conn = Conn {
         conn_id,
         server,
@@ -82,6 +87,7 @@ async fn handle_ws<D: Database>(
         session: None,
         join_set: tokio::task::JoinSet::new(),
         responses: FuturesUnordered::new(),
+        factory,
     };
 
     loop {
@@ -136,8 +142,8 @@ async fn handle_ws<D: Database>(
     Ok(())
 }
 
-async fn handle_msg(
-    conn: &mut Conn<impl Database>,
+async fn handle_msg<F: NamespaceFactory>(
+    conn: &mut Conn<F>,
     client_msg: tungstenite::Message,
 ) -> Result<bool> {
     match client_msg {
@@ -172,7 +178,7 @@ async fn handle_msg(
     }
 }
 
-async fn handle_hello_msg(conn: &mut Conn<impl Database>, jwt: Option<String>) -> Result<bool> {
+async fn handle_hello_msg<F: NamespaceFactory>(conn: &mut Conn<F>, jwt: Option<String>) -> Result<bool> {
     let hello_res = match conn.session.as_mut() {
         None => session::handle_initial_hello(&conn.server, conn.version, jwt)
             .map(|session| conn.session = Some(session)),
@@ -194,8 +200,8 @@ async fn handle_hello_msg(conn: &mut Conn<impl Database>, jwt: Option<String>) -
     }
 }
 
-async fn handle_request_msg(
-    conn: &mut Conn<impl Database>,
+async fn handle_request_msg<F: NamespaceFactory>(
+    conn: &mut Conn<F>,
     request_id: i32,
     request: proto::Request,
 ) -> Result<bool> {
@@ -203,7 +209,7 @@ async fn handle_request_msg(
         bail!(ProtocolError::RequestBeforeHello)
     };
 
-    let response_rx = session::handle_request(&conn.server, session, &mut conn.join_set, request)
+    let response_rx = session::handle_request(session, &mut conn.join_set, request, conn.factory.clone())
         .await
         .unwrap_or_else(|err| {
             // we got an error immediately, but let's treat it as a special case of the general
@@ -257,7 +263,7 @@ fn downcast_error(err: anyhow::Error) -> Result<proto::Error> {
     }
 }
 
-async fn send_msg<D: Database>(conn: &mut Conn<D>, msg: &proto::ServerMsg) -> Result<()> {
+async fn send_msg<F: NamespaceFactory>(conn: &mut Conn<F>, msg: &proto::ServerMsg) -> Result<()> {
     let msg = serde_json::to_string(&msg).context("Could not serialize response message")?;
     let msg = tungstenite::Message::Text(msg);
     conn.ws
@@ -266,7 +272,7 @@ async fn send_msg<D: Database>(conn: &mut Conn<D>, msg: &proto::ServerMsg) -> Re
         .context("Could not send response to the WebSocket")
 }
 
-async fn close<D>(conn: &mut Conn<D>, code: CloseCode, reason: String) {
+async fn close<F: NamespaceFactory>(conn: &mut Conn<F>, code: CloseCode, reason: String) {
     if conn.ws_closed {
         return;
     }

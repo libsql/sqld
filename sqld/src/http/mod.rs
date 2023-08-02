@@ -3,7 +3,9 @@ mod hrana_over_http_1;
 mod result_builder;
 pub mod stats;
 mod types;
+pub mod db_factory;
 
+use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
@@ -18,31 +20,32 @@ use axum_extra::middleware::option_layer;
 use base64::prelude::BASE64_STANDARD_NO_PAD;
 use base64::Engine;
 use hyper::server::conn::AddrIncoming;
-use hyper::{header, Body, Request, Response, StatusCode};
+use hyper::{header, Body, Request, StatusCode, Response};
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use serde_json::Number;
 use tokio::sync::{mpsc, oneshot};
+use tonic::body::BoxBody;
 use tonic::transport::Server;
+use tower::Service;
 use tower_http::trace::DefaultOnResponse;
 use tower_http::{compression::CompressionLayer, cors};
 use tracing::{Level, Span};
 
 use crate::auth::{Auth, Authenticated};
-use crate::database::factory::DbFactory;
 use crate::database::Database;
 use crate::error::Error;
 use crate::hrana;
 use crate::http::types::HttpQuery;
+use crate::namespace::{Namespaces, NamespaceFactory};
 use crate::query::{self, Query};
 use crate::query_analysis::{predict_final_state, State, Statement};
 use crate::query_result_builder::QueryResultBuilder;
-use crate::replication::ReplicationLogger;
-use crate::rpc::replication_log::ReplicationLogService;
 use crate::stats::Stats;
 use crate::utils::services::idle_shutdown::IdleShutdownLayer;
 use crate::version;
 
+use self::db_factory::DbFactoryExtractor;
 use self::result_builder::JsonHttpPayloadBuilder;
 use self::types::QueryObject;
 
@@ -110,14 +113,13 @@ fn parse_queries(queries: Vec<QueryObject>) -> crate::Result<Vec<Query>> {
 
 async fn handle_query<D: Database>(
     auth: Authenticated,
-    AxumState(state): AxumState<AppState<D>>,
+    DbFactoryExtractor(factory): DbFactoryExtractor<D>,
     Json(query): Json<HttpQuery>,
 ) -> Result<axum::response::Response, Error> {
-    let AppState { db_factory, .. } = state;
-
     let batch = parse_queries(query.statements)?;
 
-    let db = db_factory.create().await?;
+    // let db = namespaces.get_or_create(namespace).await?.db_factory.create().await?;
+    let db = factory.create().await?;
 
     let builder = JsonHttpPayloadBuilder::new();
     let (builder, _) = db.execute_batch_or_rollback(batch, auth, builder).await?;
@@ -129,8 +131,8 @@ async fn handle_query<D: Database>(
     Ok(res.into_response())
 }
 
-async fn show_console<D>(
-    AxumState(AppState { enable_console, .. }): AxumState<AppState<D>>,
+async fn show_console<F: NamespaceFactory>(
+    AxumState(AppState { enable_console, .. }): AxumState<AppState<F>>,
 ) -> impl IntoResponse {
     if enable_console {
         Html(std::include_str!("console.html")).into_response()
@@ -144,8 +146,8 @@ async fn handle_health() -> Response<Body> {
     Response::new(Body::empty())
 }
 
-async fn handle_upgrade<D>(
-    AxumState(AppState { upgrade_tx, .. }): AxumState<AppState<D>>,
+async fn handle_upgrade<F: NamespaceFactory>(
+    AxumState(AppState { upgrade_tx, .. }): AxumState<AppState<F>>,
     req: Request<Body>,
 ) -> impl IntoResponse {
     if !hyper_tungstenite::is_upgrade_request(&req) {
@@ -175,14 +177,15 @@ async fn handle_version() -> Response<Body> {
     Response::new(Body::from(version))
 }
 
-async fn handle_hrana_v2<D: Database>(
-    AxumState(state): AxumState<AppState<D>>,
+async fn handle_hrana_v2<F: NamespaceFactory>(
+    DbFactoryExtractor(factory): DbFactoryExtractor<F::Database>,
+    AxumState(state): AxumState<AppState<F>>,
     auth: Authenticated,
     req: Request<Body>,
 ) -> Result<Response<Body>, Error> {
     let server = state.hrana_http_srv;
 
-    let res = server.handle_pipeline(auth, req).await?;
+    let res = server.handle_pipeline(auth, req, factory).await?;
 
     Ok(res)
 }
@@ -193,20 +196,20 @@ async fn handle_fallback() -> impl IntoResponse {
 
 /// Router wide state that each request has access too via
 /// axum's `State` extractor.
-pub(crate) struct AppState<D> {
+pub(crate) struct AppState<F: NamespaceFactory> {
     auth: Arc<Auth>,
-    db_factory: Arc<dyn DbFactory<Db = D>>,
+    namespaces: Arc<Namespaces<F>>,
     upgrade_tx: mpsc::Sender<hrana::ws::Upgrade>,
-    hrana_http_srv: Arc<hrana::http::Server<D>>,
+    hrana_http_srv: Arc<hrana::http::Server<F::Database>>,
     enable_console: bool,
     stats: Stats,
 }
 
-impl<D> Clone for AppState<D> {
+impl<F: NamespaceFactory> Clone for AppState<F> {
     fn clone(&self) -> Self {
         Self {
             auth: self.auth.clone(),
-            db_factory: self.db_factory.clone(),
+            namespaces: self.namespaces.clone(),
             upgrade_tx: self.upgrade_tx.clone(),
             hrana_http_srv: self.hrana_http_srv.clone(),
             enable_console: self.enable_console,
@@ -217,24 +220,28 @@ impl<D> Clone for AppState<D> {
 
 // TODO: refactor
 #[allow(clippy::too_many_arguments)]
-pub async fn run_http<D: Database>(
+pub async fn run_http<F, S>(
     addr: SocketAddr,
     auth: Arc<Auth>,
-    db_factory: Arc<dyn DbFactory<Db = D>>,
+    namespaces: Arc<Namespaces<F>>,
     upgrade_tx: mpsc::Sender<hrana::ws::Upgrade>,
-    hrana_http_srv: Arc<hrana::http::Server<D>>,
+    hrana_http_srv: Arc<hrana::http::Server<F::Database>>,
     enable_console: bool,
     idle_shutdown_layer: Option<IdleShutdownLayer>,
     stats: Stats,
-    logger: Option<Arc<ReplicationLogger>>,
-) -> anyhow::Result<()> {
+    replication_service: Option<S>,
+) -> anyhow::Result<()> 
+where F: NamespaceFactory,
+      S: Service<Request<hyper::Body>, Error = Infallible, Response = hyper::Response<BoxBody>> + Send + Clone + tonic::server::NamedService + 'static,
+      S::Future: Send + 'static,
+{
     let state = AppState {
-        auth: auth.clone(),
-        db_factory,
+        auth,
         upgrade_tx,
         hrana_http_srv,
         enable_console,
         stats,
+        namespaces,
     };
 
     tracing::info!("listening for HTTP requests on {addr}");
@@ -243,7 +250,8 @@ pub async fn run_http<D: Database>(
         tracing::debug!("got request: {} {}", req.method(), req.uri());
     }
 
-    let app = Router::new()
+    let app = Router::new();
+    let app = app
         .route("/", post(handle_query))
         .route("/", get(handle_upgrade))
         .route("/version", get(handle_version))
@@ -277,10 +285,9 @@ pub async fn run_http<D: Database>(
         );
 
     // Merge the grpc based axum router into our regular http router
-    let router = if let Some(logger) = logger {
-        let logger_rpc = ReplicationLogService::new(logger, idle_shutdown_layer, Some(auth));
+    let router = if let Some(svc) = replication_service {
         let grpc_router = Server::builder()
-            .add_service(crate::rpc::ReplicationLogServer::new(logger_rpc))
+            .add_service(svc)
             .into_router();
 
         layered_app.merge(grpc_router)
@@ -320,8 +327,8 @@ where
     }
 }
 
-impl<D> FromRef<AppState<D>> for Arc<Auth> {
-    fn from_ref(input: &AppState<D>) -> Self {
+impl<F: NamespaceFactory> FromRef<AppState<F>> for Arc<Auth> {
+    fn from_ref(input: &AppState<F>) -> Self {
         input.auth.clone()
     }
 }

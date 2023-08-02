@@ -1,3 +1,4 @@
+use std::convert::Infallible;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -8,18 +9,22 @@ use std::time::Duration;
 use anyhow::Context as AnyhowContext;
 use enclose::enclose;
 use futures::never::Never;
+use hyper::Request;
 use libsql::wal_hook::TRANSPARENT_METHODS;
+use namespace::{Namespaces, PrimaryNamespaceFactory, PrimaryNamespaceConfig, NamespaceFactory, ReplicaNamespaceConfig, ReplicaNamespaceFactory};
 use once_cell::sync::Lazy;
+use replication::{SnapshotCallback, ReplicationLogger};
+use rpc::replication_log::ReplicationLogService;
+use rpc::{run_rpc_server, ReplicationLogServer};
 use tokio::sync::{mpsc, Notify};
 use tokio::task::JoinSet;
+use tonic::body::BoxBody;
 use tonic::transport::Channel;
+use tower::Service;
 use utils::services::idle_shutdown::IdleShutdownLayer;
 
 use self::database::config::DatabaseConfigStore;
-use self::database::factory::DbFactory;
 use self::database::libsql::open_db;
-use self::database::Database;
-use self::replication::{ReplicationLogger, SnapshotCallback};
 use crate::auth::Auth;
 use crate::error::Error;
 use crate::stats::Stats;
@@ -145,31 +150,35 @@ impl Default for Config {
     }
 }
 
-async fn run_service<D: Database>(
-    db_factory: Arc<dyn DbFactory<Db = D>>,
+async fn run_service<F, S>(
+    namespaces: Arc<Namespaces<F>>,
     config: &Config,
     join_set: &mut JoinSet<anyhow::Result<()>>,
     idle_shutdown_layer: Option<IdleShutdownLayer>,
     stats: Stats,
     db_config_store: Arc<DatabaseConfigStore>,
-    logger: Option<Arc<ReplicationLogger>>,
-) -> anyhow::Result<()> {
+    replication_service: Option<S>,
+) -> anyhow::Result<()>
+where F: NamespaceFactory,
+      S: Service<Request<hyper::Body>, Error = Infallible, Response = hyper::Response<BoxBody>> + Send + Clone + tonic::server::NamedService + 'static,
+      S::Future: Send + 'static,
+{
     let auth = get_auth(config)?;
 
     let (hrana_accept_tx, hrana_accept_rx) = mpsc::channel(8);
     let (hrana_upgrade_tx, hrana_upgrade_rx) = mpsc::channel(8);
 
     if config.http_addr.is_some() || config.hrana_addr.is_some() {
-        let db_factory = db_factory.clone();
+        let namespaces = namespaces.clone();
         let auth = auth.clone();
         let idle_kicker = idle_shutdown_layer.clone().map(|isl| isl.into_kicker());
         join_set.spawn(async move {
             hrana::ws::serve(
-                db_factory,
                 auth,
                 idle_kicker,
                 hrana_accept_rx,
                 hrana_upgrade_rx,
+                namespaces,
             )
             .await
             .context("Hrana server failed")
@@ -177,20 +186,17 @@ async fn run_service<D: Database>(
     }
 
     if let Some(addr) = config.http_addr {
-        let hrana_http_srv = Arc::new(hrana::http::Server::new(
-            db_factory.clone(),
-            config.http_self_url.clone(),
-        ));
+        let hrana_http_srv = Arc::new(hrana::http::Server::new(config.http_self_url.clone()));
         join_set.spawn(http::run_http(
             addr,
             auth,
-            db_factory,
+            namespaces,
             hrana_upgrade_tx,
             hrana_http_srv.clone(),
             config.enable_http_console,
             idle_shutdown_layer,
             stats.clone(),
-            logger,
+            replication_service,
         ));
         join_set.spawn(async move {
             hrana_http_srv.run_expire().await;
@@ -310,6 +316,33 @@ async fn start_replica(
     stats: Stats,
     db_config_store: Arc<DatabaseConfigStore>,
 ) -> anyhow::Result<()> {
+    let (channel, uri) = configure_rpc(config)?;
+    let extensions = validate_extensions(config.extensions_path.clone())?;
+    let conf = ReplicaNamespaceConfig {
+        base_path: config.db_path.to_owned(),
+        channel,
+        uri,
+        allow_replica_overwrite:  config.allow_replica_overwrite,
+        extensions,
+        stats: stats.clone(),
+        config_store: db_config_store.clone(),
+        max_response_size: config.max_response_size,
+        max_total_response_size: config.max_total_response_size
+    };
+    let factory = ReplicaNamespaceFactory::new(conf);
+    let namespaces = Arc::new(Namespaces::new(factory));
+
+    run_service(
+        namespaces,
+        config,
+        join_set,
+        idle_shutdown_layer,
+        stats,
+        db_config_store,
+        None::<ReplicationLogServer<ReplicationLogService>>,
+    )
+        .await?;
+
     Ok(())
 }
 
@@ -396,67 +429,27 @@ async fn start_primary(
     join_set: &mut JoinSet<anyhow::Result<()>>,
     idle_shutdown_layer: Option<IdleShutdownLayer>,
     stats: Stats,
-    db_config_store: Arc<DatabaseConfigStore>,
+    config_store: Arc<DatabaseConfigStore>,
     db_is_dirty: bool,
     snapshot_callback: SnapshotCallback,
 ) -> anyhow::Result<()> {
-<<<<<<< HEAD
-    let is_fresh_db = check_fresh_db(&config.db_path);
-    let logger = Arc::new(ReplicationLogger::open(
-        &config.db_path,
-        config.max_log_size,
-        config.max_log_duration.map(Duration::from_secs_f32),
+    let extensions = validate_extensions(config.extensions_path.clone())?;
+    let conf = PrimaryNamespaceConfig {
+        base_path: config.db_path.to_owned(),
+        max_log_size: config.max_log_size,
         db_is_dirty,
+        max_log_duration: config.max_log_duration.map(Duration::from_secs_f32),
         snapshot_callback,
-    )?);
-
-    join_set.spawn(run_periodic_compactions(logger.clone()));
-
-    let bottomless_replicator = if let Some(options) = &config.bottomless_replication {
-        Some(Arc::new(std::sync::Mutex::new(
-            init_bottomless_replicator(config.db_path.join("data"), options.clone()).await?,
-        )))
-    } else {
-        None
+        bottomless_replication: config.bottomless_replication.clone(),
+        extensions,
+        stats: stats.clone(),
+        config_store: config_store.clone(),
+        max_response_size: config.max_response_size,
+        load_from_dump: None,
+        max_total_response_size: config.max_total_response_size,
     };
-
-    // load dump is necessary
-    let dump_loader = DumpLoader::new(
-        config.db_path.clone(),
-        logger.clone(),
-        bottomless_replicator.clone(),
-    )
-    .await?;
-    if let Some(ref path) = config.load_from_dump {
-        if !is_fresh_db {
-            anyhow::bail!("cannot load from a dump if a database already exists.\nIf you're sure you want to load from a dump, delete your database folder at `{}`", config.db_path.display());
-        }
-        dump_loader.load_dump(path.into()).await?;
-    }
-
-    let valid_extensions = validate_extensions(config.extensions_path.clone())?;
-
-    let db_factory: Arc<_> = LibSqlDbFactory::new(
-        config.db_path.clone(),
-        &REPLICATION_METHODS,
-        {
-            let logger = logger.clone();
-            let bottomless_replicator = bottomless_replicator.clone();
-            move || ReplicationLoggerHookCtx::new(logger.clone(), bottomless_replicator.clone())
-        },
-        stats.clone(),
-        db_config_store.clone(),
-        valid_extensions,
-        config.max_response_size,
-        config.max_total_response_size,
-    )
-    .await?
-    .throttled(
-        MAX_CONCURRENT_DBS,
-        Some(DB_CREATE_TIMEOUT),
-        config.max_total_response_size,
-    )
-    .into();
+    let factory = PrimaryNamespaceFactory::new(conf);
+    let namespaces = Arc::new(Namespaces::new(factory));
 
     if let Some(ref addr) = config.rpc_server_addr {
         join_set.spawn(run_rpc_server(
@@ -465,190 +458,24 @@ async fn start_primary(
             config.rpc_server_cert.clone(),
             config.rpc_server_key.clone(),
             config.rpc_server_ca_cert.clone(),
-            db_factory.clone(),
-            logger.clone(),
             idle_shutdown_layer.clone(),
+            namespaces.clone(),
         ));
     }
 
+    let logger_service = ReplicationLogService::new(namespaces.clone(), idle_shutdown_layer.clone(), Some(get_auth(config)?));
     run_service(
-        db_factory,
+        namespaces.clone(),
         config,
         join_set,
         idle_shutdown_layer,
         stats,
-        db_config_store,
-        Some(logger),
+        config_store,
+        Some(ReplicationLogServer::new(logger_service)),
     )
     .await?;
 
-||||||| parent of 592a856 (update gRPC protocols)
-    let is_fresh_db = check_fresh_db(&config.db_path);
-    let logger = Arc::new(ReplicationLogger::open(
-        &config.db_path,
-        config.max_log_size,
-        config.max_log_duration.map(Duration::from_secs_f32),
-        db_is_dirty,
-        snapshot_callback,
-    )?);
-
-    join_set.spawn(run_periodic_compactions(logger.clone()));
-
-    let bottomless_replicator = if let Some(options) = &config.bottomless_replication {
-        Some(Arc::new(std::sync::Mutex::new(
-            init_bottomless_replicator(config.db_path.join("data"), options.clone()).await?,
-        )))
-    } else {
-        None
-    };
-
-    // load dump is necessary
-    let dump_loader = DumpLoader::new(
-        config.db_path.clone(),
-        logger.clone(),
-        bottomless_replicator.clone(),
-    )
-    .await?;
-    if let Some(ref path) = config.load_from_dump {
-        if !is_fresh_db {
-            anyhow::bail!("cannot load from a dump if a database already exists.\nIf you're sure you want to load from a dump, delete your database folder at `{}`", config.db_path.display());
-        }
-        dump_loader.load_dump(path.into()).await?;
-    }
-
-    let valid_extensions = validate_extensions(config.extensions_path.clone())?;
-
-    let db_factory: Arc<_> = LibSqlDbFactory::new(
-        config.db_path.clone(),
-        &REPLICATION_METHODS,
-        {
-            let logger = logger.clone();
-            let bottomless_replicator = bottomless_replicator.clone();
-            move || ReplicationLoggerHookCtx::new(logger.clone(), bottomless_replicator.clone())
-        },
-        stats.clone(),
-        db_config_store.clone(),
-        valid_extensions,
-        config.max_response_size,
-        config.max_total_response_size,
-    )
-    .await?
-    .throttled(
-        MAX_CONCCURENT_DBS,
-        Some(DB_CREATE_TIMEOUT),
-        config.max_total_response_size,
-    )
-    .into();
-
-    if let Some(ref addr) = config.rpc_server_addr {
-        join_set.spawn(run_rpc_server(
-            *addr,
-            config.rpc_server_tls,
-            config.rpc_server_cert.clone(),
-            config.rpc_server_key.clone(),
-            config.rpc_server_ca_cert.clone(),
-            db_factory.clone(),
-            logger.clone(),
-            idle_shutdown_layer.clone(),
-        ));
-    }
-
-    run_service(
-        db_factory,
-        config,
-        join_set,
-        idle_shutdown_layer,
-        stats,
-        db_config_store,
-        Some(logger),
-    )
-    .await?;
-
-=======
->>>>>>> 592a856 (update gRPC protocols)
     Ok(())
-    // let is_fresh_db = check_fresh_db(&config.db_path);
-    // let logger = Arc::new(ReplicationLogger::open(
-    //     &config.db_path,
-    //     config.max_log_size,
-    //     config.max_log_duration.map(Duration::from_secs_f32),
-    //     db_is_dirty,
-    //     snapshot_callback,
-    // )?);
-    //
-    // join_set.spawn(run_periodic_compactions(logger.clone()));
-    //
-    // let bottomless_replicator = if let Some(options) = &config.bottomless_replication {
-    //     Some(Arc::new(std::sync::Mutex::new(
-    //         init_bottomless_replicator(config.db_path.join("data"), options.clone()).await?,
-    //     )))
-    // } else {
-    //     None
-    // };
-    //
-    // // load dump is necessary
-    // let dump_loader = DumpLoader::new(
-    //     config.db_path.clone(),
-    //     logger.clone(),
-    //     bottomless_replicator.clone(),
-    // )
-    // .await?;
-    // if let Some(ref path) = config.load_from_dump {
-    //     if !is_fresh_db {
-    //         anyhow::bail!("cannot load from a dump if a database already exists.\nIf you're sure you want to load from a dump, delete your database folder at `{}`", config.db_path.display());
-    //     }
-    //     dump_loader.load_dump(path.into()).await?;
-    // }
-    //
-    // let valid_extensions = validate_extensions(config.extensions_path.clone())?;
-    //
-    // let db_factory: Arc<_> = LibSqlDbFactory::new(
-    //     config.db_path.clone(),
-    //     &REPLICATION_METHODS,
-    //     {
-    //         let logger = logger.clone();
-    //         let bottomless_replicator = bottomless_replicator.clone();
-    //         move || ReplicationLoggerHookCtx::new(logger.clone(), bottomless_replicator.clone())
-    //     },
-    //     stats.clone(),
-    //     db_config_store.clone(),
-    //     valid_extensions,
-    //     config.max_response_size,
-    // )
-    // .await?
-    // .throttled(MAX_CONCCURENT_DBS, Some(DB_CREATE_TIMEOUT))
-    // .into();
-    //
-    // if let Some(ref addr) = config.rpc_server_addr {
-    //     join_set.spawn(run_rpc_server(
-    //         *addr,
-    //         config.rpc_server_tls,
-    //         config.rpc_server_cert.clone(),
-    //         config.rpc_server_key.clone(),
-    //         config.rpc_server_ca_cert.clone(),
-    //         db_factory.clone(),
-    //         logger.clone(),
-    //         idle_shutdown_layer.clone(),
-    //     ));
-    // }
-    //
-    // if let Some(ref addr) = config.http_replication_addr {
-    //     // FIXME: let's bring it back once I figure out how Axum works
-    //     // let auth = get_auth(config)?;
-    //     join_set.spawn(replication::http::run(*addr, logger));
-    // }
-    //
-    // run_service(
-    //     db_factory,
-    //     config,
-    //     join_set,
-    //     idle_shutdown_layer,
-    //     stats,
-    //     db_config_store,
-    // )
-    // .await?;
-    //
-    // Ok(())
 }
 
 async fn run_periodic_compactions(logger: Arc<ReplicationLogger>) -> anyhow::Result<()> {

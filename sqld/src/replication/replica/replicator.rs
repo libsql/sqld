@@ -8,7 +8,7 @@ use bytemuck::bytes_of;
 use bytes::Bytes;
 use futures::StreamExt;
 use parking_lot::Mutex;
-use tokio::sync::{mpsc, watch};
+use tokio::sync::{mpsc, watch, oneshot};
 use tonic::transport::Channel;
 
 use crate::replication::frame::Frame;
@@ -43,7 +43,7 @@ pub struct Replicator {
 }
 
 impl Replicator {
-    pub fn new(
+    pub async fn new(
         db_path: PathBuf,
         channel: Channel,
         uri: tonic::transport::Uri,
@@ -91,17 +91,24 @@ impl Replicator {
             }
         };
 
+        let (snd, rcv) = oneshot::channel();
         tokio::task::spawn_blocking({
             let db_path = db_path.clone();
             move || -> anyhow::Result<()> {
                 let mut ctx = InjectorHookCtx::new(receiver, pre_commit, post_commit);
+                dbg!();
                 let mut injector = FrameInjector::new(&db_path, &mut ctx)?;
+                let _ = snd.send(());
+                dbg!();
 
                 while injector.step()? {}
 
                 Ok(())
             }
         });
+
+        // injector is ready:
+        rcv.await?;
 
         Ok(Self {
             namespace,
