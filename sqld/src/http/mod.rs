@@ -7,16 +7,18 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use anyhow::Context;
-use axum::extract::{FromRef, FromRequestParts, State as AxumState};
+use axum::extract::{FromRef, FromRequest, FromRequestParts, State as AxumState};
 use axum::http::request::Parts;
+use axum::http::HeaderValue;
 use axum::response::{Html, IntoResponse};
 use axum::routing::{get, post};
-use axum::{Json, Router};
+use axum::Router;
 use axum_extra::middleware::option_layer;
 use base64::prelude::BASE64_STANDARD_NO_PAD;
 use base64::Engine;
 use hyper::server::conn::AddrIncoming;
 use hyper::{header, Body, Request, Response, StatusCode};
+use serde::de::DeserializeOwned;
 use serde::Serialize;
 use serde_json::Number;
 use tokio::sync::{mpsc, oneshot};
@@ -302,5 +304,34 @@ where
 impl<D> FromRef<AppState<D>> for Arc<Auth> {
     fn from_ref(input: &AppState<D>) -> Self {
         input.auth.clone()
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+#[must_use]
+pub struct Json<T>(pub T);
+
+#[tonic::async_trait]
+impl<S, T, B> FromRequest<S, B> for Json<T>
+where
+    T: DeserializeOwned,
+    B: hyper::body::HttpBody + Send + 'static,
+    B::Data: Send,
+    B::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
+    S: Send + Sync,
+{
+    type Rejection = axum::extract::rejection::JsonRejection;
+
+    async fn from_request(mut req: Request<B>, state: &S) -> Result<Self, Self::Rejection> {
+        let headers = req.headers_mut();
+
+        headers.insert(
+            header::CONTENT_TYPE,
+            HeaderValue::from_static("application/json"),
+        );
+
+        axum::Json::from_request(req, state)
+            .await
+            .map(|t| Json(t.0))
     }
 }
