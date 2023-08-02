@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use bytes::Bytes;
 use parking_lot::Mutex as PMutex;
 use rusqlite::types::ValueRef;
 use sqld_libsql_bindings::wal_hook::TRANSPARENT_METHODS;
@@ -36,6 +37,7 @@ pub struct WriteProxyDbFactory {
     applied_frame_no_receiver: watch::Receiver<FrameNo>,
     max_response_size: u64,
     max_total_response_size: u64,
+    namespace: Bytes,
 }
 
 impl WriteProxyDbFactory {
@@ -50,6 +52,7 @@ impl WriteProxyDbFactory {
         applied_frame_no_receiver: watch::Receiver<FrameNo>,
         max_response_size: u64,
         max_total_response_size: u64,
+        namespace: Bytes,
     ) -> Self {
         let client = ProxyClient::with_origin(channel, uri);
         Self {
@@ -61,6 +64,7 @@ impl WriteProxyDbFactory {
             applied_frame_no_receiver,
             max_response_size,
             max_total_response_size,
+            namespace
         }
     }
 }
@@ -80,6 +84,7 @@ impl DbFactory for WriteProxyDbFactory {
                 max_size: Some(self.max_response_size),
                 max_total_size: Some(self.max_total_response_size),
             },
+            self.namespace.clone()
         )
         .await?;
         Ok(db)
@@ -99,6 +104,8 @@ pub struct WriteProxyDatabase {
     applied_frame_no_receiver: watch::Receiver<FrameNo>,
     builder_config: QueryBuilderConfig,
     stats: Stats,
+    /// bytes representing the namespace name
+    namespace: Bytes,
 }
 
 fn execute_results_to_builder<B: QueryResultBuilder>(
@@ -155,6 +162,7 @@ impl WriteProxyDatabase {
         config_store: Arc<DatabaseConfigStore>,
         applied_frame_no_receiver: watch::Receiver<FrameNo>,
         builder_config: QueryBuilderConfig,
+        namespace: Bytes,
     ) -> Result<Self> {
         let read_db = LibSqlDb::new(
             path,
@@ -175,6 +183,7 @@ impl WriteProxyDatabase {
             applied_frame_no_receiver,
             builder_config,
             stats,
+            namespace,
         })
     }
 
@@ -193,6 +202,7 @@ impl WriteProxyDatabase {
             Authenticated::Authorized(Authorized::FullAccess) => Some(1),
         };
         let req = crate::rpc::proxy::rpc::ProgramReq {
+            namespace: self.namespace.clone(),
             client_id: self.client_id.to_string(),
             pgm: Some(pgm.into()),
             authorized,

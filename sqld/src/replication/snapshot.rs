@@ -6,6 +6,7 @@ use std::mem::size_of;
 use std::os::unix::prelude::FileExt;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
+use std::sync::Arc;
 use std::sync::mpsc;
 use std::thread::JoinHandle;
 
@@ -165,10 +166,10 @@ pub struct LogCompactor {
     sender: crossbeam::channel::Sender<(LogFile, PathBuf, u32)>,
 }
 
-pub type SnapshotCallback = Box<dyn Fn(&Path) -> anyhow::Result<()> + Send>;
+pub type SnapshotCallback = Arc<dyn Fn(&Path, &Bytes) -> anyhow::Result<()> + Send + Sync>;
 
 impl LogCompactor {
-    pub fn new(db_path: &Path, db_id: u128, callback: SnapshotCallback) -> anyhow::Result<Self> {
+    pub fn new(db_path: &Path, db_id: u128, callback: Box<dyn Fn(&Path) -> anyhow::Result<()> + Send + Sync>) -> anyhow::Result<Self> {
         // we create a 0 sized channel, in order to create backpressure when we can't
         // keep up with snapshop creation: if there isn't any ongoind comptaction task processing,
         // the compact does not block, and the log is compacted in the background. Otherwise, the

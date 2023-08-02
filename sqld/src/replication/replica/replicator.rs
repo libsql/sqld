@@ -5,6 +5,7 @@ use std::time::Duration;
 
 use anyhow::bail;
 use bytemuck::bytes_of;
+use bytes::Bytes;
 use futures::StreamExt;
 use parking_lot::Mutex;
 use tokio::sync::{mpsc, watch};
@@ -18,7 +19,7 @@ use crate::rpc::replication_log::rpc::{
     replication_log_client::ReplicationLogClient, HelloRequest, LogOffset,
 };
 use crate::rpc::replication_log::NEED_SNAPSHOT_ERROR_MSG;
-use crate::HARD_RESET;
+use crate::{HARD_RESET};
 
 use super::hook::{Frames, InjectorHookCtx};
 use super::injector::FrameInjector;
@@ -33,6 +34,8 @@ type Client = ReplicationLogClient<Channel>;
 pub struct Replicator {
     client: Client,
     db_path: PathBuf,
+    /// bytes representing the namespace name
+    namespace: Bytes,
     meta: Arc<Mutex<Option<WalIndexMeta>>>,
     pub current_frame_no_notifier: watch::Receiver<FrameNo>,
     allow_replica_overwrite: bool,
@@ -45,6 +48,7 @@ impl Replicator {
         channel: Channel,
         uri: tonic::transport::Uri,
         allow_replica_overwrite: bool,
+        namespace: Bytes,
     ) -> anyhow::Result<Self> {
         let client = Client::with_origin(channel, uri);
         let (meta, meta_file) = WalIndexMeta::read_from_path(&db_path)?;
@@ -100,6 +104,7 @@ impl Replicator {
         });
 
         Ok(Self {
+            namespace,
             client,
             db_path,
             current_frame_no_notifier,
@@ -126,7 +131,7 @@ impl Replicator {
         let mut error_printed = false;
         for _ in 0..HANDSHAKE_MAX_RETRIES {
             tracing::info!("Attempting to perform handshake with primary.");
-            match self.client.hello(HelloRequest {}).await {
+            match self.client.hello(HelloRequest { namespace: self.namespace.clone() }).await {
                 Ok(resp) => {
                     let hello = resp.into_inner();
                     return tokio::task::block_in_place(|| {
@@ -177,6 +182,7 @@ impl Replicator {
         let offset = LogOffset {
             // if current == FrameNo::Max then it means that we're starting fresh
             next_offset: self.next_offset(),
+            namespace: self.namespace.clone(),
         };
         let mut stream = self.client.log_entries(offset).await?.into_inner();
 
@@ -215,7 +221,7 @@ impl Replicator {
         let next_offset = self.next_offset();
         let frames = self
             .client
-            .snapshot(LogOffset { next_offset })
+            .snapshot(LogOffset { next_offset, namespace: self.namespace.clone() })
             .await?
             .into_inner();
 

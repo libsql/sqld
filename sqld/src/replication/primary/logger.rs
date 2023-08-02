@@ -24,7 +24,7 @@ use crate::libsql::ffi::{
 use crate::libsql::wal_hook::WalHook;
 use crate::replication::frame::{Frame, FrameHeader};
 use crate::replication::snapshot::{
-    find_snapshot_file, LogCompactor, SnapshotCallback, SnapshotFile,
+    find_snapshot_file, LogCompactor, SnapshotFile,
 };
 use crate::replication::{FrameNo, CRC_64_GO_ISO, WAL_MAGIC, WAL_PAGE_SIZE};
 
@@ -719,7 +719,7 @@ impl ReplicationLogger {
         max_log_size: u64,
         max_log_duration: Option<Duration>,
         dirty: bool,
-        callback: SnapshotCallback,
+        callback: Box<dyn Fn(&Path) -> anyhow::Result<()> + Send + Sync>,
     ) -> anyhow::Result<Self> {
         let log_path = db_path.join("wallog");
         let data_path = db_path.join("data");
@@ -759,7 +759,7 @@ impl ReplicationLogger {
     fn from_log_file(
         db_path: PathBuf,
         log_file: LogFile,
-        callback: SnapshotCallback,
+        callback: Box<dyn Fn(&Path) -> anyhow::Result<()> + Send + Sync>,
     ) -> anyhow::Result<Self> {
         let header = log_file.header();
         let generation_start_frame_no = header.start_frame_no + header.frame_count;
@@ -778,7 +778,7 @@ impl ReplicationLogger {
     fn recover(
         log_file: LogFile,
         mut data_path: PathBuf,
-        callback: SnapshotCallback,
+        callback: Box<dyn Fn(&Path) -> anyhow::Result<()> + Send + Sync>,
     ) -> anyhow::Result<Self> {
         // It is necessary to checkpoint before we restore the replication log, since the WAL may
         // contain pages that are not in the database file.

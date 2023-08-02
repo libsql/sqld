@@ -3,16 +3,15 @@ use std::str::FromStr;
 use std::sync::Arc;
 
 use async_lock::{RwLock, RwLockUpgradableReadGuard};
-use tokio::sync::watch;
 use uuid::Uuid;
 
 use crate::auth::{Authenticated, Authorized};
 use crate::database::factory::DbFactory;
 use crate::database::{Database, Program};
+use crate::namespace::{Namespaces, NamespaceFactory, PrimaryNamespaceFactory};
 use crate::query_result_builder::{
     Column, QueryBuilderConfig, QueryResultBuilder, QueryResultBuilderError,
 };
-use crate::replication::FrameNo;
 
 use self::rpc::proxy_server::Proxy;
 use self::rpc::query_result::RowResult;
@@ -251,21 +250,16 @@ pub mod rpc {
     }
 }
 
-pub struct ProxyService<D> {
-    clients: RwLock<HashMap<Uuid, Arc<D>>>,
-    factory: Arc<dyn DbFactory<Db = D>>,
-    new_frame_notifier: watch::Receiver<FrameNo>,
+pub struct ProxyService {
+    clients: RwLock<HashMap<Uuid, Arc<<PrimaryNamespaceFactory as NamespaceFactory>::Database>>>,
+    namespaces: Arc<Namespaces<PrimaryNamespaceFactory>>,
 }
 
-impl<D: Database> ProxyService<D> {
-    pub fn new(
-        factory: Arc<dyn DbFactory<Db = D>>,
-        new_frame_notifier: watch::Receiver<FrameNo>,
-    ) -> Self {
+impl ProxyService {
+    pub fn new(namespaces: Arc<Namespaces<PrimaryNamespaceFactory>>) -> Self {
         Self {
             clients: Default::default(),
-            factory,
-            new_frame_notifier,
+            namespaces,
         }
     }
 }
@@ -426,7 +420,7 @@ impl QueryResultBuilder for ExecuteResultBuilder {
 }
 
 #[tonic::async_trait]
-impl<D: Database> Proxy for ProxyService<D> {
+impl Proxy for ProxyService {
     async fn execute(
         &self,
         req: tonic::Request<rpc::ProgramReq>,
@@ -447,11 +441,13 @@ impl<D: Database> Proxy for ProxyService<D> {
             None => Authenticated::Anonymous,
         };
         let lock = self.clients.upgradable_read().await;
+        let namespace = std::str::from_utf8(&req.namespace).unwrap().to_string();
+        let ns = self.namespaces.get_or_create(namespace.into()).await.unwrap();
         let db = match lock.get(&client_id) {
             Some(db) => db.clone(),
             None => {
                 tracing::debug!("connected: {client_id}");
-                match self.factory.create().await {
+                match ns.db_factory.create().await {
                     Ok(db) => {
                         let db = Arc::new(db);
                         let mut lock = RwLockUpgradableReadGuard::upgrade(lock).await;
@@ -470,7 +466,7 @@ impl<D: Database> Proxy for ProxyService<D> {
             .await
             // TODO: this is no necessarily a permission denied error!
             .map_err(|e| tonic::Status::new(tonic::Code::PermissionDenied, e.to_string()))?;
-        let current_frame_no = *self.new_frame_notifier.borrow();
+        let current_frame_no = *ns.meta.logger.new_frame_notifier.borrow();
 
         Ok(tonic::Response::new(ExecuteResults {
             current_frame_no,
