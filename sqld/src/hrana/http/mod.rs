@@ -19,12 +19,6 @@ pub struct Server<D> {
     stream_state: Mutex<stream::ServerStreamState<D>>,
 }
 
-#[derive(Debug)]
-pub enum Route {
-    GetIndex,
-    PostPipeline,
-}
-
 impl<D: Database> Server<D> {
     pub fn new(db_factory: Arc<dyn DbFactory<Db = D>>, self_url: Option<String>) -> Self {
         Self {
@@ -39,21 +33,18 @@ impl<D: Database> Server<D> {
         stream::run_expire(self).await
     }
 
-    pub async fn handle(
+    pub async fn handle_pipeline(
         &self,
         auth: Authenticated,
-        route: Route,
         req: hyper::Request<hyper::Body>,
     ) -> Result<hyper::Response<hyper::Body>> {
-        let res = match route {
-            Route::GetIndex => Ok(handle_index().await),
-            Route::PostPipeline => handle_pipeline(self, auth, req).await,
-        };
-        res.or_else(|err| {
-            err.downcast::<stream::StreamError>()
-                .map(stream_error_response)
-        })
-        .or_else(|err| err.downcast::<ProtocolError>().map(protocol_error_response))
+        handle_pipeline(self, auth, req)
+            .await
+            .or_else(|err| {
+                err.downcast::<stream::StreamError>()
+                    .map(stream_error_response)
+            })
+            .or_else(|err| err.downcast::<ProtocolError>().map(protocol_error_response))
     }
 }
 

@@ -12,6 +12,7 @@ use axum::http::request::Parts;
 use axum::response::{Html, IntoResponse};
 use axum::routing::{get, post};
 use axum::Router;
+use axum_extra::middleware::option_layer;
 use base64::prelude::BASE64_STANDARD_NO_PAD;
 use base64::Engine;
 use bytes::Bytes;
@@ -209,10 +210,7 @@ async fn handle_hrana_v2<D: Database>(
     let server = state.hrana_http_srv;
 
     // TODO(lucio): handle error
-    server
-        .handle(auth, crate::hrana::http::Route::PostPipeline, req)
-        .await
-        .unwrap()
+    server.handle_pipeline(auth, req).await.unwrap()
 }
 
 async fn handle_fallback() -> impl IntoResponse {
@@ -250,7 +248,7 @@ pub async fn run_http<D: Database>(
     upgrade_tx: mpsc::Sender<hrana::ws::Upgrade>,
     hrana_http_srv: Arc<hrana::http::Server<D>>,
     enable_console: bool,
-    _idle_shutdown_layer: Option<IdleShutdownLayer>,
+    idle_shutdown_layer: Option<IdleShutdownLayer>,
     stats: Stats,
 ) -> anyhow::Result<()> {
     let state = AppState {
@@ -284,14 +282,7 @@ pub async fn run_http<D: Database>(
         .with_state(state);
 
     let layered_app = app
-        // TODO: error mismatch needs to be fixed
-        // why? the option layer from tower merges the errors by boxing them
-        // and this breaks how axum uses infalliable. Though the option layer
-        // and any surrounding layers here don't really use the error part of tower
-        // we can write an `InfalliableEither` which we can combine with an
-        // `infalliable_option_layer` to correctly get the types to work.
-        // Eventually, we can upstream this into axum as well.
-        // .layer(option_layer(idle_shutdown_layer))
+        .layer(option_layer(idle_shutdown_layer))
         .layer(
             tower_http::trace::TraceLayer::new_for_http()
                 .on_request(trace_request)
