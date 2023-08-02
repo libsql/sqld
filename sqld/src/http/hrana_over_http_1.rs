@@ -30,7 +30,7 @@ pub(crate) async fn handle_execute<D: Database>(
     AxumState(AppState { db_factory, .. }): AxumState<AppState<D>>,
     auth: Authenticated,
     req: hyper::Request<hyper::Body>,
-) -> hyper::Response<hyper::Body> {
+) -> crate::Result<hyper::Response<hyper::Body>> {
     #[derive(Debug, Deserialize)]
     struct ReqBody {
         stmt: hrana::proto::Stmt,
@@ -41,7 +41,7 @@ pub(crate) async fn handle_execute<D: Database>(
         result: hrana::proto::StmtResult,
     }
 
-    handle_request(db_factory, req, |db, req_body: ReqBody| async move {
+    let res = handle_request(db_factory, req, |db, req_body: ReqBody| async move {
         let query = hrana::stmt::proto_stmt_to_query(
             &req_body.stmt,
             &HashMap::new(),
@@ -54,16 +54,16 @@ pub(crate) async fn handle_execute<D: Database>(
             .map_err(catch_stmt_error)
             .context("Could not execute statement")
     })
-    .await
-    // TODO(lucio): Handle error
-    .unwrap()
+    .await?;
+
+    Ok(res)
 }
 
 pub(crate) async fn handle_batch<D: Database>(
     AxumState(AppState { db_factory, .. }): AxumState<AppState<D>>,
     auth: Authenticated,
     req: hyper::Request<hyper::Body>,
-) -> hyper::Response<hyper::Body> {
+) -> crate::Result<hyper::Response<hyper::Body>> {
     #[derive(Debug, Deserialize)]
     struct ReqBody {
         batch: hrana::proto::Batch,
@@ -74,7 +74,7 @@ pub(crate) async fn handle_batch<D: Database>(
         result: hrana::proto::BatchResult,
     }
 
-    handle_request(db_factory, req, |db, req_body: ReqBody| async move {
+    let res = handle_request(db_factory, req, |db, req_body: ReqBody| async move {
         let pgm = hrana::batch::proto_batch_to_program(
             &req_body.batch,
             &HashMap::new(),
@@ -86,9 +86,9 @@ pub(crate) async fn handle_batch<D: Database>(
             .map(|result| RespBody { result })
             .context("Could not execute batch")
     })
-    .await
-    // TODO(lucio): handle errors
-    .unwrap()
+    .await?;
+
+    Ok(res)
 }
 
 async fn handle_request<ReqBody, RespBody, F, Fut, FT>(
