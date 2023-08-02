@@ -243,7 +243,7 @@ pub async fn run_http<D: Database>(
         .route("/console", get(show_console))
         .route("/health", get(handle_health))
         .route("/v1/stats", get(stats::handle_stats))
-        .route("/v1/", get(hrana_over_http_1::handle_index))
+        .route("/v1", get(hrana_over_http_1::handle_index))
         .route("/v1/execute", post(hrana_over_http_1::handle_execute))
         .route("/v1/batch", post(hrana_over_http_1::handle_batch))
         .route("/v2", get(crate::hrana::http::handle_index))
