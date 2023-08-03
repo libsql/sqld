@@ -770,7 +770,7 @@ impl ReplicationLogger {
 
         let (new_frame_notifier, _) = watch::channel(generation_start_frame_no);
         unsafe {
-            let conn = rusqlite::Connection::open(&db_path)?;
+            let conn = rusqlite::Connection::open(&db_path.join("data"))?;
             let rc = rusqlite::ffi::sqlite3_wal_autocheckpoint(conn.handle(), auto_checkpoint as _);
             if rc != 0 {
                 bail!(
