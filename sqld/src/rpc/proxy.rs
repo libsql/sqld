@@ -439,14 +439,20 @@ impl Proxy for ProxyService {
             }
             None => Authenticated::Anonymous,
         };
-        let lock = self.clients.upgradable_read().await;
+
         let namespace = std::str::from_utf8(&req.namespace).unwrap().to_string();
-        let ns = self.namespaces.get_or_create(namespace.into()).await.unwrap();
+        let (factory, new_frame_notifier) = self.namespaces.with(namespace.into(), |ns| {
+            let factory = ns.db_factory.clone();
+            let notifier = ns.meta.logger.new_frame_notifier.subscribe();
+            (factory, notifier)
+        }).await.unwrap();
+
+        let lock = self.clients.upgradable_read().await;
         let db = match lock.get(&client_id) {
             Some(db) => db.clone(),
             None => {
                 tracing::debug!("connected: {client_id}");
-                match ns.db_factory.create().await {
+                match factory.create().await {
                     Ok(db) => {
                         let db = Arc::new(db);
                         let mut lock = RwLockUpgradableReadGuard::upgrade(lock).await;
@@ -459,14 +465,15 @@ impl Proxy for ProxyService {
         };
 
         tracing::debug!("executing request for {client_id}");
+
         let builder = ExecuteResultBuilder::default();
         let (results, state) = db
             .execute_program(pgm, auth, builder)
             .await
             // TODO: this is no necessarily a permission denied error!
             .map_err(|e| tonic::Status::new(tonic::Code::PermissionDenied, e.to_string()))?;
-        let current_frame_no = *ns.meta.logger.new_frame_notifier.borrow();
 
+        let current_frame_no = *new_frame_notifier.borrow();
         Ok(tonic::Response::new(ExecuteResults {
             current_frame_no,
             results: results.into_ret(),

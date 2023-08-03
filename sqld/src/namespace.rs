@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
-use std::path::{PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -72,7 +72,7 @@ impl NamespaceFactory for ReplicaNamespaceFactory {
 }
 
 pub struct Namespaces<F: NamespaceFactory> {
-    inner: Mutex<HashMap<Bytes, Arc<Namespace<F::Database, F::Meta>>>>,
+    inner: Mutex<HashMap<Bytes, Namespace<F::Database, F::Meta>>>,
     factory: F,
 }
 
@@ -85,15 +85,17 @@ impl<F: NamespaceFactory> Namespaces<F> {
 
     }
 
-    pub async fn get_or_create(&self, namespace: Bytes) -> crate::Result<Arc<Namespace<F::Database, F::Meta>>> {
+    pub async fn with<Fun, R>(&self, namespace: Bytes, f: Fun) -> anyhow::Result<R>
+        where Fun: FnOnce(&Namespace<F::Database, F::Meta>) -> R,
+    {
         let mut lock = self.inner.lock().await;
         match lock.entry(namespace.clone()) {
             Entry::Occupied(e) => {
-                Ok(e.get().clone())
+                Ok(f(e.get()))
             },
             Entry::Vacant(e) => {
-                let f = Arc::new(self.factory.create(namespace).await?);
-                Ok(e.insert(f).clone())
+                let factory = self.factory.create(namespace).await?;
+                Ok(f(e.insert(factory)))
             },
         }
     }
@@ -105,6 +107,7 @@ pub struct Namespace<D, T> {
     pub db_factory: Arc<dyn DbFactory<Db = D>>,
     tasks: JoinSet<anyhow::Result<()>>,
     pub meta: T,
+    path: PathBuf,
 }
 
 pub struct ReplicaNamespaceConfig {
@@ -117,6 +120,11 @@ pub struct ReplicaNamespaceConfig {
     pub config_store: Arc<DatabaseConfigStore>,
     pub max_response_size: u64,
     pub max_total_response_size: u64,
+}
+
+#[async_trait::async_trait]
+trait NamespaceCommon {
+    async fn reset(&mut self) -> anyhow::Result<()>;
 }
 
 impl Namespace<TrackedDb<WriteProxyDatabase>, ()> {
@@ -157,7 +165,17 @@ impl Namespace<TrackedDb<WriteProxyDatabase>, ()> {
             db_factory: Arc::new(db_factory),
             tasks: join_set,
             meta: (),
+            path: db_path,
         })
+    }
+}
+
+#[async_trait::async_trait]
+impl NamespaceCommon for Namespace<TrackedDb<WriteProxyDatabase>, ()> {
+    async fn reset(&mut self) -> anyhow::Result<()> {
+        self.tasks.shutdown().await;
+        tokio::fs::remove_dir_all(&self.path).await?;
+        todo!()
     }
 }
 
@@ -245,7 +263,8 @@ impl Namespace<TrackedDb<LibSqlDb>, PrimaryMeta> {
             name,
             db_factory,
             tasks: join_set,
-            meta: PrimaryMeta { logger }
+            meta: PrimaryMeta { logger },
+            path: db_path,
         })
     }
 

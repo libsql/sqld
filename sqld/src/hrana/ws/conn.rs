@@ -77,7 +77,7 @@ async fn handle_ws<F: NamespaceFactory>(
     conn_id: u64,
     namespace: Bytes,
 ) -> Result<()> {
-    let factory = server.namespaces.get_or_create(namespace).await?.db_factory.clone();
+    let factory = server.namespaces.with(namespace, |ns| ns.db_factory.clone()).await?;
     let mut conn = Conn {
         conn_id,
         server,
