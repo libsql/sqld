@@ -19,7 +19,7 @@ fn start_db(step: u32, config: &Config) -> JoinHandle<()> {
     })
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn backup_restore() {
     let _ = env_logger::builder().is_test(true).try_init();
     const BUCKET: &str = "testbackuprestore";
@@ -192,7 +192,7 @@ async fn backup_restore() {
     }
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn rollback_restore() {
     let _ = env_logger::builder().is_test(true).try_init();
     const BUCKET: &str = "testrollbackrestore";
@@ -416,7 +416,8 @@ impl S3BucketCleaner {
 
 impl Drop for S3BucketCleaner {
     fn drop(&mut self) {
-        //FIXME: running line below on tokio::test runtime will hang.
-        //let _ = block_on(Self::cleanup(self.0));
+        tokio::task::block_in_place(|| {
+            let _  = tokio::runtime::Handle::current().block_on(Self::cleanup(self.0));
+        });
     }
 }
