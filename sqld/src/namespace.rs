@@ -139,6 +139,7 @@ impl Namespace<TrackedDb<WriteProxyDatabase>, ()> {
             config.uri.clone(),
             config.allow_replica_overwrite,
             name.clone(),
+            &mut join_set,
         ).await?;
 
         let applied_frame_no_receiver = replicator.current_frame_no_notifier.clone();

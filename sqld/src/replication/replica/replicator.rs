@@ -9,6 +9,7 @@ use bytes::Bytes;
 use futures::StreamExt;
 use parking_lot::Mutex;
 use tokio::sync::{mpsc, watch, oneshot};
+use tokio::task::JoinSet;
 use tonic::transport::Channel;
 
 use crate::replication::frame::Frame;
@@ -49,6 +50,7 @@ impl Replicator {
         uri: tonic::transport::Uri,
         allow_replica_overwrite: bool,
         namespace: Bytes,
+        join_set: &mut JoinSet<anyhow::Result<()>>,
     ) -> anyhow::Result<Self> {
         let client = Client::with_origin(channel, uri);
         let (meta, meta_file) = WalIndexMeta::read_from_path(&db_path)?;
@@ -92,14 +94,12 @@ impl Replicator {
         };
 
         let (snd, rcv) = oneshot::channel();
-        tokio::task::spawn_blocking({
+        join_set.spawn_blocking({
             let db_path = db_path.clone();
             move || -> anyhow::Result<()> {
                 let mut ctx = InjectorHookCtx::new(receiver, pre_commit, post_commit);
-                dbg!();
                 let mut injector = FrameInjector::new(&db_path, &mut ctx)?;
                 let _ = snd.send(());
-                dbg!();
 
                 while injector.step()? {}
 
