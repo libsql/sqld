@@ -406,10 +406,11 @@ fn validate_extensions(extensions_path: Option<PathBuf>) -> anyhow::Result<Vec<P
     Ok(valid_extensions)
 }
 
+/// Returns the replicator, and whether the database was recovered.
 pub async fn init_bottomless_replicator(
     path: impl AsRef<std::path::Path>,
     options: bottomless::replicator::Options,
-) -> anyhow::Result<bottomless::replicator::Replicator> {
+) -> anyhow::Result<(bottomless::replicator::Replicator, bool)> {
     tracing::debug!("Initializing bottomless replication");
     let path = path
         .as_ref()
@@ -419,20 +420,20 @@ pub async fn init_bottomless_replicator(
     let mut replicator = bottomless::replicator::Replicator::with_options(path, options).await?;
 
     match replicator.restore(None, None).await? {
-        bottomless::replicator::RestoreAction::None => (),
+        bottomless::replicator::RestoreAction::None => Ok((replicator, false)),
         bottomless::replicator::RestoreAction::SnapshotMainDbFile => {
             replicator.new_generation();
             replicator.snapshot_main_db_file().await?;
             // Restoration process only leaves the local WAL file if it was
             // detected to be newer than its remote counterpart.
-            replicator.maybe_replicate_wal().await?
+            replicator.maybe_replicate_wal().await?;
+                Ok((replicator, true))
         }
         bottomless::replicator::RestoreAction::ReuseGeneration(gen) => {
             replicator.set_generation(gen);
+            Ok((replicator, false))
         }
     }
-
-    Ok(replicator)
 }
 
 async fn start_primary(
@@ -441,15 +442,16 @@ async fn start_primary(
     idle_shutdown_layer: Option<IdleShutdownLayer>,
     stats: Stats,
     db_config_store: Arc<DatabaseConfigStore>,
-    db_is_dirty: bool,
+    mut db_is_dirty: bool,
     snapshot_callback: SnapshotCallback,
 ) -> anyhow::Result<()> {
     // bottomless initialization must happen before the replication log is openned. This way the
     // replication log can be recovered if the database was restored from bottomless.
     let bottomless_replicator = if let Some(options) = &config.bottomless_replication {
-        Some(Arc::new(std::sync::Mutex::new(
-            init_bottomless_replicator(config.db_path.join("data"), options.clone()).await?,
-        )))
+        let (replicator, did_recover) = init_bottomless_replicator(config.db_path.join("data"), options.clone()).await?;
+        // the database was recovered, we will need to re-generate the replication log
+        db_is_dirty |= did_recover;
+        Some(Arc::new(std::sync::Mutex::new(replicator)))
     } else {
         None
     };
