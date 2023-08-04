@@ -427,7 +427,7 @@ pub async fn init_bottomless_replicator(
             // Restoration process only leaves the local WAL file if it was
             // detected to be newer than its remote counterpart.
             replicator.maybe_replicate_wal().await?;
-                Ok((replicator, true))
+            Ok((replicator, true))
         }
         bottomless::replicator::RestoreAction::ReuseGeneration(gen) => {
             replicator.set_generation(gen);
@@ -448,7 +448,8 @@ async fn start_primary(
     // bottomless initialization must happen before the replication log is openned. This way the
     // replication log can be recovered if the database was restored from bottomless.
     let bottomless_replicator = if let Some(options) = &config.bottomless_replication {
-        let (replicator, did_recover) = init_bottomless_replicator(config.db_path.join("data"), options.clone()).await?;
+        let (replicator, did_recover) =
+            init_bottomless_replicator(config.db_path.join("data"), options.clone()).await?;
         // the database was recovered, we will need to re-generate the replication log
         db_is_dirty |= did_recover;
         Some(Arc::new(std::sync::Mutex::new(replicator)))
