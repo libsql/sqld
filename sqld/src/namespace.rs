@@ -1,14 +1,13 @@
 use std::collections::HashMap;
-use std::collections::hash_map::Entry;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
 use bytes::Bytes;
 use hyper::Uri;
-use tokio::sync::Mutex;
 use tokio::task::JoinSet;
 use tonic::transport::Channel;
+use async_lock::{RwLock, RwLockUpgradableReadGuard};
 
 use crate::database::Database;
 use crate::database::config::DatabaseConfigStore;
@@ -72,7 +71,7 @@ impl NamespaceFactory for ReplicaNamespaceFactory {
 }
 
 pub struct Namespaces<F: NamespaceFactory> {
-    inner: Mutex<HashMap<Bytes, Namespace<F::Database, F::Meta>>>,
+    inner: RwLock<HashMap<Bytes, Namespace<F::Database, F::Meta>>>,
     factory: F,
 }
 
@@ -80,30 +79,28 @@ impl<F: NamespaceFactory> Namespaces<F> {
     pub fn new(factory: F) -> Self {
         Self {
             inner: Default::default(),
-            factory,
-        }
+            factory, }
 
     }
 
     pub async fn with<Fun, R>(&self, namespace: Bytes, f: Fun) -> anyhow::Result<R>
         where Fun: FnOnce(&Namespace<F::Database, F::Meta>) -> R,
     {
-        let mut lock = self.inner.lock().await;
-        match lock.entry(namespace.clone()) {
-            Entry::Occupied(e) => {
-                Ok(f(e.get()))
-            },
-            Entry::Vacant(e) => {
-                let factory = self.factory.create(namespace).await?;
-                Ok(f(e.insert(factory)))
-            },
+        let lock = self.inner.upgradable_read().await;
+        if let Some(ns) = lock.get(&namespace) {
+            Ok(f(ns))
+        } else {
+            let mut lock = RwLockUpgradableReadGuard::upgrade(lock).await;
+            let ns = self.factory.create(namespace.clone()).await?;
+            let ret = f(&ns);
+            lock.insert(namespace, ns);
+            Ok(ret)
         }
     }
 }
 
 #[allow(dead_code)]
 pub struct Namespace<D, T> {
-    name: Bytes,
     pub db_factory: Arc<dyn DbFactory<Db = D>>,
     tasks: JoinSet<anyhow::Result<()>>,
     pub meta: T,
@@ -123,8 +120,8 @@ pub struct ReplicaNamespaceConfig {
 }
 
 #[async_trait::async_trait]
-trait NamespaceCommon {
-    async fn reset(&mut self) -> anyhow::Result<()>;
+pub trait NamespaceCommon {
+    async fn destroy(self) -> anyhow::Result<()>;
 }
 
 impl Namespace<TrackedDb<WriteProxyDatabase>, ()> {
@@ -162,7 +159,6 @@ impl Namespace<TrackedDb<WriteProxyDatabase>, ()> {
 
 
         Ok(Self {
-            name,
             db_factory: Arc::new(db_factory),
             tasks: join_set,
             meta: (),
@@ -173,10 +169,10 @@ impl Namespace<TrackedDb<WriteProxyDatabase>, ()> {
 
 #[async_trait::async_trait]
 impl NamespaceCommon for Namespace<TrackedDb<WriteProxyDatabase>, ()> {
-    async fn reset(&mut self) -> anyhow::Result<()> {
+    async fn destroy(mut self) -> anyhow::Result<()> {
         self.tasks.shutdown().await;
         tokio::fs::remove_dir_all(&self.path).await?;
-        todo!()
+        Ok(())
     }
 }
 
@@ -197,6 +193,14 @@ pub struct PrimaryNamespaceConfig {
 
 pub struct PrimaryMeta {
     pub logger: Arc<ReplicationLogger>,
+}
+
+#[async_trait::async_trait]
+impl NamespaceCommon for Namespace<TrackedDb<LibSqlDb>, PrimaryMeta> {
+    async fn destroy(self) -> anyhow::Result<()> {
+        // do not destroy a primary
+        Ok(())
+    }
 }
 
 impl Namespace<TrackedDb<LibSqlDb>, PrimaryMeta> {
@@ -261,7 +265,6 @@ impl Namespace<TrackedDb<LibSqlDb>, PrimaryMeta> {
             .into();
 
         Ok(Self {
-            name,
             db_factory,
             tasks: join_set,
             meta: PrimaryMeta { logger },
