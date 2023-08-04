@@ -444,6 +444,16 @@ async fn start_primary(
     db_is_dirty: bool,
     snapshot_callback: SnapshotCallback,
 ) -> anyhow::Result<()> {
+    // bottomless initialization must happen before the replication log is openned. This way the
+    // replication log can be recovered if the database was restored from bottomless.
+    let bottomless_replicator = if let Some(options) = &config.bottomless_replication {
+        Some(Arc::new(std::sync::Mutex::new(
+            init_bottomless_replicator(config.db_path.join("data"), options.clone()).await?,
+        )))
+    } else {
+        None
+    };
+
     let is_fresh_db = check_fresh_db(&config.db_path);
     let logger = Arc::new(ReplicationLogger::open(
         &config.db_path,
@@ -454,14 +464,6 @@ async fn start_primary(
     )?);
 
     join_set.spawn(run_periodic_compactions(logger.clone()));
-
-    let bottomless_replicator = if let Some(options) = &config.bottomless_replication {
-        Some(Arc::new(std::sync::Mutex::new(
-            init_bottomless_replicator(config.db_path.join("data"), options.clone()).await?,
-        )))
-    } else {
-        None
-    };
 
     // load dump is necessary
     let dump_loader = DumpLoader::new(
