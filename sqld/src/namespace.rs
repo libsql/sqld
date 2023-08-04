@@ -5,6 +5,7 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use hyper::Uri;
+use tokio::sync::mpsc;
 use tokio::task::JoinSet;
 use tonic::transport::Channel;
 use async_lock::{RwLock, RwLockUpgradableReadGuard};
@@ -83,6 +84,24 @@ impl<F: NamespaceFactory> Namespaces<F> {
 
     }
 
+    pub async fn reset(&self, namespace: Bytes) -> anyhow::Result<()>
+        where
+            Namespace<F::Database, F::Meta>: NamespaceCommon,
+    {
+        let mut lock = self.inner.write().await;
+        if let Some(ns) = lock.remove(&namespace) {
+            // FIXME: when destroying, we are waiting for all the tasks associated with the
+            // allocation to finnish, which create a lot of contention on the lock. Need to use a
+            // conccurent hashmap to deal with this issue.
+            ns.destroy().await?;
+            // re-create the namespace
+            let ns = self.factory.create(namespace.clone()).await?;
+            lock.insert(namespace, ns);
+        }
+
+        Ok(())
+    }
+
     pub async fn with<Fun, R>(&self, namespace: Bytes, f: Fun) -> anyhow::Result<R>
         where Fun: FnOnce(&Namespace<F::Database, F::Meta>) -> R,
     {
@@ -117,6 +136,7 @@ pub struct ReplicaNamespaceConfig {
     pub config_store: Arc<DatabaseConfigStore>,
     pub max_response_size: u64,
     pub max_total_response_size: u64,
+    pub hard_reset: mpsc::Sender<Bytes>,
 }
 
 #[async_trait::async_trait]
@@ -125,7 +145,7 @@ pub trait NamespaceCommon {
 }
 
 impl Namespace<TrackedDb<WriteProxyDatabase>, ()> {
-    pub async fn new_replica(config: &ReplicaNamespaceConfig, name: Bytes) -> anyhow::Result<Self> {
+    async fn new_replica(config: &ReplicaNamespaceConfig, name: Bytes) -> anyhow::Result<Self> {
         let name_str = std::str::from_utf8(&name)?;
         let db_path = config.base_path.join("dbs").join(name_str);
         tokio::fs::create_dir_all(&db_path).await?;
@@ -137,6 +157,7 @@ impl Namespace<TrackedDb<WriteProxyDatabase>, ()> {
             config.allow_replica_overwrite,
             name.clone(),
             &mut join_set,
+            config.hard_reset.clone(),
         ).await?;
 
         let applied_frame_no_receiver = replicator.current_frame_no_notifier.clone();
@@ -165,6 +186,7 @@ impl Namespace<TrackedDb<WriteProxyDatabase>, ()> {
             path: db_path,
         })
     }
+
 }
 
 #[async_trait::async_trait]
@@ -195,16 +217,8 @@ pub struct PrimaryMeta {
     pub logger: Arc<ReplicationLogger>,
 }
 
-#[async_trait::async_trait]
-impl NamespaceCommon for Namespace<TrackedDb<LibSqlDb>, PrimaryMeta> {
-    async fn destroy(self) -> anyhow::Result<()> {
-        // do not destroy a primary
-        Ok(())
-    }
-}
-
 impl Namespace<TrackedDb<LibSqlDb>, PrimaryMeta> {
-    pub async fn new_primary(config: &PrimaryNamespaceConfig, name: Bytes) -> anyhow::Result<Self> {
+    async fn new_primary(config: &PrimaryNamespaceConfig, name: Bytes) -> anyhow::Result<Self> {
         let mut join_set = JoinSet::new();
         let name_str = std::str::from_utf8(&name)?;
         let db_path = config.base_path.join("dbs").join(name_str);
@@ -271,5 +285,4 @@ impl Namespace<TrackedDb<LibSqlDb>, PrimaryMeta> {
             path: db_path,
         })
     }
-
 }

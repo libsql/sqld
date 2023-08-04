@@ -12,11 +12,10 @@ use futures::never::Never;
 use hyper::Request;
 use libsql::wal_hook::TRANSPARENT_METHODS;
 use namespace::{Namespaces, PrimaryNamespaceFactory, PrimaryNamespaceConfig, NamespaceFactory, ReplicaNamespaceConfig, ReplicaNamespaceFactory};
-use once_cell::sync::Lazy;
 use replication::{SnapshotCallback, ReplicationLogger};
 use rpc::replication_log::ReplicationLogService;
 use rpc::{run_rpc_server, ReplicationLogServer};
-use tokio::sync::{mpsc, Notify};
+use tokio::sync::mpsc;
 use tokio::task::JoinSet;
 use tonic::body::BoxBody;
 use tonic::transport::Channel;
@@ -61,13 +60,6 @@ pub enum Backend {
 }
 
 type Result<T, E = Error> = std::result::Result<T, E>;
-
-/// Trigger a hard database reset. This cause the database to be wiped, freshly restarted
-/// This is used for replicas that are left in an unrecoverabe state and should restart from a
-/// fresh state.
-///
-/// /!\ use with caution.
-pub(crate) static HARD_RESET: Lazy<Arc<Notify>> = Lazy::new(|| Arc::new(Notify::new()));
 
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -269,23 +261,6 @@ fn get_auth(config: &Config) -> anyhow::Result<Arc<Auth>> {
     Ok(Arc::new(auth))
 }
 
-/// nukes current DB and start anew
-async fn hard_reset(
-    config: &Config,
-    mut join_set: JoinSet<anyhow::Result<()>>,
-) -> anyhow::Result<()> {
-    tracing::error!("received hard-reset command: reseting replica.");
-
-    tracing::info!("Shutting down all services...");
-    join_set.shutdown().await;
-    tracing::info!("All services have been shut down.");
-
-    let db_path = &config.db_path;
-    tokio::fs::remove_dir_all(db_path).await?;
-
-    Ok(())
-}
-
 fn configure_rpc(config: &Config) -> anyhow::Result<(Channel, tonic::transport::Uri)> {
     let mut endpoint = Channel::from_shared(config.writer_rpc_addr.clone().unwrap())?;
     if config.writer_rpc_tls {
@@ -318,6 +293,7 @@ async fn start_replica(
 ) -> anyhow::Result<()> {
     let (channel, uri) = configure_rpc(config)?;
     let extensions = validate_extensions(config.extensions_path.clone())?;
+    let (hard_reset_snd, mut hard_reset_rcv) = mpsc::channel(1);
     let conf = ReplicaNamespaceConfig {
         base_path: config.db_path.to_owned(),
         channel,
@@ -327,10 +303,24 @@ async fn start_replica(
         stats: stats.clone(),
         config_store: db_config_store.clone(),
         max_response_size: config.max_response_size,
-        max_total_response_size: config.max_total_response_size
+        max_total_response_size: config.max_total_response_size,
+        hard_reset:  hard_reset_snd,
     };
     let factory = ReplicaNamespaceFactory::new(conf);
     let namespaces = Arc::new(Namespaces::new(factory));
+
+    // start the hard reset monitor
+    join_set.spawn({
+        let namespaces = namespaces.clone();
+        async move {
+            while let Some(ns) = hard_reset_rcv.recv().await {
+                tracing::warn!("received reset signal for: {:?}", std::str::from_utf8(&ns).ok());
+                namespaces.reset(ns).await?;
+            }
+
+            Ok(())
+        }
+    });
 
     run_service(
         namespaces,
@@ -666,13 +656,8 @@ pub async fn run_server(config: Config) -> anyhow::Result<()> {
             join_set.spawn(run_storage_monitor(config.db_path.clone(), stats));
         }
 
-        let reset = HARD_RESET.clone();
         loop {
             tokio::select! {
-                _ = reset.notified() => {
-                    hard_reset(&config, join_set).await?;
-                    break;
-                },
                 _ = shutdown_receiver.recv() => {
                     join_set.shutdown().await;
                     // clean shutdown, remove sentinel file
