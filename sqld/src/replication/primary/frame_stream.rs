@@ -93,6 +93,7 @@ impl Stream for FrameStream {
                     // If we don't wait to wait for more then lets end this stream
                     // without subscribing for more frames
                     if !self.wait_for_more {
+                        self.state = FrameStreamState::Closed;
                         return Poll::Ready(None);
                     }
 

@@ -49,10 +49,9 @@ impl ReplicationLogService {
     fn authenticate<T>(&self, req: &tonic::Request<T>) -> Result<(), Status> {
         if let Some(auth) = &self.auth {
             let _ = auth.authenticate_grpc(req)?;
-            Ok(())
-        } else {
-            Ok(())
         }
+
+        Ok(())
     }
 }
 
@@ -142,7 +141,7 @@ impl ReplicationLog for ReplicationLogService {
         Ok(tonic::Response::new(Box::pin(stream)))
     }
 
-    async fn log_entries_snapshot(
+    async fn batch_log_entries(
         &self,
         req: tonic::Request<LogOffset>,
     ) -> Result<tonic::Response<Frames>, Status> {
