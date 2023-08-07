@@ -14,6 +14,7 @@ use tokio_stream::wrappers::ReceiverStream;
 use tokio_stream::StreamExt;
 use tonic::Status;
 
+use crate::auth::Auth;
 use crate::replication::primary::frame_stream::FrameStream;
 use crate::replication::{LogReadError, ReplicationLogger};
 use crate::utils::services::idle_shutdown::IdleShutdownLayer;
@@ -25,6 +26,7 @@ pub struct ReplicationLogService {
     logger: Arc<ReplicationLogger>,
     replicas_with_hello: RwLock<HashSet<SocketAddr>>,
     idle_shutdown_layer: Option<IdleShutdownLayer>,
+    auth: Option<Arc<Auth>>,
 }
 
 pub const NO_HELLO_ERROR_MSG: &str = "NO_HELLO";
@@ -34,11 +36,22 @@ impl ReplicationLogService {
     pub fn new(
         logger: Arc<ReplicationLogger>,
         idle_shutdown_layer: Option<IdleShutdownLayer>,
+        auth: Option<Arc<Auth>>,
     ) -> Self {
         Self {
             logger,
             replicas_with_hello: RwLock::new(HashSet::<SocketAddr>::new()),
             idle_shutdown_layer,
+            auth,
+        }
+    }
+
+    fn authenticate<T>(&self, req: &tonic::Request<T>) -> Result<(), Status> {
+        if let Some(auth) = &self.auth {
+            let _ = auth.authenticate_grpc(req)?;
+            Ok(())
+        } else {
+            Ok(())
         }
     }
 }
@@ -108,6 +121,8 @@ impl ReplicationLog for ReplicationLogService {
         &self,
         req: tonic::Request<LogOffset>,
     ) -> Result<tonic::Response<Self::LogEntriesStream>, Status> {
+        self.authenticate(&req)?;
+
         let replica_addr = req
             .remote_addr()
             .ok_or(Status::internal("No remote RPC address"))?;
@@ -131,6 +146,8 @@ impl ReplicationLog for ReplicationLogService {
         &self,
         req: tonic::Request<LogOffset>,
     ) -> Result<tonic::Response<Frames>, Status> {
+        self.authenticate(&req)?;
+
         let replica_addr = req
             .remote_addr()
             .ok_or(Status::internal("No remote RPC address"))?;
@@ -156,6 +173,8 @@ impl ReplicationLog for ReplicationLogService {
         &self,
         req: tonic::Request<HelloRequest>,
     ) -> Result<tonic::Response<HelloResponse>, Status> {
+        self.authenticate(&req)?;
+
         let replica_addr = req
             .remote_addr()
             .ok_or(Status::internal("No remote RPC address"))?;
@@ -176,6 +195,8 @@ impl ReplicationLog for ReplicationLogService {
         &self,
         req: tonic::Request<LogOffset>,
     ) -> Result<tonic::Response<Self::SnapshotStream>, Status> {
+        self.authenticate(&req)?;
+
         let (sender, receiver) = mpsc::channel(10);
         let logger = self.logger.clone();
         let offset = req.into_inner().next_offset;
