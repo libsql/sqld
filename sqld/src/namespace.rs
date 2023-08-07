@@ -223,12 +223,26 @@ impl Namespace<TrackedDb<LibSqlDb>, PrimaryMeta> {
         let name_str = std::str::from_utf8(&name)?;
         let db_path = config.base_path.join("dbs").join(name_str);
         tokio::fs::create_dir_all(&db_path).await?;
+        let mut is_dirty = config.db_is_dirty;
+
+        let bottomless_replicator = if let Some(options) = &config.bottomless_replication {
+            let mut options = options.clone();
+            let db_id = format!("ns-{}", std::str::from_utf8(&name).unwrap());
+            options.db_id = Some(db_id);
+            let (replicator, did_recover) = init_bottomless_replicator(db_path.join("data"), options.clone()).await?;
+            is_dirty |= did_recover;
+            Some(Arc::new(std::sync::Mutex::new(replicator)))
+        } else {
+            None
+        };
+
+        tokio::fs::create_dir_all(&db_path).await?;
         let is_fresh_db = check_fresh_db(&db_path);
         let logger = Arc::new(ReplicationLogger::open(
                 &db_path,
                 config.max_log_size,
                 config.max_log_duration,
-                config.db_is_dirty,
+                is_dirty,
                 Box::new({ 
                     let name = name.clone();
                     let cb = config.snapshot_callback.clone();
@@ -237,14 +251,6 @@ impl Namespace<TrackedDb<LibSqlDb>, PrimaryMeta> {
         )?);
 
         join_set.spawn(run_periodic_compactions(logger.clone()));
-
-        let bottomless_replicator = if let Some(options) = &config.bottomless_replication {
-            Some(Arc::new(std::sync::Mutex::new(
-                        init_bottomless_replicator(db_path.join("data"), options.clone()).await?,
-            )))
-        } else {
-            None
-        };
 
         // load dump is necessary
         let dump_loader = DumpLoader::new(

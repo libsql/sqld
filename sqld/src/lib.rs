@@ -388,20 +388,22 @@ fn validate_extensions(extensions_path: Option<PathBuf>) -> anyhow::Result<Vec<P
 pub async fn init_bottomless_replicator(
     path: impl AsRef<std::path::Path>,
     options: bottomless::replicator::Options,
-) -> anyhow::Result<bottomless::replicator::Replicator> {
+) -> anyhow::Result<(bottomless::replicator::Replicator, bool)> {
     tracing::debug!("Initializing bottomless replication");
+    let db_path = path.as_ref();
     let path = path
         .as_ref()
         .to_str()
         .ok_or_else(|| anyhow::anyhow!("Invalid db path"))?
         .to_owned();
     let mut replicator = bottomless::replicator::Replicator::with_options(path, options).await?;
+    let mut did_recover = false;
 
     match replicator.restore(None, None).await? {
         bottomless::replicator::RestoreAction::None => (),
         bottomless::replicator::RestoreAction::SnapshotMainDbFile => {
             replicator.new_generation();
-            replicator.snapshot_main_db_file().await?;
+            did_recover = replicator.snapshot_main_db_file().await?;
             // Restoration process only leaves the local WAL file if it was
             // detected to be newer than its remote counterpart.
             replicator.maybe_replicate_wal().await?
@@ -409,9 +411,12 @@ pub async fn init_bottomless_replicator(
         bottomless::replicator::RestoreAction::ReuseGeneration(gen) => {
             replicator.set_generation(gen);
         }
+
     }
 
-    Ok(replicator)
+    dbg!(db_path.exists());
+
+    Ok((replicator, did_recover))
 }
 
 async fn start_primary(

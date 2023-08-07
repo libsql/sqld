@@ -170,6 +170,8 @@ impl Replicator {
                     };
 
                     *lock = Some(meta);
+
+                    return Ok(())
                 }
                 Err(e) if !error_printed => {
                     tracing::error!("error connecting to primary. retrying. error: {e}");
