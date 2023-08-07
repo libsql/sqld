@@ -8,7 +8,8 @@ use aws_sdk_s3::error::SdkError;
 use aws_sdk_s3::operation::get_object::builders::GetObjectFluentBuilder;
 use aws_sdk_s3::operation::list_objects::builders::ListObjectsFluentBuilder;
 use aws_sdk_s3::operation::list_objects::ListObjectsOutput;
-use aws_sdk_s3::primitives::ByteStream;
+use aws_sdk_s3::primitives::{ByteStream, SdkBody};
+use aws_sdk_s3::types::{CompletedMultipartUpload, CompletedPart};
 use aws_sdk_s3::{Client, Config};
 use bytes::{Buf, Bytes, BytesMut};
 use chrono::{DateTime, LocalResult, TimeZone, Utc};
@@ -628,19 +629,77 @@ impl Replicator {
                 Self::read_change_counter(&mut reader).await?
             }
             CompressionKind::Gzip => {
-                // TODO: find a way to compress ByteStream on the fly instead of creating
-                // an intermediary file.
-                let (compressed_db_path, change_counter) = self.compress_main_db_file().await?;
+                let mut reader = tokio::fs::File::open(&self.db_path).await?;
+
+                let stream = tokio::io::BufReader::new(reader.try_clone().await?);
+                let mut gzip_reader = async_compression::tokio::bufread::GzipEncoder::new(stream);
+
                 let key = format!("{}-{}/db.gz", self.db_name, self.generation);
+                let upload_id = self
+                    .client
+                    .create_multipart_upload()
+                    .bucket(&self.bucket)
+                    .key(key.clone())
+                    .send()
+                    .await?
+                    .upload_id
+                    .ok_or_else(|| anyhow::anyhow!("missing upload_id"))?;
+
+                const CHUNK_SIZE: usize = 5 * 1024 * 1024;
+                let mut parts = Vec::new();
+                // S3 takes an 1-based index
+                for part in 1..=10000 {
+                    let mut buffer = bytes::BytesMut::with_capacity(CHUNK_SIZE);
+                    loop {
+                        let bytes_written = gzip_reader.read_buf(&mut buffer).await?;
+                        // EOF or buffer is full
+                        if bytes_written == 0 {
+                            break;
+                        }
+                    }
+
+                    // EOF
+                    if buffer.is_empty() {
+                        break;
+                    }
+
+                    let part_out = self
+                        .client
+                        .upload_part()
+                        .bucket(&self.bucket)
+                        .key(key.clone())
+                        .upload_id(upload_id.clone())
+                        .body(ByteStream::from(buffer.freeze()))
+                        .part_number(part)
+                        .send()
+                        .await?;
+
+                    parts.push(
+                        CompletedPart::builder()
+                            .part_number(part)
+                            .e_tag(
+                                part_out.e_tag.ok_or_else(|| {
+                                    anyhow::anyhow!("e_tag missing from part upload")
+                                })?,
+                            )
+                            .build(),
+                    );
+                }
+
                 self.client
-                    .put_object()
+                    .complete_multipart_upload()
+                    .upload_id(upload_id)
                     .bucket(&self.bucket)
                     .key(key)
-                    .body(ByteStream::from_path(compressed_db_path).await?)
+                    .multipart_upload(
+                        CompletedMultipartUpload::builder()
+                            .set_parts(Some(parts))
+                            .build(),
+                    )
                     .send()
                     .await?;
-                let _ = tokio::fs::remove_file(compressed_db_path).await;
-                change_counter
+
+                Self::read_change_counter(&mut reader).await?
             }
         };
 
