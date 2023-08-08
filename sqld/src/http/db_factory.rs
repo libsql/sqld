@@ -5,6 +5,7 @@ use bytes::Bytes;
 use hyper::http::request::Parts;
 
 use crate::database::factory::DbFactory;
+use crate::error::Error;
 use crate::namespace::NamespaceFactory;
 
 use super::AppState;
@@ -16,14 +17,20 @@ impl<F> FromRequestParts<AppState<F>> for DbFactoryExtractor<F::Database>
 where
     F: NamespaceFactory,
 {
-    type Rejection = crate::error::Error;
+    type Rejection = Error;
 
     async fn from_request_parts(
         parts: &mut Parts,
         state: &AppState<F>,
     ) -> Result<Self, Self::Rejection> {
-        let host = parts.headers.get("host").unwrap().as_bytes();
-        let ns = split_namespace(std::str::from_utf8(host).unwrap())?;
+        let host = parts
+            .headers
+            .get("host")
+            .ok_or_else(|| Error::InvalidHost("missing host header".into()))?
+            .as_bytes();
+        let host_str = std::str::from_utf8(host)
+            .map_err(|_| Error::InvalidHost("host header is not valid UTF-8".into()))?;
+        let ns = split_namespace(host_str)?;
         Ok(Self(
             state
                 .namespaces
@@ -34,7 +41,9 @@ where
 }
 
 pub fn split_namespace(host: &str) -> crate::Result<Bytes> {
-    let (ns, _) = host.split_once('.').unwrap();
+    let (ns, _) = host.split_once('.').ok_or_else(|| {
+        Error::InvalidHost("host header should be in the format <namespace>.<...>".into())
+    })?;
     let ns = Bytes::copy_from_slice(ns.as_bytes());
     Ok(ns)
 }
