@@ -745,7 +745,7 @@ impl Replicator {
                             .bucket(&self.bucket)
                             .key(key.clone())
                             .upload_id(upload_id.clone())
-                            .body(ByteStream::from_path(last_chunk_path).await?)
+                            .body(ByteStream::from_path(&last_chunk_path).await?)
                             .part_number(LAST_PART) // last chunk
                             .send()
                             .await?;
@@ -758,6 +758,8 @@ impl Replicator {
                                 })?)
                                 .build(),
                         );
+
+                        let _ = tokio::fs::remove_file(last_chunk_path).await;
                     }
 
                     self.client
