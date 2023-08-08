@@ -1,5 +1,5 @@
 use crate::backup::WalCopier;
-use crate::read::BatchReader;
+use crate::read::{upload_s3_multipart, BatchReader};
 use crate::transaction_cache::TransactionPageCache;
 use crate::wal::WalFileReader;
 use anyhow::anyhow;
@@ -9,7 +9,6 @@ use aws_sdk_s3::operation::get_object::builders::GetObjectFluentBuilder;
 use aws_sdk_s3::operation::list_objects::builders::ListObjectsFluentBuilder;
 use aws_sdk_s3::operation::list_objects::ListObjectsOutput;
 use aws_sdk_s3::primitives::ByteStream;
-use aws_sdk_s3::types::{CompletedMultipartUpload, CompletedPart};
 use aws_sdk_s3::{Client, Config};
 use bytes::{Buf, Bytes, BytesMut};
 use chrono::{DateTime, LocalResult, TimeZone, Utc};
@@ -616,168 +615,33 @@ impl Replicator {
         }
         tracing::debug!("Snapshotting {}", self.db_path);
         let start = Instant::now();
-        let change_counter =
-            match self.use_compression {
-                CompressionKind::None => {
-                    self.client
-                        .put_object()
-                        .bucket(&self.bucket)
-                        .key(format!("{}-{}/db.db", self.db_name, self.generation))
-                        .body(ByteStream::from_path(&self.db_path).await?)
-                        .send()
-                        .await?;
-                    let mut reader = tokio::fs::File::open(&self.db_path).await?;
-                    Self::read_change_counter(&mut reader).await?
-                }
-                CompressionKind::Gzip => {
-                    let mut reader = tokio::fs::File::open(&self.db_path).await?;
-                    let buf_reader = tokio::io::BufReader::new(reader.try_clone().await?);
-                    let mut gzip_reader =
-                        async_compression::tokio::bufread::GzipEncoder::new(buf_reader);
+        let change_counter = match self.use_compression {
+            CompressionKind::None => {
+                self.client
+                    .put_object()
+                    .bucket(&self.bucket)
+                    .key(format!("{}-{}/db.db", self.db_name, self.generation))
+                    .body(ByteStream::from_path(&self.db_path).await?)
+                    .send()
+                    .await?;
+                let mut reader = tokio::fs::File::open(&self.db_path).await?;
+                Self::read_change_counter(&mut reader).await?
+            }
+            CompressionKind::Gzip => {
+                let mut reader = tokio::fs::File::open(&self.db_path).await?;
+                let buf_reader = tokio::io::BufReader::new(reader.try_clone().await?);
+                let gzip_reader = async_compression::tokio::bufread::GzipEncoder::new(buf_reader);
 
-                    let key = format!("{}-{}/db.gz", self.db_name, self.generation);
+                let key = format!("{}-{}/db.gz", self.db_name, self.generation);
 
-                    // Unfortunally we can't send the gzip output in a single call without buffering
-                    // the whole snapshot in memory because S3 requires the `Content-Length` header
-                    // to be set.
-                    let upload_id = self
-                        .client
-                        .create_multipart_upload()
-                        .bucket(&self.bucket)
-                        .key(key.clone())
-                        .send()
-                        .await?
-                        .upload_id
-                        .ok_or_else(|| anyhow::anyhow!("missing upload_id"))?;
+                // Unfortunally we can't send the gzip output in a single call without buffering
+                // the whole snapshot in memory because S3 requires the `Content-Length` header
+                // to be set.
+                upload_s3_multipart(&self.client, &key, &self.bucket, gzip_reader).await?;
 
-                    let chunk_sizes = &[
-                        5 * 1024 * 1024,
-                        10 * 1024 * 1024,
-                        25 * 1024 * 1024,
-                        50 * 1024 * 1024,
-                        100 * 1024 * 1024,
-                    ];
-
-                    const LAST_PART: i32 = 10_000;
-                    let mut parts = Vec::new();
-                    let mut has_reached_eof = false;
-
-                    // S3 allows a maximum of 10_000 parts and each part can size from 5 MiB to
-                    // 5 GiB, except for the last one that has no limits.
-                    //
-                    // See: https://docs.aws.amazon.com/AmazonS3/latest/userguide/qfacts.html
-                    for part in 0..LAST_PART - 1 {
-                        // Progressively increase the chunk size every 16 chunks up to the last
-                        // chunk_size. This allows smaller allocations for small databases.
-                        //
-                        // Here's a table of how much data we can chunk:
-                        // ┌────────────┬──────────────────┬───────────────────────┬──────────────────┐
-                        // │ Chunk size │ Number of chunks │ Amount for chunk size │ Cumulative total │
-                        // ├────────────┼──────────────────┼───────────────────────┼──────────────────┤
-                        // │ 5 MiB      │ 16               │ 80 MiB                │ 80 MiB           │
-                        // ├────────────┼──────────────────┼───────────────────────┼──────────────────┤
-                        // │ 10 MiB     │ 16               │ 160 MiB               │ 240 MiB          │
-                        // ├────────────┼──────────────────┼───────────────────────┼──────────────────┤
-                        // │ 25 MiB     │ 16               │ 400 MiB               │ 640 MiB          │
-                        // ├────────────┼──────────────────┼───────────────────────┼──────────────────┤
-                        // │ 50 MiB     │ 16               │ 800 MiB               │ 1.406 GiB        │
-                        // ├────────────┼──────────────────┼───────────────────────┼──────────────────┤
-                        // │ 100 MiB    │ 9935             │ 970.215 GiB           │ 971.621 GiB      │
-                        // └────────────┴──────────────────┴───────────────────────┴──────────────────┘
-                        //
-                        // We can send up to 971 GiB in chunks, which is more than enough for the
-                        // majority of use cases.
-                        //
-                        // The last chunk is reserved for the remaining of the `gzip_reader`
-                        let chunk_size =
-                            chunk_sizes[((part / 16) as usize).min(chunk_sizes.len() - 1)];
-
-                        let mut buffer = bytes::BytesMut::with_capacity(chunk_size);
-                        loop {
-                            let bytes_written = gzip_reader.read_buf(&mut buffer).await?;
-                            // EOF or buffer is full
-                            if bytes_written == 0 {
-                                break;
-                            }
-                        }
-
-                        // EOF
-                        if buffer.is_empty() {
-                            has_reached_eof = true;
-                            break;
-                        }
-
-                        let part_out = self
-                            .client
-                            .upload_part()
-                            .bucket(&self.bucket)
-                            .key(key.clone())
-                            .upload_id(upload_id.clone())
-                            .body(ByteStream::from(buffer.freeze()))
-                            .part_number(part + 1)
-                            .send()
-                            .await?;
-
-                        parts.push(
-                            CompletedPart::builder()
-                                .part_number(part + 1)
-                                .e_tag(part_out.e_tag.ok_or_else(|| {
-                                    anyhow::anyhow!("e_tag missing from part upload")
-                                })?)
-                                .build(),
-                        );
-                    }
-
-                    // If the gzip stream has not reached EOF we need to send the last part to S3.
-                    // Since we don't know the size of the stream and we can't be sure if it fits in
-                    // memory, we save it into a file to allow streaming.
-                    //
-                    // This would only happen to databases that are around ~1 TiB.
-                    if !has_reached_eof {
-                        let last_chunk_path =
-                            format!("{}-{}/db.last-chunk.gz", self.db_name, self.generation);
-                        let mut last_chunk_file = tokio::fs::File::create(&last_chunk_path).await?;
-                        tokio::io::copy(&mut gzip_reader, &mut last_chunk_file).await?;
-
-                        let part_out = self
-                            .client
-                            .upload_part()
-                            .bucket(&self.bucket)
-                            .key(key.clone())
-                            .upload_id(upload_id.clone())
-                            .body(ByteStream::from_path(&last_chunk_path).await?)
-                            .part_number(LAST_PART) // last chunk
-                            .send()
-                            .await?;
-
-                        parts.push(
-                            CompletedPart::builder()
-                                .part_number(LAST_PART)
-                                .e_tag(part_out.e_tag.ok_or_else(|| {
-                                    anyhow::anyhow!("e_tag missing from part upload")
-                                })?)
-                                .build(),
-                        );
-
-                        let _ = tokio::fs::remove_file(last_chunk_path).await;
-                    }
-
-                    self.client
-                        .complete_multipart_upload()
-                        .upload_id(upload_id)
-                        .bucket(&self.bucket)
-                        .key(key)
-                        .multipart_upload(
-                            CompletedMultipartUpload::builder()
-                                .set_parts(Some(parts))
-                                .build(),
-                        )
-                        .send()
-                        .await?;
-
-                    Self::read_change_counter(&mut reader).await?
-                }
-            };
+                Self::read_change_counter(&mut reader).await?
+            }
+        };
 
         /* FIXME: we can't rely on the change counter in WAL mode:
          ** "In WAL mode, changes to the database are detected using the wal-index and
