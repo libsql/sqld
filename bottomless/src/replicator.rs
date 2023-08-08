@@ -601,6 +601,7 @@ impl Replicator {
     // Sends the main database file to S3 - if -wal file is present, it's replicated
     // too - it means that the local file was detected to be newer than its remote
     // counterpart.
+    // returns whether the main db file was recovered.
     pub async fn snapshot_main_db_file(&mut self) -> Result<bool> {
         if !self.main_db_exists_and_not_empty().await {
             tracing::debug!("Not snapshotting, the main db file does not exist or is empty");

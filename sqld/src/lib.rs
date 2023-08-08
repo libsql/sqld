@@ -424,8 +424,6 @@ pub async fn init_bottomless_replicator(
         }
     }
 
-    dbg!(db_path.exists());
-
     Ok((replicator, did_recover))
 }
 
