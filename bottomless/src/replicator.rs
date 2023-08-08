@@ -637,7 +637,7 @@ impl Replicator {
 
                     let key = format!("{}-{}/db.gz", self.db_name, self.generation);
 
-                    // Unfortunally we can send the gzip output in a single call without buffering
+                    // Unfortunally we can't send the gzip output in a single call without buffering
                     // the whole snapshot in memory because S3 requires the `Content-Length` header
                     // to be set.
                     let upload_id = self
@@ -668,7 +668,7 @@ impl Replicator {
                     // See: https://docs.aws.amazon.com/AmazonS3/latest/userguide/qfacts.html
                     for part in 0..LAST_PART - 1 {
                         // Progressively increase the chunk size every 16 chunks up to the last
-                        // chunk_size. This allows smaller allocate for small databases.
+                        // chunk_size. This allows smaller allocations for small databases.
                         //
                         // Here's a table of how much data we can chunk:
                         // ┌────────────┬──────────────────┬───────────────────────┬──────────────────┐
