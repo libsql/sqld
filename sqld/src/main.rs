@@ -10,7 +10,6 @@ use bytesize::ByteSize;
 use clap::Parser;
 use mimalloc::MiMalloc;
 use sqld::{connection::dump::exporter::export_dump, version::Version, Config};
-use tracing_subscriber::filter::LevelFilter;
 use tracing_subscriber::prelude::__tracing_subscriber_SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::Layer;
