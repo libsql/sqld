@@ -134,11 +134,16 @@ impl ReplicationLog for ReplicationLogService {
                 return Err(Status::failed_precondition(NO_HELLO_ERROR_MSG));
             }
         }
-        let logger = self
+
+        let logger = match self
             .namespaces
             .with(req.namespace, |ns| ns.meta.logger.clone())
-            .await
-            .unwrap();
+            .await  {
+                Ok(logger) => logger,
+                Err(e) => {
+                    return Err(Status::internal(format!("failed to create database connection: {e}")));
+                }
+            };
 
         let stream = StreamGuard::new(
             FrameStream::new(logger.clone(), req.next_offset, true),
@@ -166,11 +171,15 @@ impl ReplicationLog for ReplicationLogService {
             }
         }
 
-        let logger = self
+        let logger = match self
             .namespaces
             .with(req.namespace, |ns| ns.meta.logger.clone())
-            .await
-            .unwrap();
+            .await  {
+                Ok(logger) => logger,
+                Err(e) => {
+                    return Err(Status::internal(format!("failed to create database connection: {e}")));
+                }
+            };
 
         let frames = StreamGuard::new(
             FrameStream::new(logger.clone(), req.next_offset, false),

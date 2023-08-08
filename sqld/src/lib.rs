@@ -401,7 +401,6 @@ pub async fn init_bottomless_replicator(
     options: bottomless::replicator::Options,
 ) -> anyhow::Result<(bottomless::replicator::Replicator, bool)> {
     tracing::debug!("Initializing bottomless replication");
-    let db_path = path.as_ref();
     let path = path
         .as_ref()
         .to_str()
