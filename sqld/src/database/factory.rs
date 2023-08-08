@@ -130,7 +130,7 @@ impl<F: DbFactory> DbFactory for ThrottledDbFactory<F> {
         let units = self.units_to_take();
         if units > 1 {
             tracing::debug!("Reacquiring {units} units due to high memory pressure");
-            let fut = self.semaphore.clone().acquire_many_owned(64);
+            let fut = self.semaphore.clone().acquire_many_owned(units);
             let mem_permit = match self.timeout {
                 Some(t) => timeout(t, fut).await.map_err(|_| Error::DbCreateTimeout)?,
                 None => fut.await,
