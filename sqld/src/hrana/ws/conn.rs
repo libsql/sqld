@@ -53,7 +53,7 @@ pub(super) async fn handle_tcp<F: NamespaceFactory>(
     socket: tokio::net::TcpStream,
     conn_id: u64,
 ) -> Result<()> {
-    let (ws, version, ns) = handshake::handshake_tcp::<F::Database>(socket)
+    let (ws, version, ns) = handshake::handshake_tcp(socket)
         .await
         .context("Could not perform the WebSocket handshake on TCP connection")?;
     handle_ws(server, ws, version, conn_id, ns).await

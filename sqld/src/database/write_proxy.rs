@@ -318,6 +318,13 @@ pub mod test {
         Ok(data)
     }
 
+    /// generate an arbitraty rpc value. see build.rs for usage.
+    pub fn arbitrary_bytes(u: &mut Unstructured) -> arbitrary::Result<Bytes> {
+        let v: Vec<u8> = Arbitrary::arbitrary(u)?;
+
+        Ok(v.into())
+    }
+
     /// In this test, we generate random ExecuteResults, and ensures that the `execute_results_to_builder` drives the builder FSM correctly.
     #[test]
     fn test_execute_results_to_builder() {

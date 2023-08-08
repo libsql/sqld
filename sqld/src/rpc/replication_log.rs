@@ -146,7 +146,7 @@ impl ReplicationLog for ReplicationLogService {
             };
 
         let stream = StreamGuard::new(
-            FrameStream::new(logger.clone(), req.next_offset, true),
+            FrameStream::new(logger, req.next_offset, true),
             self.idle_shutdown_layer.clone(),
         )
         .map(map_frame_stream_output);
@@ -231,7 +231,7 @@ impl ReplicationLog for ReplicationLogService {
 
         let (sender, receiver) = mpsc::channel(10);
         let req = req.into_inner();
-        let ns = req.namespace.into();
+        let ns = req.namespace;
         let logger = self
             .namespaces
             .with(ns, |ns| ns.meta.logger.clone())

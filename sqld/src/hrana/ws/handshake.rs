@@ -7,7 +7,6 @@ use hyper::Request;
 use tokio_tungstenite::tungstenite;
 use tungstenite::http;
 
-use crate::database::Database;
 use crate::http::db_factory::split_namespace;
 
 use super::super::Version;
@@ -24,7 +23,7 @@ fn extract_namespace<B>(req: &Request<B>) -> anyhow::Result<Bytes> {
     Ok(split_namespace(std::str::from_utf8(host.as_bytes())?)?)
 }
 
-pub async fn handshake_tcp<D: Database>(
+pub async fn handshake_tcp(
     socket: tokio::net::TcpStream,
 ) -> Result<(WebSocket, Version, Bytes)> {
     let mut version = None;
