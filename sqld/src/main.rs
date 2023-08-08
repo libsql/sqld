@@ -195,6 +195,8 @@ enum UtilsSubcommands {
         #[clap(long)]
         /// Path at which to write the dump
         path: Option<PathBuf>,
+        #[clap(long)]
+        namespace: String,
     },
 }
 
@@ -359,7 +361,7 @@ async fn main() -> Result<()> {
     let args = Cli::parse();
 
     match args.utils {
-        Some(UtilsSubcommands::Dump { path }) => {
+        Some(UtilsSubcommands::Dump { path, namespace }) => {
             if let Some(ref path) = path {
                 eprintln!(
                     "Dumping database {} to {}",
@@ -367,7 +369,12 @@ async fn main() -> Result<()> {
                     path.display()
                 );
             }
-            perform_dump(path.as_deref(), &args.db_path)
+            let db_path = args.db_path.join("dbs").join(&namespace);
+            if !db_path.exists() {
+                bail!("no database for namespace `{namespace}`");
+            }
+
+            perform_dump(path.as_deref(), &db_path)
         }
         None => {
             args.print_welcome_message();
