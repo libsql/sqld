@@ -8,8 +8,8 @@ use tokio::sync::{mpsc, oneshot};
 use super::super::{batch, stmt, ProtocolError, Version};
 use super::{proto, Server};
 use crate::auth::{AuthError, Authenticated};
-use crate::database::Database;
 use crate::database::factory::DbFactory;
+use crate::database::Database;
 use crate::namespace::NamespaceFactory;
 
 /// Session-level state of an authenticated Hrana connection.

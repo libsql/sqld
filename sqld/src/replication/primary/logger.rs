@@ -23,9 +23,7 @@ use crate::libsql::ffi::{
 };
 use crate::libsql::wal_hook::WalHook;
 use crate::replication::frame::{Frame, FrameHeader};
-use crate::replication::snapshot::{
-    find_snapshot_file, LogCompactor, SnapshotFile,
-};
+use crate::replication::snapshot::{find_snapshot_file, LogCompactor, SnapshotFile};
 use crate::replication::{FrameNo, CRC_64_GO_ISO, WAL_MAGIC, WAL_PAGE_SIZE};
 
 init_static_wal_method!(REPLICATION_METHODS, ReplicationLoggerHook);

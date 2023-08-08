@@ -7,7 +7,7 @@ use anyhow::bail;
 use bytemuck::bytes_of;
 use bytes::Bytes;
 use futures::StreamExt;
-use tokio::sync::{mpsc, watch, oneshot, Mutex};
+use tokio::sync::{mpsc, oneshot, watch, Mutex};
 use tokio::task::JoinSet;
 use tonic::transport::Channel;
 
@@ -140,7 +140,13 @@ impl Replicator {
         let mut error_printed = false;
         for _ in 0..HANDSHAKE_MAX_RETRIES {
             tracing::info!("Attempting to perform handshake with primary.");
-            match self.client.hello(HelloRequest { namespace: self.namespace.clone() }).await {
+            match self
+                .client
+                .hello(HelloRequest {
+                    namespace: self.namespace.clone(),
+                })
+                .await
+            {
                 Ok(resp) => {
                     let hello = resp.into_inner();
 
@@ -149,21 +155,25 @@ impl Replicator {
                         Some(meta) => match meta.merge_from_hello(hello) {
                             Ok(meta) => meta,
                             Err(e @ ReplicationError::Lagging) => {
-                                tracing::error!(
-                                    "Replica ahead of primary: hard-reseting replica"
-                                );
-                                self.hard_reset.send(self.namespace.clone()).await.expect("reset loop exited");
+                                tracing::error!("Replica ahead of primary: hard-reseting replica");
+                                self.hard_reset
+                                    .send(self.namespace.clone())
+                                    .await
+                                    .expect("reset loop exited");
 
                                 anyhow::bail!(e);
                             }
                             Err(e @ ReplicationError::DbIncompatible)
                                 if self.allow_replica_overwrite =>
-                                {
-                                    tracing::error!("Primary is attempting to replicate a different database, overwriting replica.");
-                                    self.hard_reset.send(self.namespace.clone()).await.expect("reset loop exited");
+                            {
+                                tracing::error!("Primary is attempting to replicate a different database, overwriting replica.");
+                                self.hard_reset
+                                    .send(self.namespace.clone())
+                                    .await
+                                    .expect("reset loop exited");
 
-                                    anyhow::bail!(e);
-                                }
+                                anyhow::bail!(e);
+                            }
                             Err(e) => anyhow::bail!(e),
                         },
                         None => WalIndexMeta::new_from_hello(hello)?,
@@ -171,7 +181,7 @@ impl Replicator {
 
                     *lock = Some(meta);
 
-                    return Ok(())
+                    return Ok(());
                 }
                 Err(e) if !error_printed => {
                     tracing::error!("error connecting to primary. retrying. error: {e}");
@@ -229,7 +239,10 @@ impl Replicator {
         let next_offset = self.next_offset();
         let frames = self
             .client
-            .snapshot(LogOffset { next_offset, namespace: self.namespace.clone() })
+            .snapshot(LogOffset {
+                next_offset,
+                namespace: self.namespace.clone(),
+            })
             .await?
             .into_inner();
 

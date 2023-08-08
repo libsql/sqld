@@ -5,8 +5,8 @@ use std::future::Future;
 use std::sync::Arc;
 
 use crate::auth::Authenticated;
-use crate::database::Database;
 use crate::database::factory::DbFactory;
+use crate::database::Database;
 use crate::hrana;
 
 use super::db_factory::DbFactoryExtractor;

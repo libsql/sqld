@@ -3,24 +3,24 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+use async_lock::{RwLock, RwLockUpgradableReadGuard};
 use bytes::Bytes;
 use hyper::Uri;
 use tokio::sync::mpsc;
 use tokio::task::JoinSet;
 use tonic::transport::Channel;
-use async_lock::{RwLock, RwLockUpgradableReadGuard};
 
-use crate::database::Database;
 use crate::database::config::DatabaseConfigStore;
 use crate::database::dump::loader::DumpLoader;
+use crate::database::factory::{DbFactory, TrackedDb};
 use crate::database::libsql::{LibSqlDb, LibSqlDbFactory};
-use crate::replication::primary::logger::{REPLICATION_METHODS, ReplicationLoggerHookCtx};
+use crate::database::write_proxy::{WriteProxyDatabase, WriteProxyDbFactory};
+use crate::database::Database;
+use crate::replication::primary::logger::{ReplicationLoggerHookCtx, REPLICATION_METHODS};
+use crate::replication::replica::Replicator;
 use crate::replication::{ReplicationLogger, SnapshotCallback};
 use crate::stats::Stats;
 use crate::{DB_CREATE_TIMEOUT, run_periodic_compactions, check_fresh_db, init_bottomless_replicator, MAX_CONCURRENT_DBS};
-use crate::replication::replica::Replicator;
-use crate::database::write_proxy::{WriteProxyDatabase, WriteProxyDbFactory};
-use crate::database::factory::{DbFactory, TrackedDb};
 
 #[async_trait::async_trait]
 pub trait NamespaceFactory: Sync + Send + 'static {
@@ -30,18 +30,15 @@ pub trait NamespaceFactory: Sync + Send + 'static {
     async fn create(&self, name: Bytes) -> anyhow::Result<Namespace<Self::Database, Self::Meta>>;
 }
 
-pub struct PrimaryNamespaceFactory { 
+pub struct PrimaryNamespaceFactory {
     config: PrimaryNamespaceConfig,
 }
 
 impl PrimaryNamespaceFactory {
     pub fn new(config: PrimaryNamespaceConfig) -> Self {
-        Self {
-            config
-        }
+        Self { config }
     }
 }
-
 
 #[async_trait::async_trait]
 impl NamespaceFactory for PrimaryNamespaceFactory {
@@ -58,7 +55,9 @@ pub struct ReplicaNamespaceFactory {
 }
 
 impl ReplicaNamespaceFactory {
-    pub fn new(config: ReplicaNamespaceConfig) -> Self { Self { config } }
+    pub fn new(config: ReplicaNamespaceConfig) -> Self {
+        Self { config }
+    }
 }
 
 #[async_trait::async_trait]
@@ -80,13 +79,13 @@ impl<F: NamespaceFactory> Namespaces<F> {
     pub fn new(factory: F) -> Self {
         Self {
             inner: Default::default(),
-            factory, }
-
+            factory,
+        }
     }
 
     pub async fn reset(&self, namespace: Bytes) -> anyhow::Result<()>
-        where
-            Namespace<F::Database, F::Meta>: NamespaceCommon,
+    where
+        Namespace<F::Database, F::Meta>: NamespaceCommon,
     {
         let mut lock = self.inner.write().await;
         if let Some(ns) = lock.remove(&namespace) {
@@ -103,7 +102,8 @@ impl<F: NamespaceFactory> Namespaces<F> {
     }
 
     pub async fn with<Fun, R>(&self, namespace: Bytes, f: Fun) -> anyhow::Result<R>
-        where Fun: FnOnce(&Namespace<F::Database, F::Meta>) -> R,
+    where
+        Fun: FnOnce(&Namespace<F::Database, F::Meta>) -> R,
     {
         let lock = self.inner.upgradable_read().await;
         if let Some(ns) = lock.get(&namespace) {
@@ -158,7 +158,8 @@ impl Namespace<TrackedDb<WriteProxyDatabase>, ()> {
             name.clone(),
             &mut join_set,
             config.hard_reset.clone(),
-        ).await?;
+        )
+        .await?;
 
         let applied_frame_no_receiver = replicator.current_frame_no_notifier.clone();
 
@@ -186,7 +187,6 @@ impl Namespace<TrackedDb<WriteProxyDatabase>, ()> {
             path: db_path,
         })
     }
-
 }
 
 #[async_trait::async_trait]
@@ -229,7 +229,8 @@ impl Namespace<TrackedDb<LibSqlDb>, PrimaryMeta> {
             let mut options = options.clone();
             let db_id = format!("ns-{}", std::str::from_utf8(&name).unwrap());
             options.db_id = Some(db_id);
-            let (replicator, did_recover) = init_bottomless_replicator(db_path.join("data"), options.clone()).await?;
+            let (replicator, did_recover) =
+                init_bottomless_replicator(db_path.join("data"), options.clone()).await?;
             is_dirty |= did_recover;
             Some(Arc::new(std::sync::Mutex::new(replicator)))
         } else {
@@ -239,15 +240,15 @@ impl Namespace<TrackedDb<LibSqlDb>, PrimaryMeta> {
         tokio::fs::create_dir_all(&db_path).await?;
         let is_fresh_db = check_fresh_db(&db_path);
         let logger = Arc::new(ReplicationLogger::open(
-                &db_path,
-                config.max_log_size,
-                config.max_log_duration,
-                is_dirty,
-                Box::new({ 
-                    let name = name.clone();
-                    let cb = config.snapshot_callback.clone();
-                    move |path| cb(path, &name)
-                }),
+            &db_path,
+            config.max_log_size,
+            config.max_log_duration,
+            is_dirty,
+            Box::new({
+                let name = name.clone();
+                let cb = config.snapshot_callback.clone();
+                move |path| cb(path, &name)
+            }),
         )?);
 
         join_set.spawn(run_periodic_compactions(logger.clone()));
@@ -258,7 +259,7 @@ impl Namespace<TrackedDb<LibSqlDb>, PrimaryMeta> {
             logger.clone(),
             bottomless_replicator.clone(),
         )
-            .await?;
+        .await?;
         if let Some(ref path) = config.load_from_dump {
             if !is_fresh_db {
                 anyhow::bail!("cannot load from a dump if a database already exists.\nIf you're sure you want to load from a dump, delete your database folder at `{}`", db_path.display());
@@ -280,9 +281,13 @@ impl Namespace<TrackedDb<LibSqlDb>, PrimaryMeta> {
             config.max_response_size,
             config.max_total_response_size,
         )
-            .await?
-            .throttled(MAX_CONCURRENT_DBS, Some(DB_CREATE_TIMEOUT), config.max_total_response_size)
-            .into();
+        .await?
+        .throttled(
+            MAX_CONCURRENT_DBS,
+            Some(DB_CREATE_TIMEOUT),
+            config.max_total_response_size,
+        )
+        .into();
 
         Ok(Self {
             db_factory,

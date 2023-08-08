@@ -1,9 +1,9 @@
+pub mod db_factory;
 mod h2c;
 mod hrana_over_http_1;
 mod result_builder;
 pub mod stats;
 mod types;
-pub mod db_factory;
 
 use std::convert::Infallible;
 use std::net::SocketAddr;
@@ -20,7 +20,7 @@ use axum_extra::middleware::option_layer;
 use base64::prelude::BASE64_STANDARD_NO_PAD;
 use base64::Engine;
 use hyper::server::conn::AddrIncoming;
-use hyper::{header, Body, Request, StatusCode, Response};
+use hyper::{header, Body, Request, Response, StatusCode};
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use serde_json::Number;
@@ -37,7 +37,7 @@ use crate::database::Database;
 use crate::error::Error;
 use crate::hrana;
 use crate::http::types::HttpQuery;
-use crate::namespace::{Namespaces, NamespaceFactory};
+use crate::namespace::{NamespaceFactory, Namespaces};
 use crate::query::{self, Query};
 use crate::query_analysis::{predict_final_state, State, Statement};
 use crate::query_result_builder::QueryResultBuilder;
@@ -230,10 +230,15 @@ pub async fn run_http<F, S>(
     idle_shutdown_layer: Option<IdleShutdownLayer>,
     stats: Stats,
     replication_service: Option<S>,
-) -> anyhow::Result<()> 
-where F: NamespaceFactory,
-      S: Service<Request<hyper::Body>, Error = Infallible, Response = hyper::Response<BoxBody>> + Send + Clone + tonic::server::NamedService + 'static,
-      S::Future: Send + 'static,
+) -> anyhow::Result<()>
+where
+    F: NamespaceFactory,
+    S: Service<Request<hyper::Body>, Error = Infallible, Response = hyper::Response<BoxBody>>
+        + Send
+        + Clone
+        + tonic::server::NamedService
+        + 'static,
+    S::Future: Send + 'static,
 {
     let state = AppState {
         auth,
@@ -286,9 +291,7 @@ where F: NamespaceFactory,
 
     // Merge the grpc based axum router into our regular http router
     let router = if let Some(svc) = replication_service {
-        let grpc_router = Server::builder()
-            .add_service(svc)
-            .into_router();
+        let grpc_router = Server::builder().add_service(svc).into_router();
 
         layered_app.merge(grpc_router)
     } else {

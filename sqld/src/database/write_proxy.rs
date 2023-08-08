@@ -64,7 +64,7 @@ impl WriteProxyDbFactory {
             applied_frame_no_receiver,
             max_response_size,
             max_total_response_size,
-            namespace
+            namespace,
         }
     }
 }
@@ -84,7 +84,7 @@ impl DbFactory for WriteProxyDbFactory {
                 max_size: Some(self.max_response_size),
                 max_total_size: Some(self.max_total_response_size),
             },
-            self.namespace.clone()
+            self.namespace.clone(),
         )
         .await?;
         Ok(db)

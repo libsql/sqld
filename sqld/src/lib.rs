@@ -11,8 +11,11 @@ use enclose::enclose;
 use futures::never::Never;
 use hyper::Request;
 use libsql::wal_hook::TRANSPARENT_METHODS;
-use namespace::{Namespaces, PrimaryNamespaceFactory, PrimaryNamespaceConfig, NamespaceFactory, ReplicaNamespaceConfig, ReplicaNamespaceFactory};
-use replication::{SnapshotCallback, ReplicationLogger};
+use namespace::{
+    NamespaceFactory, Namespaces, PrimaryNamespaceConfig, PrimaryNamespaceFactory,
+    ReplicaNamespaceConfig, ReplicaNamespaceFactory,
+};
+use replication::{ReplicationLogger, SnapshotCallback};
 use rpc::replication_log::ReplicationLogService;
 use rpc::{run_rpc_server, ReplicationLogServer};
 use tokio::sync::mpsc;
@@ -39,6 +42,7 @@ mod error;
 mod heartbeat;
 mod hrana;
 mod http;
+mod namespace;
 mod query;
 mod query_analysis;
 mod query_result_builder;
@@ -47,7 +51,6 @@ pub mod rpc;
 mod stats;
 #[cfg(test)]
 mod test;
-mod namespace;
 mod utils;
 pub mod version;
 
@@ -151,9 +154,14 @@ async fn run_service<F, S>(
     db_config_store: Arc<DatabaseConfigStore>,
     replication_service: Option<S>,
 ) -> anyhow::Result<()>
-where F: NamespaceFactory,
-      S: Service<Request<hyper::Body>, Error = Infallible, Response = hyper::Response<BoxBody>> + Send + Clone + tonic::server::NamedService + 'static,
-      S::Future: Send + 'static,
+where
+    F: NamespaceFactory,
+    S: Service<Request<hyper::Body>, Error = Infallible, Response = hyper::Response<BoxBody>>
+        + Send
+        + Clone
+        + tonic::server::NamedService
+        + 'static,
+    S::Future: Send + 'static,
 {
     let auth = get_auth(config)?;
 
@@ -298,13 +306,13 @@ async fn start_replica(
         base_path: config.db_path.to_owned(),
         channel,
         uri,
-        allow_replica_overwrite:  config.allow_replica_overwrite,
+        allow_replica_overwrite: config.allow_replica_overwrite,
         extensions,
         stats: stats.clone(),
         config_store: db_config_store.clone(),
         max_response_size: config.max_response_size,
         max_total_response_size: config.max_total_response_size,
-        hard_reset:  hard_reset_snd,
+        hard_reset: hard_reset_snd,
     };
     let factory = ReplicaNamespaceFactory::new(conf);
     let namespaces = Arc::new(Namespaces::new(factory));
@@ -314,7 +322,10 @@ async fn start_replica(
         let namespaces = namespaces.clone();
         async move {
             while let Some(ns) = hard_reset_rcv.recv().await {
-                tracing::warn!("received reset signal for: {:?}", std::str::from_utf8(&ns).ok());
+                tracing::warn!(
+                    "received reset signal for: {:?}",
+                    std::str::from_utf8(&ns).ok()
+                );
                 namespaces.reset(ns).await?;
             }
 
@@ -331,7 +342,7 @@ async fn start_replica(
         db_config_store,
         None::<ReplicationLogServer<ReplicationLogService>>,
     )
-        .await?;
+    .await?;
 
     Ok(())
 }
@@ -411,7 +422,6 @@ pub async fn init_bottomless_replicator(
         bottomless::replicator::RestoreAction::ReuseGeneration(gen) => {
             replicator.set_generation(gen);
         }
-
     }
 
     dbg!(db_path.exists());

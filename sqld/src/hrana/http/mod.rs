@@ -6,8 +6,8 @@ use serde::{de::DeserializeOwned, Serialize};
 
 use super::ProtocolError;
 use crate::auth::Authenticated;
-use crate::database::Database;
 use crate::database::factory::DbFactory;
+use crate::database::Database;
 mod proto;
 mod request;
 mod stream;

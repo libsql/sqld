@@ -16,8 +16,8 @@ use tokio::time::{Duration, Instant};
 
 use super::super::ProtocolError;
 use super::Server;
-use crate::database::Database;
 use crate::database::factory::DbFactory;
+use crate::database::Database;
 
 /// Mutable state related to streams, owned by [`Server`] and protected with a mutex.
 pub struct ServerStreamState<D> {
@@ -153,7 +153,8 @@ pub async fn acquire<'srv, D: Database>(
         }
         None => {
             let db = db_factory
-                .create().await
+                .create()
+                .await
                 .context("Could not create a database connection")?;
 
             let mut state = server.stream_state.lock();

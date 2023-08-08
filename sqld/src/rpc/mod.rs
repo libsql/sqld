@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tower::util::option_layer;
 
-use crate::namespace::{PrimaryNamespaceFactory, Namespaces};
+use crate::namespace::{Namespaces, PrimaryNamespaceFactory};
 use crate::rpc::proxy::rpc::proxy_server::ProxyServer;
 use crate::rpc::proxy::ProxyService;
 pub use crate::rpc::replication_log::rpc::replication_log_server::ReplicationLogServer;

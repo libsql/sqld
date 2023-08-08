@@ -77,7 +77,10 @@ async fn handle_ws<F: NamespaceFactory>(
     conn_id: u64,
     namespace: Bytes,
 ) -> Result<()> {
-    let factory = server.namespaces.with(namespace, |ns| ns.db_factory.clone()).await?;
+    let factory = server
+        .namespaces
+        .with(namespace, |ns| ns.db_factory.clone())
+        .await?;
     let mut conn = Conn {
         conn_id,
         server,
@@ -178,7 +181,10 @@ async fn handle_msg<F: NamespaceFactory>(
     }
 }
 
-async fn handle_hello_msg<F: NamespaceFactory>(conn: &mut Conn<F>, jwt: Option<String>) -> Result<bool> {
+async fn handle_hello_msg<F: NamespaceFactory>(
+    conn: &mut Conn<F>,
+    jwt: Option<String>,
+) -> Result<bool> {
     let hello_res = match conn.session.as_mut() {
         None => session::handle_initial_hello(&conn.server, conn.version, jwt)
             .map(|session| conn.session = Some(session)),
@@ -209,15 +215,16 @@ async fn handle_request_msg<F: NamespaceFactory>(
         bail!(ProtocolError::RequestBeforeHello)
     };
 
-    let response_rx = session::handle_request(session, &mut conn.join_set, request, conn.factory.clone())
-        .await
-        .unwrap_or_else(|err| {
-            // we got an error immediately, but let's treat it as a special case of the general
-            // flow
-            let (tx, rx) = oneshot::channel();
-            tx.send(Err(err)).unwrap();
-            rx
-        });
+    let response_rx =
+        session::handle_request(session, &mut conn.join_set, request, conn.factory.clone())
+            .await
+            .unwrap_or_else(|err| {
+                // we got an error immediately, but let's treat it as a special case of the general
+                // flow
+                let (tx, rx) = oneshot::channel();
+                tx.send(Err(err)).unwrap();
+                rx
+            });
 
     conn.responses.push(ResponseFuture {
         request_id,

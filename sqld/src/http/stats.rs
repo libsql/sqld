@@ -1,9 +1,9 @@
 use hyper::{Body, Response};
 use serde::Serialize;
 
-use axum::extract::{State as AxumState, FromRef};
+use axum::extract::{FromRef, State as AxumState};
 
-use crate::{stats::Stats, namespace::NamespaceFactory};
+use crate::{namespace::NamespaceFactory, stats::Stats};
 
 use super::AppState;
 

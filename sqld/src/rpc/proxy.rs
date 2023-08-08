@@ -7,7 +7,7 @@ use uuid::Uuid;
 
 use crate::auth::{Authenticated, Authorized};
 use crate::database::{Database, Program};
-use crate::namespace::{Namespaces, NamespaceFactory, PrimaryNamespaceFactory};
+use crate::namespace::{NamespaceFactory, Namespaces, PrimaryNamespaceFactory};
 use crate::query_result_builder::{
     Column, QueryBuilderConfig, QueryResultBuilder, QueryResultBuilderError,
 };
@@ -441,11 +441,15 @@ impl Proxy for ProxyService {
         };
 
         let namespace = std::str::from_utf8(&req.namespace).unwrap().to_string();
-        let (factory, new_frame_notifier) = self.namespaces.with(namespace.into(), |ns| {
-            let factory = ns.db_factory.clone();
-            let notifier = ns.meta.logger.new_frame_notifier.subscribe();
-            (factory, notifier)
-        }).await.unwrap();
+        let (factory, new_frame_notifier) = self
+            .namespaces
+            .with(namespace.into(), |ns| {
+                let factory = ns.db_factory.clone();
+                let notifier = ns.meta.logger.new_frame_notifier.subscribe();
+                (factory, notifier)
+            })
+            .await
+            .unwrap();
 
         let lock = self.clients.upgradable_read().await;
         let db = match lock.get(&client_id) {

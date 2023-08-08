@@ -134,10 +134,14 @@ impl ReplicationLog for ReplicationLogService {
                 return Err(Status::failed_precondition(NO_HELLO_ERROR_MSG));
             }
         }
-        let logger = self.namespaces.with(req.namespace, |ns| ns.meta.logger.clone()).await.unwrap();
+        let logger = self
+            .namespaces
+            .with(req.namespace, |ns| ns.meta.logger.clone())
+            .await
+            .unwrap();
 
         let stream = StreamGuard::new(
-            FrameStream::new(self.logger.clone(), req.into_inner().next_offset, true),
+            FrameStream::new(logger.clone(), req.next_offset, true),
             self.idle_shutdown_layer.clone(),
         )
         .map(map_frame_stream_output);
@@ -154,15 +158,22 @@ impl ReplicationLog for ReplicationLogService {
         let replica_addr = req
             .remote_addr()
             .ok_or(Status::internal("No remote RPC address"))?;
+        let req = req.into_inner();
         {
             let guard = self.replicas_with_hello.read().unwrap();
-            if !guard.contains(&replica_addr) {
+            if !guard.contains(&(replica_addr, req.namespace.clone())) {
                 return Err(Status::failed_precondition(NO_HELLO_ERROR_MSG));
             }
         }
 
+        let logger = self
+            .namespaces
+            .with(req.namespace, |ns| ns.meta.logger.clone())
+            .await
+            .unwrap();
+
         let frames = StreamGuard::new(
-            FrameStream::new(self.logger.clone(), req.into_inner().next_offset, false),
+            FrameStream::new(logger.clone(), req.next_offset, false),
             self.idle_shutdown_layer.clone(),
         )
         .map(map_frame_stream_output)
@@ -188,7 +199,11 @@ impl ReplicationLog for ReplicationLogService {
             guard.insert((replica_addr, req.namespace.clone()));
         }
 
-        let logger = self.namespaces.with(req.namespace, |ns| ns.meta.logger.clone()).await.unwrap();
+        let logger = self
+            .namespaces
+            .with(req.namespace, |ns| ns.meta.logger.clone())
+            .await
+            .unwrap();
 
         let response = HelloResponse {
             database_id: logger.database_id().unwrap().to_string(),
@@ -208,7 +223,11 @@ impl ReplicationLog for ReplicationLogService {
         let (sender, receiver) = mpsc::channel(10);
         let req = req.into_inner();
         let ns = req.namespace.into();
-        let logger = self.namespaces.with(ns, |ns| ns.meta.logger.clone()).await.unwrap();
+        let logger = self
+            .namespaces
+            .with(ns, |ns| ns.meta.logger.clone())
+            .await
+            .unwrap();
         let offset = req.next_offset;
         match tokio::task::spawn_blocking(move || logger.get_snapshot_file(offset)).await {
             Ok(Ok(Some(snapshot))) => {
