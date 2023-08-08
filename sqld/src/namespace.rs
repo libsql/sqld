@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -18,9 +18,12 @@ use crate::database::write_proxy::{WriteProxyDatabase, WriteProxyDbFactory};
 use crate::database::Database;
 use crate::replication::primary::logger::{ReplicationLoggerHookCtx, REPLICATION_METHODS};
 use crate::replication::replica::Replicator;
-use crate::replication::{ReplicationLogger, SnapshotCallback};
+use crate::replication::{NamespacedSnapshotCallback, ReplicationLogger};
 use crate::stats::Stats;
-use crate::{DB_CREATE_TIMEOUT, run_periodic_compactions, check_fresh_db, init_bottomless_replicator, MAX_CONCURRENT_DBS};
+use crate::{
+    check_fresh_db, init_bottomless_replicator, run_periodic_compactions, DB_CREATE_TIMEOUT,
+    MAX_CONCURRENT_DBS,
+};
 
 #[async_trait::async_trait]
 pub trait NamespaceFactory: Sync + Send + 'static {
@@ -71,6 +74,7 @@ impl NamespaceFactory for ReplicaNamespaceFactory {
 }
 
 pub struct Namespaces<F: NamespaceFactory> {
+    #[allow(clippy::type_complexity)]
     inner: RwLock<HashMap<Bytes, Namespace<F::Database, F::Meta>>>,
     factory: F,
 }
@@ -177,8 +181,11 @@ impl Namespace<TrackedDb<WriteProxyDatabase>, ()> {
             config.max_total_response_size,
             name.clone(),
         )
-            .throttled(MAX_CONCURRENT_DBS, Some(DB_CREATE_TIMEOUT), config.max_total_response_size);
-
+        .throttled(
+            MAX_CONCURRENT_DBS,
+            Some(DB_CREATE_TIMEOUT),
+            config.max_total_response_size,
+        );
 
         Ok(Self {
             db_factory: Arc::new(db_factory),
@@ -203,7 +210,7 @@ pub struct PrimaryNamespaceConfig {
     pub max_log_size: u64,
     pub db_is_dirty: bool,
     pub max_log_duration: Option<Duration>,
-    pub snapshot_callback: SnapshotCallback,
+    pub snapshot_callback: NamespacedSnapshotCallback,
     pub bottomless_replication: Option<bottomless::replicator::Options>,
     pub extensions: Vec<PathBuf>,
     pub stats: Stats,
@@ -247,7 +254,7 @@ impl Namespace<TrackedDb<LibSqlDb>, PrimaryMeta> {
             Box::new({
                 let name = name.clone();
                 let cb = config.snapshot_callback.clone();
-                move |path| cb(path, &name)
+                move |path: &Path| cb(path, &name)
             }),
         )?);
 

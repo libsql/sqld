@@ -7,6 +7,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Context as AnyhowContext;
+use bytes::Bytes;
 use enclose::enclose;
 use futures::never::Never;
 use hyper::Request;
@@ -15,7 +16,7 @@ use namespace::{
     NamespaceFactory, Namespaces, PrimaryNamespaceConfig, PrimaryNamespaceFactory,
     ReplicaNamespaceConfig, ReplicaNamespaceFactory,
 };
-use replication::{ReplicationLogger, SnapshotCallback};
+use replication::{NamespacedSnapshotCallback, ReplicationLogger};
 use rpc::replication_log::ReplicationLogService;
 use rpc::{run_rpc_server, ReplicationLogServer};
 use tokio::sync::mpsc;
@@ -433,7 +434,7 @@ async fn start_primary(
     stats: Stats,
     config_store: Arc<DatabaseConfigStore>,
     db_is_dirty: bool,
-    snapshot_callback: SnapshotCallback,
+    snapshot_callback: NamespacedSnapshotCallback,
 ) -> anyhow::Result<()> {
     let extensions = validate_extensions(config.extensions_path.clone())?;
     let conf = PrimaryNamespaceConfig {
@@ -465,7 +466,11 @@ async fn start_primary(
         ));
     }
 
-    let logger_service = ReplicationLogService::new(namespaces.clone(), idle_shutdown_layer.clone(), Some(get_auth(config)?));
+    let logger_service = ReplicationLogService::new(
+        namespaces.clone(),
+        idle_shutdown_layer.clone(),
+        Some(get_auth(config)?),
+    );
     run_service(
         namespaces.clone(),
         config,
@@ -613,7 +618,7 @@ pub async fn run_server(config: Config) -> anyhow::Result<()> {
         let db_is_dirty = init_sentinel_file(&config.db_path)?;
 
         let snapshot_exec = config.snapshot_exec.clone();
-        let snapshot_callback: SnapshotCallback = Arc::new(move |snapshot_file, namespace| {
+        let snapshot_callback = Arc::new(move |snapshot_file: &Path, namespace: &Bytes| {
             if let Some(exec) = snapshot_exec.as_ref() {
                 let ns = std::str::from_utf8(namespace)?;
                 let status = Command::new(exec).arg(snapshot_file).arg(ns).status()?;

@@ -16,7 +16,7 @@ use tokio_stream::StreamExt;
 use tonic::Status;
 
 use crate::auth::Auth;
-use crate::namespace::{PrimaryNamespaceFactory, Namespaces};
+use crate::namespace::{Namespaces, PrimaryNamespaceFactory};
 use crate::replication::primary::frame_stream::FrameStream;
 use crate::replication::LogReadError;
 use crate::utils::services::idle_shutdown::IdleShutdownLayer;
@@ -138,12 +138,15 @@ impl ReplicationLog for ReplicationLogService {
         let logger = match self
             .namespaces
             .with(req.namespace, |ns| ns.meta.logger.clone())
-            .await  {
-                Ok(logger) => logger,
-                Err(e) => {
-                    return Err(Status::internal(format!("failed to create database connection: {e}")));
-                }
-            };
+            .await
+        {
+            Ok(logger) => logger,
+            Err(e) => {
+                return Err(Status::internal(format!(
+                    "failed to create database connection: {e}"
+                )));
+            }
+        };
 
         let stream = StreamGuard::new(
             FrameStream::new(logger, req.next_offset, true),
@@ -174,12 +177,15 @@ impl ReplicationLog for ReplicationLogService {
         let logger = match self
             .namespaces
             .with(req.namespace, |ns| ns.meta.logger.clone())
-            .await  {
-                Ok(logger) => logger,
-                Err(e) => {
-                    return Err(Status::internal(format!("failed to create database connection: {e}")));
-                }
-            };
+            .await
+        {
+            Ok(logger) => logger,
+            Err(e) => {
+                return Err(Status::internal(format!(
+                    "failed to create database connection: {e}"
+                )));
+            }
+        };
 
         let frames = StreamGuard::new(
             FrameStream::new(logger.clone(), req.next_offset, false),

@@ -23,9 +23,7 @@ fn extract_namespace<B>(req: &Request<B>) -> anyhow::Result<Bytes> {
     Ok(split_namespace(std::str::from_utf8(host.as_bytes())?)?)
 }
 
-pub async fn handshake_tcp(
-    socket: tokio::net::TcpStream,
-) -> Result<(WebSocket, Version, Bytes)> {
+pub async fn handshake_tcp(socket: tokio::net::TcpStream) -> Result<(WebSocket, Version, Bytes)> {
     let mut version = None;
     let mut namespace = None;
     let callback = |req: &http::Request<()>, resp: http::Response<()>| {
@@ -34,7 +32,7 @@ pub async fn handshake_tcp(
             .headers
             .insert("server", http::HeaderValue::from_static("sqld-hrana-tcp"));
 
-        match extract_namespace(&req) {
+        match extract_namespace(req) {
             Ok(ns) => {
                 namespace = Some(ns);
             }

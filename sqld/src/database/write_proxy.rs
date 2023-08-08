@@ -154,6 +154,7 @@ fn execute_results_to_builder<B: QueryResultBuilder>(
 }
 
 impl WriteProxyDatabase {
+    #[allow(clippy::too_many_arguments)]
     async fn new(
         write_proxy: ProxyClient<Channel>,
         path: PathBuf,
