@@ -614,8 +614,11 @@ impl Replicator {
             return Ok(false);
         }
         tracing::debug!("Snapshotting {}", self.db_path);
+
         let start = Instant::now();
-        let change_counter = match self.use_compression {
+
+        let mut reader = tokio::fs::File::open(&self.db_path).await?;
+        match self.use_compression {
             CompressionKind::None => {
                 self.client
                     .put_object()
@@ -624,11 +627,8 @@ impl Replicator {
                     .body(ByteStream::from_path(&self.db_path).await?)
                     .send()
                     .await?;
-                let mut reader = tokio::fs::File::open(&self.db_path).await?;
-                Self::read_change_counter(&mut reader).await?
             }
             CompressionKind::Gzip => {
-                let mut reader = tokio::fs::File::open(&self.db_path).await?;
                 let buf_reader = tokio::io::BufReader::new(reader.try_clone().await?);
                 let gzip_reader = async_compression::tokio::bufread::GzipEncoder::new(buf_reader);
 
@@ -638,8 +638,6 @@ impl Replicator {
                 // the whole snapshot in memory because S3 requires the `Content-Length` header
                 // to be set.
                 upload_s3_multipart(&self.client, &key, &self.bucket, gzip_reader).await?;
-
-                Self::read_change_counter(&mut reader).await?
             }
         };
 
@@ -649,6 +647,7 @@ impl Replicator {
          ** incremented on each transaction in WAL mode."
          ** Instead, we need to consult WAL checksums.
          */
+        let change_counter = Self::read_change_counter(&mut reader).await?;
         let change_counter_key = format!("{}-{}/.changecounter", self.db_name, self.generation);
         self.client
             .put_object()
