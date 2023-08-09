@@ -319,7 +319,7 @@ pub mod test {
         Ok(data)
     }
 
-    /// generate an arbitraty rpc value. see build.rs for usage.
+    /// generate an arbitraty `Bytes` value. see build.rs for usage.
     pub fn arbitrary_bytes(u: &mut Unstructured) -> arbitrary::Result<Bytes> {
         let v: Vec<u8> = Arbitrary::arbitrary(u)?;
 

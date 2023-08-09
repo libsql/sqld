@@ -118,7 +118,6 @@ async fn handle_query<D: Database>(
 ) -> Result<axum::response::Response, Error> {
     let batch = parse_queries(query.statements)?;
 
-    // let db = namespaces.get_or_create(namespace).await?.db_factory.create().await?;
     let db = factory.create().await?;
 
     let builder = JsonHttpPayloadBuilder::new();
