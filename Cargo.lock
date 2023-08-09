@@ -779,6 +779,7 @@ dependencies = [
  "futures",
  "rand",
  "sqld-libsql-bindings",
+ "tempfile",
  "tokio",
  "tokio-util",
  "tracing",

@@ -25,6 +25,7 @@ arc-swap = "1.6"
 chrono = "0.4.23"
 uuid = "1.4.1"
 rand = "0.8.5"
+tempfile = "3.3.0"
 
 [features]
 libsql_linked_statically = []

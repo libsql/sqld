@@ -158,18 +158,18 @@ pub async fn upload_s3_multipart(
     //
     // This would only happen to databases that are around ~1 TiB.
     if !has_reached_eof {
-        let mut last_chunk_path = std::env::temp_dir();
-        last_chunk_path.push(rand::random::<u32>().to_string());
+        let last_chunk_file = tempfile::NamedTempFile::new()?;
+        let mut last_chunk_tokio_file =
+            tokio::fs::File::from_std(last_chunk_file.as_file().try_clone()?);
 
-        let mut last_chunk_file = tokio::fs::File::create(&last_chunk_path).await?;
-        tokio::io::copy(&mut reader, &mut last_chunk_file).await?;
+        tokio::io::copy(&mut reader, &mut last_chunk_tokio_file).await?;
 
         let part_out = client
             .upload_part()
             .bucket(bucket)
             .key(key)
             .upload_id(upload_id.clone())
-            .body(ByteStream::from_path(&last_chunk_path).await?)
+            .body(ByteStream::from_path(last_chunk_file.path()).await?)
             .part_number(LAST_PART)
             .send()
             .await?;
@@ -184,8 +184,6 @@ pub async fn upload_s3_multipart(
                 )
                 .build(),
         );
-
-        let _ = tokio::fs::remove_file(last_chunk_path).await;
     }
 
     client
