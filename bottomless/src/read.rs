@@ -63,7 +63,7 @@ pub async fn upload_s3_multipart(
     client: &aws_sdk_s3::Client,
     key: &str,
     bucket: &str,
-    reader: impl AsyncRead + Send + Unpin,
+    reader: impl AsyncRead + Unpin,
 ) -> Result<()> {
     let upload_id = client
         .create_multipart_upload()
