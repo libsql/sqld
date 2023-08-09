@@ -8,6 +8,7 @@ use tokio_tungstenite::tungstenite;
 use tungstenite::http;
 
 use crate::http::db_factory::split_namespace;
+use crate::DEFAULT_NAMESPACE_NAME;
 
 use super::super::Version;
 use super::Upgrade;
@@ -23,7 +24,10 @@ fn extract_namespace<B>(req: &Request<B>) -> anyhow::Result<Bytes> {
     Ok(split_namespace(std::str::from_utf8(host.as_bytes())?)?)
 }
 
-pub async fn handshake_tcp(socket: tokio::net::TcpStream) -> Result<(WebSocket, Version, Bytes)> {
+pub async fn handshake_tcp(
+    socket: tokio::net::TcpStream,
+    allow_default_ns: bool,
+) -> Result<(WebSocket, Version, Bytes)> {
     let mut version = None;
     let mut namespace = None;
     let callback = |req: &http::Request<()>, resp: http::Response<()>| {
@@ -32,12 +36,11 @@ pub async fn handshake_tcp(socket: tokio::net::TcpStream) -> Result<(WebSocket, 
             .headers
             .insert("server", http::HeaderValue::from_static("sqld-hrana-tcp"));
 
-        match extract_namespace(req) {
-            Ok(ns) => {
-                namespace = Some(ns);
-            }
+        namespace = match extract_namespace(req) {
+            Ok(ns) => Some(ns),
+            Err(_) if allow_default_ns => Some(DEFAULT_NAMESPACE_NAME.into()),
             Err(e) => return Err(http::Response::from_parts(resp_parts, Some(e.to_string()))),
-        }
+        };
 
         match negotiate_version(req.headers(), &mut resp_parts.headers) {
             Ok(version_) => {
@@ -54,11 +57,17 @@ pub async fn handshake_tcp(socket: tokio::net::TcpStream) -> Result<(WebSocket, 
     Ok((WebSocket::Tcp(stream), version.unwrap(), namespace.unwrap()))
 }
 
-pub async fn handshake_upgrade(upgrade: Upgrade) -> Result<(WebSocket, Version, Bytes)> {
+pub async fn handshake_upgrade(
+    upgrade: Upgrade,
+    allow_default_ns: bool,
+) -> Result<(WebSocket, Version, Bytes)> {
     let mut req = upgrade.request;
 
-    let host = req.headers().get("host").context("missing host header")?;
-    let ns = split_namespace(std::str::from_utf8(host.as_bytes())?)?;
+    let ns = match extract_namespace(&req) {
+        Ok(ns) => ns,
+        Err(_) if allow_default_ns => DEFAULT_NAMESPACE_NAME.into(),
+        Err(e) => return Err(e),
+    };
 
     let ws_config = Some(get_ws_config());
     let (mut resp, stream_fut_version_res) = match hyper_tungstenite::upgrade(&mut req, ws_config) {

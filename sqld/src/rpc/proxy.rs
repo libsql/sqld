@@ -440,10 +440,9 @@ impl Proxy for ProxyService {
             None => Authenticated::Anonymous,
         };
 
-        let namespace = std::str::from_utf8(&req.namespace).unwrap().to_string();
         let (factory, new_frame_notifier) = self
             .namespaces
-            .with(namespace.into(), |ns| {
+            .with(req.namespace.clone(), |ns| {
                 let factory = ns.db_factory.clone();
                 let notifier = ns.meta.logger.new_frame_notifier.subscribe();
                 (factory, notifier)
