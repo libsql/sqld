@@ -37,7 +37,6 @@ pub struct Replicator {
     namespace: Bytes,
     meta: Arc<Mutex<Option<WalIndexMeta>>>,
     pub current_frame_no_notifier: watch::Receiver<FrameNo>,
-    allow_replica_overwrite: bool,
     frames_sender: mpsc::Sender<Frames>,
     /// hard reset channel: send the namespace there, to reset it
     hard_reset: mpsc::Sender<Bytes>,
@@ -48,7 +47,6 @@ impl Replicator {
         db_path: PathBuf,
         channel: Channel,
         uri: tonic::transport::Uri,
-        allow_replica_overwrite: bool,
         namespace: Bytes,
         join_set: &mut JoinSet<anyhow::Result<()>>,
         hard_reset: mpsc::Sender<Bytes>,
@@ -116,7 +114,6 @@ impl Replicator {
             client,
             db_path,
             current_frame_no_notifier,
-            allow_replica_overwrite,
             meta,
             frames_sender,
             hard_reset,
@@ -152,7 +149,7 @@ impl Replicator {
 
                     let mut lock = self.meta.lock().await;
                     let meta = match *lock {
-                        Some(meta) => match meta.merge_from_hello(hello) {
+                        Some(meta) => match dbg!(meta.merge_from_hello(hello)) {
                             Ok(meta) => meta,
                             Err(e @ ReplicationError::Lagging) => {
                                 tracing::error!("Replica ahead of primary: hard-reseting replica");
@@ -163,9 +160,7 @@ impl Replicator {
 
                                 anyhow::bail!(e);
                             }
-                            Err(e @ ReplicationError::DbIncompatible)
-                                if self.allow_replica_overwrite =>
-                            {
+                            Err(e @ ReplicationError::DbIncompatible) => {
                                 tracing::error!("Primary is attempting to replicate a different database, overwriting replica.");
                                 self.hard_reset
                                     .send(self.namespace.clone())

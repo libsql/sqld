@@ -99,7 +99,6 @@ pub struct Config {
     pub heartbeat_period: Duration,
     pub soft_heap_limit_mb: Option<usize>,
     pub hard_heap_limit_mb: Option<usize>,
-    pub allow_replica_overwrite: bool,
     pub max_response_size: u64,
     pub max_total_response_size: u64,
     pub snapshot_exec: Option<String>,
@@ -140,7 +139,6 @@ impl Default for Config {
             heartbeat_period: Duration::from_secs(30),
             soft_heap_limit_mb: None,
             hard_heap_limit_mb: None,
-            allow_replica_overwrite: false,
             max_response_size: 10 * 1024 * 1024,       // 10MiB
             max_total_response_size: 32 * 1024 * 1024, // 32MiB
             snapshot_exec: None,
@@ -313,7 +311,6 @@ async fn start_replica(
         base_path: config.db_path.to_owned(),
         channel,
         uri,
-        allow_replica_overwrite: config.allow_replica_overwrite,
         extensions,
         stats: stats.clone(),
         config_store: db_config_store.clone(),
