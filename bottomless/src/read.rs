@@ -63,7 +63,7 @@ pub async fn upload_s3_multipart(
     client: &aws_sdk_s3::Client,
     key: &str,
     bucket: &str,
-    mut reader: impl AsyncRead + Unpin,
+    reader: impl AsyncRead + Send + Unpin,
 ) -> Result<()> {
     let upload_id = client
         .create_multipart_upload()
@@ -74,6 +74,46 @@ pub async fn upload_s3_multipart(
         .upload_id
         .ok_or_else(|| anyhow::anyhow!("missing upload_id"))?;
 
+    let parts = upload_s3_parts(client, upload_id.as_str(), key, bucket, reader).await;
+
+    match parts {
+        Ok(parts) => {
+            client
+                .complete_multipart_upload()
+                .upload_id(upload_id)
+                .bucket(bucket)
+                .key(key)
+                .multipart_upload(
+                    CompletedMultipartUpload::builder()
+                        .set_parts(Some(parts))
+                        .build(),
+                )
+                .send()
+                .await?;
+
+            Ok(())
+        }
+        Err(err) => {
+            client
+                .abort_multipart_upload()
+                .upload_id(upload_id)
+                .bucket(bucket)
+                .key(key)
+                .send()
+                .await?;
+
+            Err(err)
+        }
+    }
+}
+
+async fn upload_s3_parts(
+    client: &aws_sdk_s3::Client,
+    upload_id: &str,
+    key: &str,
+    bucket: &str,
+    mut reader: impl AsyncRead + Unpin,
+) -> Result<Vec<CompletedPart>> {
     let chunk_sizes = &[
         5 * 1024 * 1024,
         10 * 1024 * 1024,
@@ -186,18 +226,5 @@ pub async fn upload_s3_multipart(
         );
     }
 
-    client
-        .complete_multipart_upload()
-        .upload_id(upload_id)
-        .bucket(bucket)
-        .key(key)
-        .multipart_upload(
-            CompletedMultipartUpload::builder()
-                .set_parts(Some(parts))
-                .build(),
-        )
-        .send()
-        .await?;
-
-    Ok(())
+    Ok(parts)
 }
