@@ -10,12 +10,12 @@ use tokio::sync::mpsc;
 use tokio::task::JoinSet;
 use tonic::transport::Channel;
 
+use crate::database::Database;
 use crate::database::config::DatabaseConfigStore;
 use crate::database::dump::loader::DumpLoader;
-use crate::database::factory::{DbFactory, TrackedDb};
+use crate::database::connection::{MakeConnection, TrackedDb};
 use crate::database::libsql::{LibSqlDb, LibSqlDbFactory};
 use crate::database::write_proxy::{WriteProxyDatabase, WriteProxyDbFactory};
-use crate::database::Database;
 use crate::replication::primary::logger::{ReplicationLoggerHookCtx, REPLICATION_METHODS};
 use crate::replication::replica::Replicator;
 use crate::replication::{NamespacedSnapshotCallback, ReplicationLogger};
@@ -25,72 +25,71 @@ use crate::{
     MAX_CONCURRENT_DBS,
 };
 
-#[async_trait::async_trait]
-pub trait NamespaceFactory: Sync + Send + 'static {
-    type Database: Database;
-    type Meta: Send + Sync + 'static;
-
-    async fn create(&self, name: Bytes) -> anyhow::Result<Namespace<Self::Database, Self::Meta>>;
+/// A database that can be part of a namespace.
+pub trait NamespacedDatabase: Database {
+    /// Database specific extensions
+    type Ext: Send + Sync + 'static;
 }
 
-pub struct PrimaryNamespaceFactory {
+/// Creates a new `Namespace` for database of the `Self::Database` type. 
+#[async_trait::async_trait]
+pub trait MakeNamespace: Sync + Send + 'static {
+    type Database: NamespacedDatabase;
+
+    async fn create(&self, name: Bytes) -> anyhow::Result<Namespace<Self::Database>>;
+}
+
+/// Creates new primary `Namespace`
+pub struct PrimaryNamespaceMaker {
+    /// base config to create primary namespaces
     config: PrimaryNamespaceConfig,
 }
 
-impl PrimaryNamespaceFactory {
+impl PrimaryNamespaceMaker {
     pub fn new(config: PrimaryNamespaceConfig) -> Self {
         Self { config }
     }
 }
 
 #[async_trait::async_trait]
-impl NamespaceFactory for PrimaryNamespaceFactory {
+impl MakeNamespace for PrimaryNamespaceMaker {
     type Database = TrackedDb<LibSqlDb>;
-    type Meta = PrimaryMeta;
 
-    async fn create(&self, name: Bytes) -> anyhow::Result<Namespace<Self::Database, Self::Meta>> {
+    async fn create(&self, name: Bytes) -> anyhow::Result<Namespace<Self::Database>> {
         Namespace::new_primary(&self.config, name).await
     }
 }
 
-pub struct ReplicaNamespaceFactory {
+/// Creates new replica `Namespace`
+pub struct ReplicaNamespaceMaker {
+    /// base config to create replica namespaces
     config: ReplicaNamespaceConfig,
 }
 
-impl ReplicaNamespaceFactory {
+impl ReplicaNamespaceMaker {
     pub fn new(config: ReplicaNamespaceConfig) -> Self {
         Self { config }
     }
 }
 
 #[async_trait::async_trait]
-impl NamespaceFactory for ReplicaNamespaceFactory {
+impl MakeNamespace for ReplicaNamespaceMaker {
     type Database = TrackedDb<WriteProxyDatabase>;
-    type Meta = ();
 
-    async fn create(&self, name: Bytes) -> anyhow::Result<Namespace<Self::Database, Self::Meta>> {
+    async fn create(&self, name: Bytes) -> anyhow::Result<Namespace<Self::Database>> {
         Namespace::new_replica(&self.config, name).await
     }
 }
 
-pub struct Namespaces<F: NamespaceFactory> {
-    #[allow(clippy::type_complexity)]
-    inner: RwLock<HashMap<Bytes, Namespace<F::Database, F::Meta>>>,
+/// Stores and manage a set of namespaces.
+pub struct NamespaceStore<F: MakeNamespace> {
+    inner: RwLock<HashMap<Bytes, Namespace<F::Database>>>,
+    /// The namespace factory, to create new namespaces.
     factory: F,
 }
 
-impl<F: NamespaceFactory> Namespaces<F> {
-    pub fn new(factory: F) -> Self {
-        Self {
-            inner: Default::default(),
-            factory,
-        }
-    }
-
-    pub async fn reset(&self, namespace: Bytes) -> anyhow::Result<()>
-    where
-        Namespace<F::Database, F::Meta>: NamespaceCommon,
-    {
+impl NamespaceStore<ReplicaNamespaceMaker> {
+    pub async fn reset(&self, namespace: Bytes) -> anyhow::Result<()> {
         let mut lock = self.inner.write().await;
         if let Some(ns) = lock.remove(&namespace) {
             // FIXME: when destroying, we are waiting for all the tasks associated with the
@@ -104,10 +103,19 @@ impl<F: NamespaceFactory> Namespaces<F> {
 
         Ok(())
     }
+}
+
+impl<F: MakeNamespace> NamespaceStore<F> {
+    pub fn new(factory: F) -> Self {
+        Self {
+            inner: Default::default(),
+            factory,
+        }
+    }
 
     pub async fn with<Fun, R>(&self, namespace: Bytes, f: Fun) -> anyhow::Result<R>
     where
-        Fun: FnOnce(&Namespace<F::Database, F::Meta>) -> R,
+        Fun: FnOnce(&Namespace<F::Database>) -> R,
     {
         let lock = self.inner.upgradable_read().await;
         if let Some(ns) = lock.get(&namespace) {
@@ -122,32 +130,45 @@ impl<F: NamespaceFactory> Namespaces<F> {
     }
 }
 
-#[allow(dead_code)]
-pub struct Namespace<D, T> {
-    pub db_factory: Arc<dyn DbFactory<Db = D>>,
+/// A Namespace represents a database with the set of resources it needs to function.
+/// A namspace is identified by its name.
+pub struct Namespace<T: NamespacedDatabase> {
+    /// A connection factory for the database of type D for this namespace
+    pub factory: Arc<dyn MakeConnection<Db = T>>,
+    /// The set of tasks associated with this namespace
     tasks: JoinSet<anyhow::Result<()>>,
-    pub meta: T,
+    /// Database specific extention
+    pub ext: T::Ext,
+    /// Path to the namespace data
     path: PathBuf,
 }
 
 pub struct ReplicaNamespaceConfig {
+    /// root path of the sqld directory
     pub base_path: PathBuf,
+    /// grpc channel
     pub channel: Channel,
+    /// grpc uri
     pub uri: Uri,
+    /// Extensions to load for the database connection
     pub extensions: Vec<PathBuf>,
+    /// Stats monitor
     pub stats: Stats,
+    /// Reference to the config store
     pub config_store: Arc<DatabaseConfigStore>,
     pub max_response_size: u64,
     pub max_total_response_size: u64,
+    /// hard reset sender.
+    /// When a replica need to be wiped and recovered from scratch, its namespace
+    /// is sent to this channel
     pub hard_reset: mpsc::Sender<Bytes>,
 }
 
-#[async_trait::async_trait]
-pub trait NamespaceCommon {
-    async fn destroy(self) -> anyhow::Result<()>;
+impl NamespacedDatabase for TrackedDb<WriteProxyDatabase> {
+    type Ext = ();
 }
 
-impl Namespace<TrackedDb<WriteProxyDatabase>, ()> {
+impl Namespace<TrackedDb<WriteProxyDatabase>> {
     async fn new_replica(config: &ReplicaNamespaceConfig, name: Bytes) -> anyhow::Result<Self> {
         let name_str = std::str::from_utf8(&name)?;
         let db_path = config.base_path.join("dbs").join(name_str);
@@ -186,16 +207,13 @@ impl Namespace<TrackedDb<WriteProxyDatabase>, ()> {
         );
 
         Ok(Self {
-            db_factory: Arc::new(db_factory),
+            factory: Arc::new(db_factory),
             tasks: join_set,
-            meta: (),
+            ext: (),
             path: db_path,
         })
     }
-}
 
-#[async_trait::async_trait]
-impl NamespaceCommon for Namespace<TrackedDb<WriteProxyDatabase>, ()> {
     async fn destroy(mut self) -> anyhow::Result<()> {
         self.tasks.shutdown().await;
         tokio::fs::remove_dir_all(&self.path).await?;
@@ -218,11 +236,16 @@ pub struct PrimaryNamespaceConfig {
     pub max_total_response_size: u64,
 }
 
-pub struct PrimaryMeta {
+pub struct PrimaryExt {
+    /// Primary's replication logger.
     pub logger: Arc<ReplicationLogger>,
 }
 
-impl Namespace<TrackedDb<LibSqlDb>, PrimaryMeta> {
+impl NamespacedDatabase for TrackedDb<LibSqlDb> {
+    type Ext = PrimaryExt;
+}
+
+impl Namespace<TrackedDb<LibSqlDb>> {
     async fn new_primary(config: &PrimaryNamespaceConfig, name: Bytes) -> anyhow::Result<Self> {
         let mut join_set = JoinSet::new();
         let name_str = std::str::from_utf8(&name)?;
@@ -295,9 +318,9 @@ impl Namespace<TrackedDb<LibSqlDb>, PrimaryMeta> {
         .into();
 
         Ok(Self {
-            db_factory,
+            factory: db_factory,
             tasks: join_set,
-            meta: PrimaryMeta { logger },
+            ext: PrimaryExt { logger },
             path: db_path,
         })
     }

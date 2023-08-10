@@ -2,21 +2,22 @@ use std::sync::Arc;
 
 use axum::extract::FromRequestParts;
 use bytes::Bytes;
+use hyper::HeaderMap;
 use hyper::http::request::Parts;
 
-use crate::database::factory::DbFactory;
+use crate::database::connection::MakeConnection;
 use crate::error::Error;
-use crate::namespace::NamespaceFactory;
+use crate::namespace::MakeNamespace;
 use crate::DEFAULT_NAMESPACE_NAME;
 
 use super::AppState;
 
-pub struct DbFactoryExtractor<D>(pub Arc<dyn DbFactory<Db = D>>);
+pub struct DbFactoryExtractor<D>(pub Arc<dyn MakeConnection<Db = D>>);
 
 #[async_trait::async_trait]
 impl<F> FromRequestParts<AppState<F>> for DbFactoryExtractor<F::Database>
 where
-    F: NamespaceFactory,
+    F: MakeNamespace,
 {
     type Rejection = Error;
 
@@ -24,33 +25,32 @@ where
         parts: &mut Parts,
         state: &AppState<F>,
     ) -> Result<Self, Self::Rejection> {
-        let ns = match namespace_from_parts(parts) {
-            Ok(ns) => ns,
-            Err(_) if state.allow_default_namespace => DEFAULT_NAMESPACE_NAME.into(),
-            Err(e) => return Err(e),
-        };
-
+        let ns = namespace_from_headers(&parts.headers, state.allow_default_namespace)?;
         Ok(Self(
             state
                 .namespaces
-                .with(ns, |ns| ns.db_factory.clone())
+                .with(ns, |ns| ns.factory.clone())
                 .await?,
         ))
     }
 }
 
-fn namespace_from_parts(parts: &Parts) -> crate::Result<Bytes> {
-    let host = parts
-        .headers
+pub fn namespace_from_headers(headers: &HeaderMap, allow_default_namespace: bool) -> crate::Result<Bytes> {
+    let host = headers
         .get("host")
         .ok_or_else(|| Error::InvalidHost("missing host header".into()))?
         .as_bytes();
     let host_str = std::str::from_utf8(host)
         .map_err(|_| Error::InvalidHost("host header is not valid UTF-8".into()))?;
-    split_namespace(host_str)
+
+    match split_namespace(host_str) {
+        Ok(ns) => Ok(ns),
+        Err(_) if allow_default_namespace => Ok(DEFAULT_NAMESPACE_NAME.into()),
+        Err(e) => Err(e),
+    }
 }
 
-pub fn split_namespace(host: &str) -> crate::Result<Bytes> {
+fn split_namespace(host: &str) -> crate::Result<Bytes> {
     let (ns, _) = host.split_once('.').ok_or_else(|| {
         Error::InvalidHost("host header should be in the format <namespace>.<...>".into())
     })?;

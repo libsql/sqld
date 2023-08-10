@@ -16,7 +16,7 @@ use tokio_stream::StreamExt;
 use tonic::Status;
 
 use crate::auth::Auth;
-use crate::namespace::{Namespaces, PrimaryNamespaceFactory};
+use crate::namespace::{NamespaceStore, PrimaryNamespaceMaker};
 use crate::replication::primary::frame_stream::FrameStream;
 use crate::replication::LogReadError;
 use crate::utils::services::idle_shutdown::IdleShutdownLayer;
@@ -25,7 +25,7 @@ use self::rpc::replication_log_server::ReplicationLog;
 use self::rpc::{Frame, Frames, HelloRequest, HelloResponse, LogOffset};
 
 pub struct ReplicationLogService {
-    namespaces: Arc<Namespaces<PrimaryNamespaceFactory>>,
+    namespaces: Arc<NamespaceStore<PrimaryNamespaceMaker>>,
     replicas_with_hello: RwLock<HashSet<(SocketAddr, Bytes)>>,
     idle_shutdown_layer: Option<IdleShutdownLayer>,
     auth: Option<Arc<Auth>>,
@@ -36,7 +36,7 @@ pub const NEED_SNAPSHOT_ERROR_MSG: &str = "NEED_SNAPSHOT";
 
 impl ReplicationLogService {
     pub fn new(
-        namespaces: Arc<Namespaces<PrimaryNamespaceFactory>>,
+        namespaces: Arc<NamespaceStore<PrimaryNamespaceMaker>>,
         idle_shutdown_layer: Option<IdleShutdownLayer>,
         auth: Option<Arc<Auth>>,
     ) -> Self {
@@ -137,7 +137,7 @@ impl ReplicationLog for ReplicationLogService {
 
         let logger = match self
             .namespaces
-            .with(req.namespace, |ns| ns.meta.logger.clone())
+            .with(req.namespace, |ns| ns.ext.logger.clone())
             .await
         {
             Ok(logger) => logger,
@@ -176,7 +176,7 @@ impl ReplicationLog for ReplicationLogService {
 
         let logger = match self
             .namespaces
-            .with(req.namespace, |ns| ns.meta.logger.clone())
+            .with(req.namespace, |ns| ns.ext.logger.clone())
             .await
         {
             Ok(logger) => logger,
@@ -216,7 +216,7 @@ impl ReplicationLog for ReplicationLogService {
 
         let logger = self
             .namespaces
-            .with(req.namespace, |ns| ns.meta.logger.clone())
+            .with(req.namespace, |ns| ns.ext.logger.clone())
             .await
             .unwrap();
 
@@ -240,7 +240,7 @@ impl ReplicationLog for ReplicationLogService {
         let ns = req.namespace;
         let logger = self
             .namespaces
-            .with(ns, |ns| ns.meta.logger.clone())
+            .with(ns, |ns| ns.ext.logger.clone())
             .await
             .unwrap();
         let offset = req.next_offset;

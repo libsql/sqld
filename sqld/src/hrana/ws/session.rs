@@ -8,9 +8,9 @@ use tokio::sync::{mpsc, oneshot};
 use super::super::{batch, stmt, ProtocolError, Version};
 use super::{proto, Server};
 use crate::auth::{AuthError, Authenticated};
-use crate::database::factory::DbFactory;
+use crate::database::connection::MakeConnection;
 use crate::database::Database;
-use crate::namespace::NamespaceFactory;
+use crate::namespace::MakeNamespace;
 
 /// Session-level state of an authenticated Hrana connection.
 pub struct Session<D> {
@@ -30,7 +30,6 @@ struct StreamHandle<D> {
 /// to `f`).
 struct StreamJob<D> {
     /// The async function which performs the job.
-    #[allow(clippy::type_complexity)]
     f: Box<dyn for<'s> FnOnce(&'s mut Stream<D>) -> BoxFuture<'s, Result<proto::Response>> + Send>,
     /// The result of `f` will be sent here.
     resp_tx: oneshot::Sender<Result<proto::Response>>,
@@ -59,7 +58,7 @@ pub enum ResponseError {
     Batch(batch::BatchError),
 }
 
-pub(super) fn handle_initial_hello<F: NamespaceFactory>(
+pub(super) fn handle_initial_hello<F: MakeNamespace>(
     server: &Server<F>,
     version: Version,
     jwt: Option<String>,
@@ -77,7 +76,7 @@ pub(super) fn handle_initial_hello<F: NamespaceFactory>(
     })
 }
 
-pub(super) fn handle_repeated_hello<F: NamespaceFactory>(
+pub(super) fn handle_repeated_hello<F: MakeNamespace>(
     server: &Server<F>,
     session: &mut Session<F::Database>,
     jwt: Option<String>,
@@ -100,7 +99,7 @@ pub(super) async fn handle_request<D: Database>(
     session: &mut Session<D>,
     join_set: &mut tokio::task::JoinSet<()>,
     req: proto::Request,
-    factory: Arc<dyn DbFactory<Db = D>>,
+    factory: Arc<dyn MakeConnection<Db = D>>,
 ) -> Result<oneshot::Receiver<Result<proto::Response>>> {
     // TODO: this function has rotten: it is too long and contains too much duplicated code. It
     // should be refactored at the next opportunity, together with code in stmt.rs and batch.rs

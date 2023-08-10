@@ -3,12 +3,10 @@
 use anyhow::{anyhow, bail, Context as _, Result};
 use bytes::Bytes;
 use futures::{SinkExt as _, StreamExt as _};
-use hyper::Request;
 use tokio_tungstenite::tungstenite;
 use tungstenite::http;
 
-use crate::http::db_factory::split_namespace;
-use crate::DEFAULT_NAMESPACE_NAME;
+use crate::http::db_factory::namespace_from_headers;
 
 use super::super::Version;
 use super::Upgrade;
@@ -17,11 +15,6 @@ use super::Upgrade;
 pub enum WebSocket {
     Tcp(tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>),
     Upgraded(tokio_tungstenite::WebSocketStream<hyper::upgrade::Upgraded>),
-}
-
-fn extract_namespace<B>(req: &Request<B>) -> anyhow::Result<Bytes> {
-    let host = req.headers().get("host").context("missing host header")?;
-    Ok(split_namespace(std::str::from_utf8(host.as_bytes())?)?)
 }
 
 pub async fn handshake_tcp(
@@ -36,9 +29,8 @@ pub async fn handshake_tcp(
             .headers
             .insert("server", http::HeaderValue::from_static("sqld-hrana-tcp"));
 
-        namespace = match extract_namespace(req) {
+        namespace = match namespace_from_headers(req.headers(), allow_default_ns) {
             Ok(ns) => Some(ns),
-            Err(_) if allow_default_ns => Some(DEFAULT_NAMESPACE_NAME.into()),
             Err(e) => return Err(http::Response::from_parts(resp_parts, Some(e.to_string()))),
         };
 
@@ -63,12 +55,7 @@ pub async fn handshake_upgrade(
 ) -> Result<(WebSocket, Version, Bytes)> {
     let mut req = upgrade.request;
 
-    let ns = match extract_namespace(&req) {
-        Ok(ns) => ns,
-        Err(_) if allow_default_ns => DEFAULT_NAMESPACE_NAME.into(),
-        Err(e) => return Err(e),
-    };
-
+    let ns = namespace_from_headers(req.headers(), allow_default_ns)?;
     let ws_config = Some(get_ws_config());
     let (mut resp, stream_fut_version_res) = match hyper_tungstenite::upgrade(&mut req, ws_config) {
         Ok((mut resp, stream_fut)) => match negotiate_version(req.headers(), resp.headers_mut()) {

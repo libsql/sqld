@@ -1,3 +1,5 @@
+#![allow(clippy::type_complexity)]
+
 use std::convert::Infallible;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
@@ -13,8 +15,8 @@ use futures::never::Never;
 use hyper::Request;
 use libsql::wal_hook::TRANSPARENT_METHODS;
 use namespace::{
-    NamespaceFactory, Namespaces, PrimaryNamespaceConfig, PrimaryNamespaceFactory,
-    ReplicaNamespaceConfig, ReplicaNamespaceFactory,
+    MakeNamespace, NamespaceStore, PrimaryNamespaceConfig, PrimaryNamespaceMaker,
+    ReplicaNamespaceConfig, ReplicaNamespaceMaker,
 };
 use replication::{NamespacedSnapshotCallback, ReplicationLogger};
 use rpc::replication_log::ReplicationLogService;
@@ -148,7 +150,7 @@ impl Default for Config {
 }
 
 async fn run_service<F, S>(
-    namespaces: Arc<Namespaces<F>>,
+    namespaces: Arc<NamespaceStore<F>>,
     config: &Config,
     join_set: &mut JoinSet<anyhow::Result<()>>,
     idle_shutdown_layer: Option<IdleShutdownLayer>,
@@ -157,7 +159,7 @@ async fn run_service<F, S>(
     replication_service: Option<S>,
 ) -> anyhow::Result<()>
 where
-    F: NamespaceFactory,
+    F: MakeNamespace,
     S: Service<Request<hyper::Body>, Error = Infallible, Response = hyper::Response<BoxBody>>
         + Send
         + Clone
@@ -318,8 +320,8 @@ async fn start_replica(
         max_total_response_size: config.max_total_response_size,
         hard_reset: hard_reset_snd,
     };
-    let factory = ReplicaNamespaceFactory::new(conf);
-    let namespaces = Arc::new(Namespaces::new(factory));
+    let factory = ReplicaNamespaceMaker::new(conf);
+    let namespaces = Arc::new(NamespaceStore::new(factory));
 
     // start the hard reset monitor
     join_set.spawn({
@@ -454,8 +456,8 @@ async fn start_primary(
         load_from_dump: None,
         max_total_response_size: config.max_total_response_size,
     };
-    let factory = PrimaryNamespaceFactory::new(conf);
-    let namespaces = Arc::new(Namespaces::new(factory));
+    let factory = PrimaryNamespaceMaker::new(conf);
+    let namespaces = Arc::new(NamespaceStore::new(factory));
 
     if let Some(ref addr) = config.rpc_server_addr {
         join_set.spawn(run_rpc_server(

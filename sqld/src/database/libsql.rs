@@ -18,7 +18,7 @@ use crate::stats::Stats;
 use crate::Result;
 
 use super::config::DatabaseConfigStore;
-use super::factory::DbFactory;
+use super::connection::MakeConnection;
 use super::{
     Cond, Database, DescribeCol, DescribeParam, DescribeResponse, DescribeResult, Program, Step,
     TXN_TIMEOUT,
@@ -125,7 +125,7 @@ where
 }
 
 #[async_trait::async_trait]
-impl<W> DbFactory for LibSqlDbFactory<W>
+impl<W> MakeConnection for LibSqlDbFactory<W>
 where
     W: WalHook + 'static + Sync + Send,
     W::Context: Send + 'static,

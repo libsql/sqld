@@ -25,7 +25,7 @@ use crate::Result;
 
 use super::config::DatabaseConfigStore;
 use super::Program;
-use super::{factory::DbFactory, libsql::LibSqlDb, Database, DescribeResult};
+use super::{connection::MakeConnection, libsql::LibSqlDb, Database, DescribeResult};
 
 #[derive(Clone)]
 pub struct WriteProxyDbFactory {
@@ -70,7 +70,7 @@ impl WriteProxyDbFactory {
 }
 
 #[async_trait::async_trait]
-impl DbFactory for WriteProxyDbFactory {
+impl MakeConnection for WriteProxyDbFactory {
     type Db = WriteProxyDatabase;
     async fn create(&self) -> Result<Self::Db> {
         let db = WriteProxyDatabase::new(

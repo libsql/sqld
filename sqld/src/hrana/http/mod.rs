@@ -6,7 +6,7 @@ use serde::{de::DeserializeOwned, Serialize};
 
 use super::ProtocolError;
 use crate::auth::Authenticated;
-use crate::database::factory::DbFactory;
+use crate::database::connection::MakeConnection;
 use crate::database::Database;
 mod proto;
 mod request;
@@ -35,7 +35,7 @@ impl<D: Database> Server<D> {
         &self,
         auth: Authenticated,
         req: hyper::Request<hyper::Body>,
-        factory: Arc<dyn DbFactory<Db = D>>,
+        factory: Arc<dyn MakeConnection<Db = D>>,
     ) -> Result<hyper::Response<hyper::Body>> {
         handle_pipeline(self, factory, auth, req)
             .await
@@ -56,7 +56,7 @@ pub(crate) async fn handle_index() -> hyper::Response<hyper::Body> {
 
 async fn handle_pipeline<D: Database>(
     server: &Server<D>,
-    factory: Arc<dyn DbFactory<Db = D>>,
+    factory: Arc<dyn MakeConnection<Db = D>>,
     auth: Authenticated,
     req: hyper::Request<hyper::Body>,
 ) -> Result<hyper::Response<hyper::Body>> {

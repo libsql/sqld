@@ -37,7 +37,7 @@ use crate::database::Database;
 use crate::error::Error;
 use crate::hrana;
 use crate::http::types::HttpQuery;
-use crate::namespace::{NamespaceFactory, Namespaces};
+use crate::namespace::{MakeNamespace, NamespaceStore};
 use crate::query::{self, Query};
 use crate::query_analysis::{predict_final_state, State, Statement};
 use crate::query_result_builder::QueryResultBuilder;
@@ -130,7 +130,7 @@ async fn handle_query<D: Database>(
     Ok(res.into_response())
 }
 
-async fn show_console<F: NamespaceFactory>(
+async fn show_console<F: MakeNamespace>(
     AxumState(AppState { enable_console, .. }): AxumState<AppState<F>>,
 ) -> impl IntoResponse {
     if enable_console {
@@ -145,7 +145,7 @@ async fn handle_health() -> Response<Body> {
     Response::new(Body::empty())
 }
 
-async fn handle_upgrade<F: NamespaceFactory>(
+async fn handle_upgrade<F: MakeNamespace>(
     AxumState(AppState { upgrade_tx, .. }): AxumState<AppState<F>>,
     req: Request<Body>,
 ) -> impl IntoResponse {
@@ -176,7 +176,7 @@ async fn handle_version() -> Response<Body> {
     Response::new(Body::from(version))
 }
 
-async fn handle_hrana_v2<F: NamespaceFactory>(
+async fn handle_hrana_v2<F: MakeNamespace>(
     DbFactoryExtractor(factory): DbFactoryExtractor<F::Database>,
     AxumState(state): AxumState<AppState<F>>,
     auth: Authenticated,
@@ -195,9 +195,9 @@ async fn handle_fallback() -> impl IntoResponse {
 
 /// Router wide state that each request has access too via
 /// axum's `State` extractor.
-pub(crate) struct AppState<F: NamespaceFactory> {
+pub(crate) struct AppState<F: MakeNamespace> {
     auth: Arc<Auth>,
-    namespaces: Arc<Namespaces<F>>,
+    namespaces: Arc<NamespaceStore<F>>,
     upgrade_tx: mpsc::Sender<hrana::ws::Upgrade>,
     hrana_http_srv: Arc<hrana::http::Server<F::Database>>,
     enable_console: bool,
@@ -205,7 +205,7 @@ pub(crate) struct AppState<F: NamespaceFactory> {
     allow_default_namespace: bool,
 }
 
-impl<F: NamespaceFactory> Clone for AppState<F> {
+impl<F: MakeNamespace> Clone for AppState<F> {
     fn clone(&self) -> Self {
         Self {
             auth: self.auth.clone(),
@@ -224,7 +224,7 @@ impl<F: NamespaceFactory> Clone for AppState<F> {
 pub async fn run_http<F, S>(
     addr: SocketAddr,
     auth: Arc<Auth>,
-    namespaces: Arc<Namespaces<F>>,
+    namespaces: Arc<NamespaceStore<F>>,
     upgrade_tx: mpsc::Sender<hrana::ws::Upgrade>,
     hrana_http_srv: Arc<hrana::http::Server<F::Database>>,
     enable_console: bool,
@@ -234,7 +234,7 @@ pub async fn run_http<F, S>(
     allow_default_namespace: bool,
 ) -> anyhow::Result<()>
 where
-    F: NamespaceFactory,
+    F: MakeNamespace,
     S: Service<Request<hyper::Body>, Error = Infallible, Response = hyper::Response<BoxBody>>
         + Send
         + Clone
@@ -258,8 +258,7 @@ where
         tracing::debug!("got request: {} {}", req.method(), req.uri());
     }
 
-    let app = Router::new();
-    let app = app
+    let app = Router::new()
         .route("/", post(handle_query))
         .route("/", get(handle_upgrade))
         .route("/version", get(handle_version))
@@ -333,7 +332,7 @@ where
     }
 }
 
-impl<F: NamespaceFactory> FromRef<AppState<F>> for Arc<Auth> {
+impl<F: MakeNamespace> FromRef<AppState<F>> for Arc<Auth> {
     fn from_ref(input: &AppState<F>) -> Self {
         input.auth.clone()
     }

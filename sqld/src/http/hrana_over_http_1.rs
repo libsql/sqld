@@ -5,7 +5,7 @@ use std::future::Future;
 use std::sync::Arc;
 
 use crate::auth::Authenticated;
-use crate::database::factory::DbFactory;
+use crate::database::connection::MakeConnection;
 use crate::database::Database;
 use crate::hrana;
 
@@ -100,7 +100,7 @@ where
     RespBody: Serialize,
     F: FnOnce(FT::Db, ReqBody) -> Fut,
     Fut: Future<Output = Result<RespBody>>,
-    FT: DbFactory + ?Sized,
+    FT: MakeConnection + ?Sized,
 {
     let res: Result<_> = async move {
         let req_body = hyper::body::to_bytes(req.into_body()).await?;

@@ -16,7 +16,7 @@ use tokio::time::{Duration, Instant};
 
 use super::super::ProtocolError;
 use super::Server;
-use crate::database::factory::DbFactory;
+use crate::database::connection::MakeConnection;
 use crate::database::Database;
 
 /// Mutable state related to streams, owned by [`Server`] and protected with a mutex.
@@ -109,7 +109,7 @@ impl<D> ServerStreamState<D> {
 pub async fn acquire<'srv, D: Database>(
     server: &'srv Server<D>,
     baton: Option<&str>,
-    db_factory: Arc<dyn DbFactory<Db = D>>,
+    db_factory: Arc<dyn MakeConnection<Db = D>>,
 ) -> Result<Guard<'srv, D>> {
     let stream = match baton {
         Some(baton) => {

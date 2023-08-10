@@ -3,7 +3,7 @@ use serde::Serialize;
 
 use axum::extract::{FromRef, State as AxumState};
 
-use crate::{namespace::NamespaceFactory, stats::Stats};
+use crate::{namespace::MakeNamespace, stats::Stats};
 
 use super::AppState;
 
@@ -32,7 +32,7 @@ impl From<Stats> for StatsResponse {
     }
 }
 
-impl<F: NamespaceFactory> FromRef<AppState<F>> for Stats {
+impl<F: MakeNamespace> FromRef<AppState<F>> for Stats {
     fn from_ref(input: &AppState<F>) -> Self {
         input.stats.clone()
     }

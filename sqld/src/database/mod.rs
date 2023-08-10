@@ -9,7 +9,7 @@ use crate::Result;
 
 pub mod config;
 pub mod dump;
-pub mod factory;
+pub mod connection;
 pub mod libsql;
 pub mod write_proxy;
 

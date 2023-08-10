@@ -1,24 +1,21 @@
-use std::{
-    sync::{
-        atomic::{AtomicUsize, Ordering},
-        Arc,
-    },
-    time::Duration,
-};
+use std::time::Duration;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use futures::Future;
 use tokio::{sync::Semaphore, time::timeout};
 
 use super::{Database, DescribeResult, Program};
-use crate::{
-    auth::Authenticated, error::Error, query_analysis::State,
-    query_result_builder::QueryResultBuilder,
-};
+use crate::query_result_builder::QueryResultBuilder;
+use crate::query_analysis::State;
+use crate::error::Error;
+use crate::auth::Authenticated;
 
 #[async_trait::async_trait]
-pub trait DbFactory: Send + Sync + 'static {
+pub trait MakeConnection: Send + Sync + 'static {
     type Db: Database;
 
+    /// Create a new connection to the database of type Self::Db
     async fn create(&self) -> Result<Self::Db, Error>;
 
     fn throttled(
@@ -35,7 +32,7 @@ pub trait DbFactory: Send + Sync + 'static {
 }
 
 #[async_trait::async_trait]
-impl<F, DB, Fut> DbFactory for F
+impl<F, DB, Fut> MakeConnection for F
 where
     F: Fn() -> Fut + Send + Sync + 'static,
     Fut: Future<Output = Result<DB, Error>> + Send,
@@ -110,7 +107,7 @@ impl Drop for WaitersGuard<'_> {
 }
 
 #[async_trait::async_trait]
-impl<F: DbFactory> DbFactory for ThrottledDbFactory<F> {
+impl<F: MakeConnection> MakeConnection for ThrottledDbFactory<F> {
     type Db = TrackedDb<F::Db>;
 
     async fn create(&self) -> Result<Self::Db, Error> {

@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tower::util::option_layer;
 
-use crate::namespace::{Namespaces, PrimaryNamespaceFactory};
+use crate::namespace::{NamespaceStore, PrimaryNamespaceMaker};
 use crate::rpc::proxy::rpc::proxy_server::ProxyServer;
 use crate::rpc::proxy::ProxyService;
 pub use crate::rpc::replication_log::rpc::replication_log_server::ReplicationLogServer;
@@ -22,7 +22,7 @@ pub async fn run_rpc_server(
     key_path: Option<PathBuf>,
     ca_cert_path: Option<PathBuf>,
     idle_shutdown_layer: Option<IdleShutdownLayer>,
-    namespaces: Arc<Namespaces<PrimaryNamespaceFactory>>,
+    namespaces: Arc<NamespaceStore<PrimaryNamespaceMaker>>,
 ) -> anyhow::Result<()> {
     let proxy_service = ProxyService::new(namespaces.clone());
     let logger_service =

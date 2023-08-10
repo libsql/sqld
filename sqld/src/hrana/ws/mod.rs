@@ -1,5 +1,5 @@
 use crate::auth::Auth;
-use crate::namespace::{NamespaceFactory, Namespaces};
+use crate::namespace::{MakeNamespace, NamespaceStore};
 use crate::utils::services::idle_shutdown::IdleKicker;
 use anyhow::{Context as _, Result};
 use enclose::enclose;
@@ -14,8 +14,8 @@ mod conn;
 mod handshake;
 mod session;
 
-struct Server<F: NamespaceFactory> {
-    namespaces: Arc<Namespaces<F>>,
+struct Server<F: MakeNamespace> {
+    namespaces: Arc<NamespaceStore<F>>,
     auth: Arc<Auth>,
     idle_kicker: Option<IdleKicker>,
     next_conn_id: AtomicU64,
@@ -34,12 +34,12 @@ pub struct Upgrade {
     pub response_tx: oneshot::Sender<hyper::Response<hyper::Body>>,
 }
 
-pub async fn serve<F: NamespaceFactory>(
+pub async fn serve<F: MakeNamespace>(
     auth: Arc<Auth>,
     idle_kicker: Option<IdleKicker>,
     mut accept_rx: mpsc::Receiver<Accept>,
     mut upgrade_rx: mpsc::Receiver<Upgrade>,
-    namespaces: Arc<Namespaces<F>>,
+    namespaces: Arc<NamespaceStore<F>>,
     allow_default_namespace: bool,
 ) -> Result<()> {
     let server = Arc::new(Server {

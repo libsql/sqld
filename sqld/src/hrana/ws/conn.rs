@@ -15,15 +15,15 @@ use tokio::sync::oneshot;
 use tokio_tungstenite::tungstenite;
 use tungstenite::protocol::frame::coding::CloseCode;
 
-use crate::database::factory::DbFactory;
-use crate::namespace::NamespaceFactory;
+use crate::database::connection::MakeConnection;
+use crate::namespace::MakeNamespace;
 
 use super::super::{ProtocolError, Version};
 use super::handshake::WebSocket;
 use super::{handshake, proto, session, Server, Upgrade};
 
 /// State of a Hrana connection.
-struct Conn<F: NamespaceFactory> {
+struct Conn<F: MakeNamespace> {
     conn_id: u64,
     server: Arc<Server<F>>,
     ws: WebSocket,
@@ -36,7 +36,7 @@ struct Conn<F: NamespaceFactory> {
     join_set: tokio::task::JoinSet<()>,
     /// Future responses to requests that we have received but are evaluating asynchronously.
     responses: FuturesUnordered<ResponseFuture>,
-    factory: Arc<dyn DbFactory<Db = F::Database>>,
+    factory: Arc<dyn MakeConnection<Db = F::Database>>,
 }
 
 /// A `Future` that stores a handle to a future response to request which is being evaluated
@@ -48,7 +48,7 @@ struct ResponseFuture {
     response_rx: futures::future::Fuse<oneshot::Receiver<Result<proto::Response>>>,
 }
 
-pub(super) async fn handle_tcp<F: NamespaceFactory>(
+pub(super) async fn handle_tcp<F: MakeNamespace>(
     server: Arc<Server<F>>,
     socket: tokio::net::TcpStream,
     conn_id: u64,
@@ -59,7 +59,7 @@ pub(super) async fn handle_tcp<F: NamespaceFactory>(
     handle_ws(server, ws, version, conn_id, ns).await
 }
 
-pub(super) async fn handle_upgrade<F: NamespaceFactory>(
+pub(super) async fn handle_upgrade<F: MakeNamespace>(
     server: Arc<Server<F>>,
     upgrade: Upgrade,
     conn_id: u64,
@@ -70,7 +70,7 @@ pub(super) async fn handle_upgrade<F: NamespaceFactory>(
     handle_ws(server, ws, version, conn_id, ns).await
 }
 
-async fn handle_ws<F: NamespaceFactory>(
+async fn handle_ws<F: MakeNamespace>(
     server: Arc<Server<F>>,
     ws: WebSocket,
     version: Version,
@@ -79,7 +79,7 @@ async fn handle_ws<F: NamespaceFactory>(
 ) -> Result<()> {
     let factory = server
         .namespaces
-        .with(namespace, |ns| ns.db_factory.clone())
+        .with(namespace, |ns| ns.factory.clone())
         .await?;
     let mut conn = Conn {
         conn_id,
@@ -145,7 +145,7 @@ async fn handle_ws<F: NamespaceFactory>(
     Ok(())
 }
 
-async fn handle_msg<F: NamespaceFactory>(
+async fn handle_msg<F: MakeNamespace>(
     conn: &mut Conn<F>,
     client_msg: tungstenite::Message,
 ) -> Result<bool> {
@@ -181,7 +181,7 @@ async fn handle_msg<F: NamespaceFactory>(
     }
 }
 
-async fn handle_hello_msg<F: NamespaceFactory>(
+async fn handle_hello_msg<F: MakeNamespace>(
     conn: &mut Conn<F>,
     jwt: Option<String>,
 ) -> Result<bool> {
@@ -206,7 +206,7 @@ async fn handle_hello_msg<F: NamespaceFactory>(
     }
 }
 
-async fn handle_request_msg<F: NamespaceFactory>(
+async fn handle_request_msg<F: MakeNamespace>(
     conn: &mut Conn<F>,
     request_id: i32,
     request: proto::Request,
@@ -270,7 +270,7 @@ fn downcast_error(err: anyhow::Error) -> Result<proto::Error> {
     }
 }
 
-async fn send_msg<F: NamespaceFactory>(conn: &mut Conn<F>, msg: &proto::ServerMsg) -> Result<()> {
+async fn send_msg<F: MakeNamespace>(conn: &mut Conn<F>, msg: &proto::ServerMsg) -> Result<()> {
     let msg = serde_json::to_string(&msg).context("Could not serialize response message")?;
     let msg = tungstenite::Message::Text(msg);
     conn.ws
@@ -279,7 +279,7 @@ async fn send_msg<F: NamespaceFactory>(conn: &mut Conn<F>, msg: &proto::ServerMs
         .context("Could not send response to the WebSocket")
 }
 
-async fn close<F: NamespaceFactory>(conn: &mut Conn<F>, code: CloseCode, reason: String) {
+async fn close<F: MakeNamespace>(conn: &mut Conn<F>, code: CloseCode, reason: String) {
     if conn.ws_closed {
         return;
     }

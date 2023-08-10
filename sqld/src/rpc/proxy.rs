@@ -7,7 +7,7 @@ use uuid::Uuid;
 
 use crate::auth::{Authenticated, Authorized};
 use crate::database::{Database, Program};
-use crate::namespace::{NamespaceFactory, Namespaces, PrimaryNamespaceFactory};
+use crate::namespace::{MakeNamespace, NamespaceStore, PrimaryNamespaceMaker};
 use crate::query_result_builder::{
     Column, QueryBuilderConfig, QueryResultBuilder, QueryResultBuilderError,
 };
@@ -250,12 +250,12 @@ pub mod rpc {
 }
 
 pub struct ProxyService {
-    clients: RwLock<HashMap<Uuid, Arc<<PrimaryNamespaceFactory as NamespaceFactory>::Database>>>,
-    namespaces: Arc<Namespaces<PrimaryNamespaceFactory>>,
+    clients: RwLock<HashMap<Uuid, Arc<<PrimaryNamespaceMaker as MakeNamespace>::Database>>>,
+    namespaces: Arc<NamespaceStore<PrimaryNamespaceMaker>>,
 }
 
 impl ProxyService {
-    pub fn new(namespaces: Arc<Namespaces<PrimaryNamespaceFactory>>) -> Self {
+    pub fn new(namespaces: Arc<NamespaceStore<PrimaryNamespaceMaker>>) -> Self {
         Self {
             clients: Default::default(),
             namespaces,
@@ -443,8 +443,8 @@ impl Proxy for ProxyService {
         let (factory, new_frame_notifier) = self
             .namespaces
             .with(req.namespace.clone(), |ns| {
-                let factory = ns.db_factory.clone();
-                let notifier = ns.meta.logger.new_frame_notifier.subscribe();
+                let factory = ns.factory.clone();
+                let notifier = ns.ext.logger.new_frame_notifier.subscribe();
                 (factory, notifier)
             })
             .await
