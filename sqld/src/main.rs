@@ -9,7 +9,7 @@ use anyhow::{bail, Context as _, Result};
 use bytesize::ByteSize;
 use clap::Parser;
 use mimalloc::MiMalloc;
-use sqld::{database::dump::exporter::export_dump, version::Version, Config};
+use sqld::{connection::dump::exporter::export_dump, version::Version, Config};
 use tracing_subscriber::filter::LevelFilter;
 use tracing_subscriber::prelude::__tracing_subscriber_SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;

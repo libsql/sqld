@@ -10,12 +10,12 @@ use tokio::sync::mpsc;
 use tokio::task::JoinSet;
 use tonic::transport::Channel;
 
-use crate::database::Database;
-use crate::database::config::DatabaseConfigStore;
-use crate::database::dump::loader::DumpLoader;
-use crate::database::connection::{MakeConnection, TrackedDb};
-use crate::database::libsql::{LibSqlDb, LibSqlDbFactory};
-use crate::database::write_proxy::{WriteProxyDatabase, WriteProxyDbFactory};
+use crate::connection::config::DatabaseConfigStore;
+use crate::connection::dump::loader::DumpLoader;
+use crate::connection::libsql::LibSqlDbFactory;
+use crate::connection::write_proxy::MakeWriteProxyConnection;
+use crate::connection::MakeConnection;
+use crate::database::{Database, PrimaryDatabase, ReplicaDatabase};
 use crate::replication::primary::logger::{ReplicationLoggerHookCtx, REPLICATION_METHODS};
 use crate::replication::replica::Replicator;
 use crate::replication::{NamespacedSnapshotCallback, ReplicationLogger};
@@ -25,16 +25,10 @@ use crate::{
     MAX_CONCURRENT_DBS,
 };
 
-/// A database that can be part of a namespace.
-pub trait NamespacedDatabase: Database {
-    /// Database specific extensions
-    type Ext: Send + Sync + 'static;
-}
-
-/// Creates a new `Namespace` for database of the `Self::Database` type. 
+/// Creates a new `Namespace` for database of the `Self::Database` type.
 #[async_trait::async_trait]
 pub trait MakeNamespace: Sync + Send + 'static {
-    type Database: NamespacedDatabase;
+    type Database: Database;
 
     async fn create(&self, name: Bytes) -> anyhow::Result<Namespace<Self::Database>>;
 }
@@ -53,7 +47,7 @@ impl PrimaryNamespaceMaker {
 
 #[async_trait::async_trait]
 impl MakeNamespace for PrimaryNamespaceMaker {
-    type Database = TrackedDb<LibSqlDb>;
+    type Database = PrimaryDatabase;
 
     async fn create(&self, name: Bytes) -> anyhow::Result<Namespace<Self::Database>> {
         Namespace::new_primary(&self.config, name).await
@@ -74,7 +68,7 @@ impl ReplicaNamespaceMaker {
 
 #[async_trait::async_trait]
 impl MakeNamespace for ReplicaNamespaceMaker {
-    type Database = TrackedDb<WriteProxyDatabase>;
+    type Database = ReplicaDatabase;
 
     async fn create(&self, name: Bytes) -> anyhow::Result<Namespace<Self::Database>> {
         Namespace::new_replica(&self.config, name).await
@@ -130,15 +124,11 @@ impl<F: MakeNamespace> NamespaceStore<F> {
     }
 }
 
-/// A Namespace represents a database with the set of resources it needs to function.
-/// A namspace is identified by its name.
-pub struct Namespace<T: NamespacedDatabase> {
-    /// A connection factory for the database of type D for this namespace
-    pub factory: Arc<dyn MakeConnection<Db = T>>,
+/// A namspace isolates the resources pertaining to a database of type T
+pub struct Namespace<T: Database> {
+    pub db: T,
     /// The set of tasks associated with this namespace
     tasks: JoinSet<anyhow::Result<()>>,
-    /// Database specific extention
-    pub ext: T::Ext,
     /// Path to the namespace data
     path: PathBuf,
 }
@@ -164,11 +154,7 @@ pub struct ReplicaNamespaceConfig {
     pub hard_reset: mpsc::Sender<Bytes>,
 }
 
-impl NamespacedDatabase for TrackedDb<WriteProxyDatabase> {
-    type Ext = ();
-}
-
-impl Namespace<TrackedDb<WriteProxyDatabase>> {
+impl Namespace<ReplicaDatabase> {
     async fn new_replica(config: &ReplicaNamespaceConfig, name: Bytes) -> anyhow::Result<Self> {
         let name_str = std::str::from_utf8(&name)?;
         let db_path = config.base_path.join("dbs").join(name_str);
@@ -188,7 +174,7 @@ impl Namespace<TrackedDb<WriteProxyDatabase>> {
 
         join_set.spawn(replicator.run());
 
-        let db_factory = WriteProxyDbFactory::new(
+        let connection_maker = MakeWriteProxyConnection::new(
             db_path.clone(),
             config.extensions.clone(),
             config.channel.clone(),
@@ -207,9 +193,10 @@ impl Namespace<TrackedDb<WriteProxyDatabase>> {
         );
 
         Ok(Self {
-            factory: Arc::new(db_factory),
             tasks: join_set,
-            ext: (),
+            db: ReplicaDatabase {
+                connection_maker: Arc::new(connection_maker),
+            },
             path: db_path,
         })
     }
@@ -236,16 +223,7 @@ pub struct PrimaryNamespaceConfig {
     pub max_total_response_size: u64,
 }
 
-pub struct PrimaryExt {
-    /// Primary's replication logger.
-    pub logger: Arc<ReplicationLogger>,
-}
-
-impl NamespacedDatabase for TrackedDb<LibSqlDb> {
-    type Ext = PrimaryExt;
-}
-
-impl Namespace<TrackedDb<LibSqlDb>> {
+impl Namespace<PrimaryDatabase> {
     async fn new_primary(config: &PrimaryNamespaceConfig, name: Bytes) -> anyhow::Result<Self> {
         let mut join_set = JoinSet::new();
         let name_str = std::str::from_utf8(&name)?;
@@ -295,7 +273,7 @@ impl Namespace<TrackedDb<LibSqlDb>> {
             dump_loader.load_dump(path.into()).await?;
         }
 
-        let db_factory: Arc<_> = LibSqlDbFactory::new(
+        let connection_maker: Arc<_> = LibSqlDbFactory::new(
             db_path.clone(),
             &REPLICATION_METHODS,
             {
@@ -318,9 +296,11 @@ impl Namespace<TrackedDb<LibSqlDb>> {
         .into();
 
         Ok(Self {
-            factory: db_factory,
             tasks: join_set,
-            ext: PrimaryExt { logger },
+            db: PrimaryDatabase {
+                logger,
+                connection_maker,
+            },
             path: db_path,
         })
     }

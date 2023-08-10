@@ -6,8 +6,7 @@ use serde::{de::DeserializeOwned, Serialize};
 
 use super::ProtocolError;
 use crate::auth::Authenticated;
-use crate::database::connection::MakeConnection;
-use crate::database::Database;
+use crate::connection::{Connection, MakeConnection};
 mod proto;
 mod request;
 mod stream;
@@ -18,7 +17,7 @@ pub struct Server<D> {
     stream_state: Mutex<stream::ServerStreamState<D>>,
 }
 
-impl<D: Database> Server<D> {
+impl<C: Connection> Server<C> {
     pub fn new(self_url: Option<String>) -> Self {
         Self {
             self_url,
@@ -35,9 +34,9 @@ impl<D: Database> Server<D> {
         &self,
         auth: Authenticated,
         req: hyper::Request<hyper::Body>,
-        factory: Arc<dyn MakeConnection<Db = D>>,
+        connection_maker: Arc<dyn MakeConnection<Connection = C>>,
     ) -> Result<hyper::Response<hyper::Body>> {
-        handle_pipeline(self, factory, auth, req)
+        handle_pipeline(self, connection_maker, auth, req)
             .await
             .or_else(|err| {
                 err.downcast::<stream::StreamError>()
@@ -54,14 +53,15 @@ pub(crate) async fn handle_index() -> hyper::Response<hyper::Body> {
     )
 }
 
-async fn handle_pipeline<D: Database>(
+async fn handle_pipeline<D: Connection>(
     server: &Server<D>,
-    factory: Arc<dyn MakeConnection<Db = D>>,
+    connection_maker: Arc<dyn MakeConnection<Connection = D>>,
     auth: Authenticated,
     req: hyper::Request<hyper::Body>,
 ) -> Result<hyper::Response<hyper::Body>> {
     let req_body: proto::PipelineRequestBody = read_request_json(req).await?;
-    let mut stream_guard = stream::acquire(server, req_body.baton.as_deref(), factory).await?;
+    let mut stream_guard =
+        stream::acquire(server, req_body.baton.as_deref(), connection_maker).await?;
 
     let mut results = Vec::with_capacity(req_body.requests.len());
     for request in req_body.requests.into_iter() {

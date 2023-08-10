@@ -137,7 +137,7 @@ impl ReplicationLog for ReplicationLogService {
 
         let logger = match self
             .namespaces
-            .with(req.namespace, |ns| ns.ext.logger.clone())
+            .with(req.namespace, |ns| ns.db.logger.clone())
             .await
         {
             Ok(logger) => logger,
@@ -176,7 +176,7 @@ impl ReplicationLog for ReplicationLogService {
 
         let logger = match self
             .namespaces
-            .with(req.namespace, |ns| ns.ext.logger.clone())
+            .with(req.namespace, |ns| ns.db.logger.clone())
             .await
         {
             Ok(logger) => logger,
@@ -216,7 +216,7 @@ impl ReplicationLog for ReplicationLogService {
 
         let logger = self
             .namespaces
-            .with(req.namespace, |ns| ns.ext.logger.clone())
+            .with(req.namespace, |ns| ns.db.logger.clone())
             .await
             .unwrap();
 
@@ -240,7 +240,7 @@ impl ReplicationLog for ReplicationLogService {
         let ns = req.namespace;
         let logger = self
             .namespaces
-            .with(ns, |ns| ns.ext.logger.clone())
+            .with(ns, |ns| ns.db.logger.clone())
             .await
             .unwrap();
         let offset = req.next_offset;

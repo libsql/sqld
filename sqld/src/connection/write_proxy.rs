@@ -24,11 +24,13 @@ use crate::stats::Stats;
 use crate::Result;
 
 use super::config::DatabaseConfigStore;
-use super::Program;
-use super::{connection::MakeConnection, libsql::LibSqlDb, Database, DescribeResult};
+use super::libsql::LibSqlConnection;
+use super::program::DescribeResult;
+use super::Connection;
+use super::{MakeConnection, Program};
 
 #[derive(Clone)]
-pub struct WriteProxyDbFactory {
+pub struct MakeWriteProxyConnection {
     client: ProxyClient<Channel>,
     db_path: PathBuf,
     extensions: Vec<PathBuf>,
@@ -40,7 +42,7 @@ pub struct WriteProxyDbFactory {
     namespace: Bytes,
 }
 
-impl WriteProxyDbFactory {
+impl MakeWriteProxyConnection {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         db_path: PathBuf,
@@ -70,10 +72,10 @@ impl WriteProxyDbFactory {
 }
 
 #[async_trait::async_trait]
-impl MakeConnection for WriteProxyDbFactory {
-    type Db = WriteProxyDatabase;
-    async fn create(&self) -> Result<Self::Db> {
-        let db = WriteProxyDatabase::new(
+impl MakeConnection for MakeWriteProxyConnection {
+    type Connection = WriteProxyConnection;
+    async fn create(&self) -> Result<Self::Connection> {
+        let db = WriteProxyConnection::new(
             self.client.clone(),
             self.db_path.clone(),
             self.extensions.clone(),
@@ -91,8 +93,8 @@ impl MakeConnection for WriteProxyDbFactory {
     }
 }
 
-pub struct WriteProxyDatabase {
-    read_db: LibSqlDb,
+pub struct WriteProxyConnection {
+    read_db: LibSqlConnection,
     write_proxy: ProxyClient<Channel>,
     state: Mutex<State>,
     client_id: Uuid,
@@ -153,7 +155,7 @@ fn execute_results_to_builder<B: QueryResultBuilder>(
     Ok(builder)
 }
 
-impl WriteProxyDatabase {
+impl WriteProxyConnection {
     #[allow(clippy::too_many_arguments)]
     async fn new(
         write_proxy: ProxyClient<Channel>,
@@ -165,7 +167,7 @@ impl WriteProxyDatabase {
         builder_config: QueryBuilderConfig,
         namespace: Bytes,
     ) -> Result<Self> {
-        let read_db = LibSqlDb::new(
+        let read_db = LibSqlConnection::new(
             path,
             extensions,
             &TRANSPARENT_METHODS,
@@ -259,7 +261,7 @@ impl WriteProxyDatabase {
 }
 
 #[async_trait::async_trait]
-impl Database for WriteProxyDatabase {
+impl Connection for WriteProxyConnection {
     async fn execute_program<B: QueryResultBuilder>(
         &self,
         pgm: Program,
@@ -293,7 +295,7 @@ impl Database for WriteProxyDatabase {
     }
 }
 
-impl Drop for WriteProxyDatabase {
+impl Drop for WriteProxyConnection {
     fn drop(&mut self) {
         // best effort attempt to disconnect
         let mut remote = self.write_proxy.clone();

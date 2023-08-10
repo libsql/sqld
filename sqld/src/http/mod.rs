@@ -33,6 +33,7 @@ use tower_http::{compression::CompressionLayer, cors};
 use tracing::{Level, Span};
 
 use crate::auth::{Auth, Authenticated};
+use crate::connection::Connection;
 use crate::database::Database;
 use crate::error::Error;
 use crate::hrana;
@@ -45,7 +46,7 @@ use crate::stats::Stats;
 use crate::utils::services::idle_shutdown::IdleShutdownLayer;
 use crate::version;
 
-use self::db_factory::DbFactoryExtractor;
+use self::db_factory::MakeConnectionExtractor;
 use self::result_builder::JsonHttpPayloadBuilder;
 use self::types::QueryObject;
 
@@ -111,14 +112,14 @@ fn parse_queries(queries: Vec<QueryObject>) -> crate::Result<Vec<Query>> {
     Ok(out)
 }
 
-async fn handle_query<D: Database>(
+async fn handle_query<D: Connection>(
     auth: Authenticated,
-    DbFactoryExtractor(factory): DbFactoryExtractor<D>,
+    MakeConnectionExtractor(connection_maker): MakeConnectionExtractor<D>,
     Json(query): Json<HttpQuery>,
 ) -> Result<axum::response::Response, Error> {
     let batch = parse_queries(query.statements)?;
 
-    let db = factory.create().await?;
+    let db = connection_maker.create().await?;
 
     let builder = JsonHttpPayloadBuilder::new();
     let (builder, _) = db.execute_batch_or_rollback(batch, auth, builder).await?;
@@ -177,14 +178,16 @@ async fn handle_version() -> Response<Body> {
 }
 
 async fn handle_hrana_v2<F: MakeNamespace>(
-    DbFactoryExtractor(factory): DbFactoryExtractor<F::Database>,
+    MakeConnectionExtractor(connection_maker): MakeConnectionExtractor<
+        <F::Database as Database>::Connection,
+    >,
     AxumState(state): AxumState<AppState<F>>,
     auth: Authenticated,
     req: Request<Body>,
 ) -> Result<Response<Body>, Error> {
     let server = state.hrana_http_srv;
 
-    let res = server.handle_pipeline(auth, req, factory).await?;
+    let res = server.handle_pipeline(auth, req, connection_maker).await?;
 
     Ok(res)
 }
@@ -199,7 +202,7 @@ pub(crate) struct AppState<F: MakeNamespace> {
     auth: Arc<Auth>,
     namespaces: Arc<NamespaceStore<F>>,
     upgrade_tx: mpsc::Sender<hrana::ws::Upgrade>,
-    hrana_http_srv: Arc<hrana::http::Server<F::Database>>,
+    hrana_http_srv: Arc<hrana::http::Server<<F::Database as Database>::Connection>>,
     enable_console: bool,
     stats: Stats,
     allow_default_namespace: bool,
@@ -226,7 +229,7 @@ pub async fn run_http<F, S>(
     auth: Arc<Auth>,
     namespaces: Arc<NamespaceStore<F>>,
     upgrade_tx: mpsc::Sender<hrana::ws::Upgrade>,
-    hrana_http_srv: Arc<hrana::http::Server<F::Database>>,
+    hrana_http_srv: Arc<hrana::http::Server<<F::Database as Database>::Connection>>,
     enable_console: bool,
     idle_shutdown_layer: Option<IdleShutdownLayer>,
     stats: Stats,

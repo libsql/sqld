@@ -5,11 +5,10 @@ use std::future::Future;
 use std::sync::Arc;
 
 use crate::auth::Authenticated;
-use crate::database::connection::MakeConnection;
-use crate::database::Database;
+use crate::connection::{Connection, MakeConnection};
 use crate::hrana;
 
-use super::db_factory::DbFactoryExtractor;
+use super::db_factory::MakeConnectionExtractor;
 
 #[derive(thiserror::Error, Debug)]
 enum ResponseError {
@@ -25,8 +24,8 @@ pub async fn handle_index() -> hyper::Response<hyper::Body> {
         .unwrap()
 }
 
-pub(crate) async fn handle_execute<D: Database>(
-    DbFactoryExtractor(factory): DbFactoryExtractor<D>,
+pub(crate) async fn handle_execute<D: Connection>(
+    MakeConnectionExtractor(factory): MakeConnectionExtractor<D>,
     auth: Authenticated,
     req: hyper::Request<hyper::Body>,
 ) -> crate::Result<hyper::Response<hyper::Body>> {
@@ -58,8 +57,8 @@ pub(crate) async fn handle_execute<D: Database>(
     Ok(res)
 }
 
-pub(crate) async fn handle_batch<D: Database>(
-    DbFactoryExtractor(factory): DbFactoryExtractor<D>,
+pub(crate) async fn handle_batch<D: Connection>(
+    MakeConnectionExtractor(factory): MakeConnectionExtractor<D>,
     auth: Authenticated,
     req: hyper::Request<hyper::Body>,
 ) -> crate::Result<hyper::Response<hyper::Body>> {
@@ -98,7 +97,7 @@ async fn handle_request<ReqBody, RespBody, F, Fut, FT>(
 where
     ReqBody: DeserializeOwned,
     RespBody: Serialize,
-    F: FnOnce(FT::Db, ReqBody) -> Fut,
+    F: FnOnce(FT::Connection, ReqBody) -> Fut,
     Fut: Future<Output = Result<RespBody>>,
     FT: MakeConnection + ?Sized,
 {

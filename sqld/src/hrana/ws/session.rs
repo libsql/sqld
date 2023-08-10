@@ -8,7 +8,7 @@ use tokio::sync::{mpsc, oneshot};
 use super::super::{batch, stmt, ProtocolError, Version};
 use super::{proto, Server};
 use crate::auth::{AuthError, Authenticated};
-use crate::database::connection::MakeConnection;
+use crate::connection::{Connection, MakeConnection};
 use crate::database::Database;
 use crate::namespace::MakeNamespace;
 
@@ -62,7 +62,7 @@ pub(super) fn handle_initial_hello<F: MakeNamespace>(
     server: &Server<F>,
     version: Version,
     jwt: Option<String>,
-) -> Result<Session<F::Database>> {
+) -> Result<Session<<F::Database as Database>::Connection>> {
     let authenticated = server
         .auth
         .authenticate_jwt(jwt.as_deref())
@@ -78,7 +78,7 @@ pub(super) fn handle_initial_hello<F: MakeNamespace>(
 
 pub(super) fn handle_repeated_hello<F: MakeNamespace>(
     server: &Server<F>,
-    session: &mut Session<F::Database>,
+    session: &mut Session<<F::Database as Database>::Connection>,
     jwt: Option<String>,
 ) -> Result<()> {
     if session.version < Version::Hrana2 {
@@ -95,11 +95,11 @@ pub(super) fn handle_repeated_hello<F: MakeNamespace>(
     Ok(())
 }
 
-pub(super) async fn handle_request<D: Database>(
+pub(super) async fn handle_request<D: Connection>(
     session: &mut Session<D>,
     join_set: &mut tokio::task::JoinSet<()>,
     req: proto::Request,
-    factory: Arc<dyn MakeConnection<Db = D>>,
+    connection_maker: Arc<dyn MakeConnection<Connection = D>>,
 ) -> Result<oneshot::Receiver<Result<proto::Response>>> {
     // TODO: this function has rotten: it is too long and contains too much duplicated code. It
     // should be refactored at the next opportunity, together with code in stmt.rs and batch.rs
@@ -164,7 +164,7 @@ pub(super) async fn handle_request<D: Database>(
             let mut stream_hnd = stream_spawn(join_set, Stream { db: None });
 
             stream_respond!(&mut stream_hnd, async move |stream| {
-                let db = factory
+                let db = connection_maker
                     .create()
                     .await
                     .context("Could not create a database connection")?;
@@ -286,7 +286,7 @@ pub(super) async fn handle_request<D: Database>(
 
 const MAX_SQL_COUNT: usize = 150;
 
-fn stream_spawn<D: Database>(
+fn stream_spawn<D: Connection>(
     join_set: &mut tokio::task::JoinSet<()>,
     stream: Stream<D>,
 ) -> StreamHandle<D> {

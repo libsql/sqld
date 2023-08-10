@@ -2,20 +2,22 @@ use std::sync::Arc;
 
 use axum::extract::FromRequestParts;
 use bytes::Bytes;
-use hyper::HeaderMap;
 use hyper::http::request::Parts;
+use hyper::HeaderMap;
 
-use crate::database::connection::MakeConnection;
+use crate::connection::MakeConnection;
+use crate::database::Database;
 use crate::error::Error;
 use crate::namespace::MakeNamespace;
 use crate::DEFAULT_NAMESPACE_NAME;
 
 use super::AppState;
 
-pub struct DbFactoryExtractor<D>(pub Arc<dyn MakeConnection<Db = D>>);
+pub struct MakeConnectionExtractor<D>(pub Arc<dyn MakeConnection<Connection = D>>);
 
 #[async_trait::async_trait]
-impl<F> FromRequestParts<AppState<F>> for DbFactoryExtractor<F::Database>
+impl<F> FromRequestParts<AppState<F>>
+    for MakeConnectionExtractor<<F::Database as Database>::Connection>
 where
     F: MakeNamespace,
 {
@@ -29,13 +31,16 @@ where
         Ok(Self(
             state
                 .namespaces
-                .with(ns, |ns| ns.factory.clone())
+                .with(ns, |ns| ns.db.connection_maker())
                 .await?,
         ))
     }
 }
 
-pub fn namespace_from_headers(headers: &HeaderMap, allow_default_namespace: bool) -> crate::Result<Bytes> {
+pub fn namespace_from_headers(
+    headers: &HeaderMap,
+    allow_default_namespace: bool,
+) -> crate::Result<Bytes> {
     let host = headers
         .get("host")
         .ok_or_else(|| Error::InvalidHost("missing host header".into()))?

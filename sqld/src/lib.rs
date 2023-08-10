@@ -28,8 +28,8 @@ use tonic::transport::Channel;
 use tower::Service;
 use utils::services::idle_shutdown::IdleShutdownLayer;
 
-use self::database::config::DatabaseConfigStore;
-use self::database::libsql::open_db;
+use self::connection::config::DatabaseConfigStore;
+use self::connection::libsql::open_db;
 use crate::auth::Auth;
 use crate::error::Error;
 use crate::stats::Stats;
@@ -40,7 +40,8 @@ pub use sqld_libsql_bindings as libsql;
 
 mod admin_api;
 mod auth;
-pub mod database;
+pub mod connection;
+mod database;
 mod error;
 mod heartbeat;
 mod hrana;

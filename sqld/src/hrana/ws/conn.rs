@@ -15,7 +15,8 @@ use tokio::sync::oneshot;
 use tokio_tungstenite::tungstenite;
 use tungstenite::protocol::frame::coding::CloseCode;
 
-use crate::database::connection::MakeConnection;
+use crate::connection::MakeConnection;
+use crate::database::Database;
 use crate::namespace::MakeNamespace;
 
 use super::super::{ProtocolError, Version};
@@ -31,12 +32,12 @@ struct Conn<F: MakeNamespace> {
     /// The version of the protocol that has been negotiated in the WebSocket handshake.
     version: Version,
     /// After a successful authentication, this contains the session-level state of the connection.
-    session: Option<session::Session<F::Database>>,
+    session: Option<session::Session<<F::Database as Database>::Connection>>,
     /// Join set for all tasks that were spawned to handle the connection.
     join_set: tokio::task::JoinSet<()>,
     /// Future responses to requests that we have received but are evaluating asynchronously.
     responses: FuturesUnordered<ResponseFuture>,
-    factory: Arc<dyn MakeConnection<Db = F::Database>>,
+    connection_maker: Arc<dyn MakeConnection<Connection = <F::Database as Database>::Connection>>,
 }
 
 /// A `Future` that stores a handle to a future response to request which is being evaluated
@@ -77,9 +78,9 @@ async fn handle_ws<F: MakeNamespace>(
     conn_id: u64,
     namespace: Bytes,
 ) -> Result<()> {
-    let factory = server
+    let connection_maker = server
         .namespaces
-        .with(namespace, |ns| ns.factory.clone())
+        .with(namespace, |ns| ns.db.connection_maker())
         .await?;
     let mut conn = Conn {
         conn_id,
@@ -90,7 +91,7 @@ async fn handle_ws<F: MakeNamespace>(
         session: None,
         join_set: tokio::task::JoinSet::new(),
         responses: FuturesUnordered::new(),
-        factory,
+        connection_maker,
     };
 
     loop {
@@ -215,16 +216,20 @@ async fn handle_request_msg<F: MakeNamespace>(
         bail!(ProtocolError::RequestBeforeHello)
     };
 
-    let response_rx =
-        session::handle_request(session, &mut conn.join_set, request, conn.factory.clone())
-            .await
-            .unwrap_or_else(|err| {
-                // we got an error immediately, but let's treat it as a special case of the general
-                // flow
-                let (tx, rx) = oneshot::channel();
-                tx.send(Err(err)).unwrap();
-                rx
-            });
+    let response_rx = session::handle_request(
+        session,
+        &mut conn.join_set,
+        request,
+        conn.connection_maker.clone(),
+    )
+    .await
+    .unwrap_or_else(|err| {
+        // we got an error immediately, but let's treat it as a special case of the general
+        // flow
+        let (tx, rx) = oneshot::channel();
+        tx.send(Err(err)).unwrap();
+        rx
+    });
 
     conn.responses.push(ResponseFuture {
         request_id,
