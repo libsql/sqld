@@ -7,7 +7,7 @@ use crate::connection::Connection;
 
 /// An error from executing a [`proto::StreamRequest`]
 #[derive(thiserror::Error, Debug)]
-pub enum StreamResponseError {
+enum StreamResponseError {
     #[error("The server already stores {count} SQL texts, it cannot store more")]
     SqlTooMany { count: usize },
     #[error(transparent)]

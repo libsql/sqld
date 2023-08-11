@@ -1,10 +1,13 @@
-use std::sync::Arc;
-
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result};
+use bytes::Bytes;
+use futures::stream::Stream;
 use parking_lot::Mutex;
 use serde::{de::DeserializeOwned, Serialize};
+use std::pin::Pin;
+use std::sync::Arc;
+use std::task;
 
-use super::{Encoding, ProtocolError, Version};
+use super::{batch, cursor, Encoding, ProtocolError, Version};
 use crate::auth::Authenticated;
 use crate::connection::{Connection, MakeConnection};
 mod proto;
@@ -84,7 +87,7 @@ async fn handle_pipeline<D: Database>(
     version: Version,
     encoding: Encoding,
 ) -> Result<hyper::Response<hyper::Body>> {
-    let req_body: proto::PipelineRequestBody = read_decode_request(req, encoding).await?;
+    let req_body: proto::PipelineReqBody = read_decode_request(req, encoding).await?;
     let mut stream_guard = stream::acquire(server, req_body.baton.as_deref()).await?;
 
     let mut results = Vec::with_capacity(req_body.requests.len());
@@ -95,7 +98,7 @@ async fn handle_pipeline<D: Database>(
         results.push(result);
     }
 
-    let resp_body = proto::PipelineResponseBody {
+    let resp_body = proto::PipelineRespBody {
         baton: stream_guard.release(),
         base_url: server.self_url.clone(),
         results,
@@ -104,13 +107,96 @@ async fn handle_pipeline<D: Database>(
 }
 
 async fn handle_cursor<D: Database>(
-    _server: &Server<D>,
-    _auth: Authenticated,
-    _req: hyper::Request<hyper::Body>,
-    _version: Version,
-    _encoding: Encoding,
+    server: &Server<D>,
+    auth: Authenticated,
+    req: hyper::Request<hyper::Body>,
+    version: Version,
+    encoding: Encoding,
 ) -> Result<hyper::Response<hyper::Body>> {
-    bail!("Cursor over HTTP not implemented")
+    let req_body: proto::CursorReqBody = read_decode_request(req, encoding).await?;
+    let stream_guard = stream::acquire(server, req_body.baton.as_deref()).await?;
+
+    let mut join_set = tokio::task::JoinSet::new();
+    let mut cursor_hnd = cursor::CursorHandle::spawn(&mut join_set);
+    let db = stream_guard.get_db_owned()?;
+    let sqls = stream_guard.sqls();
+    let pgm = batch::proto_batch_to_program(&req_body.batch, sqls, version)?;
+    cursor_hnd.open(db, auth, pgm);
+
+    let resp_body = proto::CursorRespBody {
+        baton: stream_guard.release(),
+        base_url: server.self_url.clone(),
+    };
+    let body = hyper::Body::wrap_stream(CursorStream {
+        resp_body: Some(resp_body),
+        join_set,
+        cursor_hnd,
+        encoding,
+    });
+    let content_type = match encoding {
+        Encoding::Json => "text/plain",
+        Encoding::Protobuf => "application/octet-stream",
+    };
+
+    Ok(hyper::Response::builder()
+        .status(hyper::StatusCode::OK)
+        .header(hyper::http::header::CONTENT_TYPE, content_type)
+        .body(body)
+        .unwrap())
+}
+
+struct CursorStream<D> {
+    resp_body: Option<proto::CursorRespBody>,
+    join_set: tokio::task::JoinSet<()>,
+    cursor_hnd: cursor::CursorHandle<D>,
+    encoding: Encoding,
+}
+
+impl<D> Stream for CursorStream<D> {
+    type Item = Result<Bytes>;
+
+    fn poll_next(
+        self: Pin<&mut Self>,
+        cx: &mut task::Context,
+    ) -> task::Poll<Option<Result<Bytes>>> {
+        let this = self.get_mut();
+
+        if let Some(resp_body) = this.resp_body.take() {
+            let chunk = encode_stream_item(&resp_body, this.encoding);
+            return task::Poll::Ready(Some(Ok(chunk)));
+        }
+
+        match this.join_set.poll_join_next(cx) {
+            task::Poll::Pending => {}
+            task::Poll::Ready(Some(Ok(()))) => {}
+            task::Poll::Ready(Some(Err(err))) => panic!("Cursor task crashed: {}", err),
+            task::Poll::Ready(None) => {}
+        };
+
+        match this.cursor_hnd.poll_fetch(cx) {
+            task::Poll::Pending => task::Poll::Pending,
+            task::Poll::Ready(None) => task::Poll::Ready(None),
+            task::Poll::Ready(Some(Ok(entry))) => {
+                let chunk = encode_stream_item(&entry.entry, this.encoding);
+                task::Poll::Ready(Some(Ok(chunk)))
+            }
+            task::Poll::Ready(Some(Err(err))) => task::Poll::Ready(Some(Err(err))),
+        }
+    }
+}
+
+fn encode_stream_item<T: Serialize + prost::Message>(item: &T, encoding: Encoding) -> Bytes {
+    let mut data: Vec<u8>;
+    match encoding {
+        Encoding::Json => {
+            data = serde_json::to_vec(item).unwrap();
+            data.push(b'\n');
+        }
+        Encoding::Protobuf => {
+            data = <T as prost::Message>::encode_length_delimited_to_vec(item);
+        }
+    }
+    Bytes::from(data)
 }
 
 async fn read_decode_request<T: DeserializeOwned + prost::Message + Default>(
@@ -160,7 +246,6 @@ fn encode_response<T: Serialize + prost::Message>(
             "application/x-protobuf",
         ),
     };
-
     hyper::Response::builder()
         .status(status)
         .header(hyper::http::header::CONTENT_TYPE, content_type)

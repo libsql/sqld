@@ -54,7 +54,7 @@ enum Handle<D> {
 struct Stream<D> {
     /// The database connection that corresponds to this stream. This is `None` after the `"close"`
     /// request was executed.
-    db: Option<D>,
+    db: Option<Arc<D>>,
     /// The cache of SQL texts stored on the server with `"store_sql"` requests.
     sqls: HashMap<i32, String>,
     /// Stream id of this stream. The id is generated randomly (it should be unguessable).
@@ -155,7 +155,7 @@ pub async fn acquire<'srv, D: Connection>(
 
             let mut state = server.stream_state.lock();
             let stream = Box::new(Stream {
-                db: Some(db),
+                db: Some(Arc::new(db)),
                 sqls: HashMap::new(),
                 stream_id: gen_stream_id(&mut state),
                 // initializing the sequence number randomly makes it much harder to exploit
@@ -181,7 +181,12 @@ pub async fn acquire<'srv, D: Connection>(
 impl<'srv, D: Connection> Guard<'srv, D> {
     pub fn get_db(&self) -> Result<&D, ProtocolError> {
         let stream = self.stream.as_ref().unwrap();
-        stream.db.as_ref().ok_or(ProtocolError::BatonStreamClosed)
+        stream.db.as_deref().ok_or(ProtocolError::BatonStreamClosed)
+    }
+
+    pub fn get_db_owned(&self) -> Result<Arc<D>, ProtocolError> {
+        let stream = self.stream.as_ref().unwrap();
+        stream.db.clone().ok_or(ProtocolError::BatonStreamClosed)
     }
 
     /// Closes the database connection. The next call to [`Guard::release()`] will then remove the

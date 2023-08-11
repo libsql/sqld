@@ -2,6 +2,7 @@ use anyhow::{anyhow, Result};
 use rusqlite::types::ValueRef;
 use std::mem::take;
 use std::sync::Arc;
+use std::task;
 use tokio::sync::{mpsc, oneshot};
 
 use crate::auth::Authenticated;
@@ -30,8 +31,11 @@ struct OpenReq<D> {
     pgm: Program,
 }
 
-impl<D: Database> CursorHandle<D> {
-    pub fn spawn(join_set: &mut tokio::task::JoinSet<()>) -> Self {
+impl<D> CursorHandle<D> {
+    pub fn spawn(join_set: &mut tokio::task::JoinSet<()>) -> Self
+    where
+        D: Database,
+    {
         let (open_tx, open_rx) = oneshot::channel();
         let (entry_tx, entry_rx) = mpsc::channel(1);
 
@@ -49,6 +53,10 @@ impl<D: Database> CursorHandle<D> {
 
     pub async fn fetch(&mut self) -> Result<Option<SizedEntry>> {
         self.entry_rx.recv().await.transpose()
+    }
+
+    pub fn poll_fetch(&mut self, cx: &mut task::Context) -> task::Poll<Option<Result<SizedEntry>>> {
+        self.entry_rx.poll_recv(cx)
     }
 }
 

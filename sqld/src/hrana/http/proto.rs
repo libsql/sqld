@@ -4,7 +4,7 @@ pub use super::super::proto::*;
 use serde::{Deserialize, Serialize};
 
 #[derive(Deserialize, prost::Message)]
-pub struct PipelineRequestBody {
+pub struct PipelineReqBody {
     #[prost(string, optional, tag = "1")]
     pub baton: Option<String>,
     #[prost(message, repeated, tag = "2")]
@@ -12,7 +12,7 @@ pub struct PipelineRequestBody {
 }
 
 #[derive(Serialize, prost::Message)]
-pub struct PipelineResponseBody {
+pub struct PipelineRespBody {
     #[prost(string, optional, tag = "1")]
     pub baton: Option<String>,
     #[prost(string, optional, tag = "2")]
@@ -32,6 +32,22 @@ pub enum StreamResult {
     Error {
         error: Error,
     },
+}
+
+#[derive(Deserialize, prost::Message)]
+pub struct CursorReqBody {
+    #[prost(string, optional, tag = "1")]
+    pub baton: Option<String>,
+    #[prost(message, required, tag = "2")]
+    pub batch: Batch,
+}
+
+#[derive(Serialize, prost::Message)]
+pub struct CursorRespBody {
+    #[prost(string, optional, tag = "1")]
+    pub baton: Option<String>,
+    #[prost(string, optional, tag = "2")]
+    pub base_url: Option<String>,
 }
 
 #[derive(Deserialize, Debug, Default)]
