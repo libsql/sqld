@@ -22,9 +22,6 @@ use replication::{NamespacedSnapshotCallback, ReplicationLogger};
 use rpc::replication_log::ReplicationLogService;
 use rpc::{run_rpc_server, ReplicationLogServer};
 use tokio::sync::mpsc;
-use once_cell::sync::Lazy;
-use rusqlite::ffi::SQLITE_CHECKPOINT_TRUNCATE;
-use tokio::sync::{mpsc, Notify};
 use tokio::task::JoinSet;
 use tonic::body::BoxBody;
 use tonic::transport::Channel;
@@ -65,10 +62,15 @@ pub mod version;
 const MAX_CONCURRENT_DBS: usize = 128;
 const DB_CREATE_TIMEOUT: Duration = Duration::from_secs(1);
 <<<<<<< HEAD
+<<<<<<< HEAD
 const DEFAULT_NAMESPACE_NAME: &str = "default";
 =======
 const DEFAULT_AUTO_CHECKPOINT: u32 = 1000;
 >>>>>>> f5e8cc6 (made auto_checkpoint configurable at Connection::open level)
+=======
+const DEFAULT_AUTO_CHECKPOINT: u32 = 1000;
+const DEFAULT_NAMESPACE_NAME: &str = "default";
+>>>>>>> 9d3ce22 (fixing mess after merge with main)
 
 #[derive(clap::ValueEnum, Clone, Debug, PartialEq)]
 pub enum Backend {
@@ -113,10 +115,16 @@ pub struct Config {
     pub max_response_size: u64,
     pub max_total_response_size: u64,
     pub snapshot_exec: Option<String>,
+<<<<<<< HEAD
     pub disable_default_namespace: bool,
     pub disable_namespaces: bool,
     pub http_replication_addr: Option<SocketAddr>,
     pub checkpoint_interval: Option<Duration>,
+=======
+    pub http_replication_addr: Option<SocketAddr>,
+    pub checkpoint_interval: Option<Duration>,
+    pub disable_default_namespace: bool,
+>>>>>>> 9d3ce22 (fixing mess after merge with main)
 }
 
 impl Default for Config {
@@ -156,10 +164,16 @@ impl Default for Config {
             max_response_size: 10 * 1024 * 1024,       // 10MiB
             max_total_response_size: 32 * 1024 * 1024, // 32MiB
             snapshot_exec: None,
+<<<<<<< HEAD
             disable_default_namespace: false,
             disable_namespaces: true,
             http_replication_addr: None,
             checkpoint_interval: None,
+=======
+            http_replication_addr: None,
+            checkpoint_interval: None,
+            disable_default_namespace: false,
+>>>>>>> 9d3ce22 (fixing mess after merge with main)
         }
     }
 }
@@ -474,6 +488,7 @@ async fn start_primary(
         max_response_size: config.max_response_size,
         load_from_dump: None,
         max_total_response_size: config.max_total_response_size,
+        checkpoint_interval: config.checkpoint_interval,
     };
     let factory = PrimaryNamespaceMaker::new(conf);
     let namespaces = Arc::new(NamespaceStore::new(factory));
@@ -600,7 +615,7 @@ async fn run_checkpoint_cron(db_path: PathBuf, period: Duration) -> anyhow::Resu
                 let rc = rusqlite::ffi::sqlite3_wal_checkpoint_v2(
                     conn.handle(),
                     std::ptr::null(),
-                    SQLITE_CHECKPOINT_TRUNCATE,
+                    libsql::ffi::SQLITE_CHECKPOINT_TRUNCATE,
                     &mut num_checkpointed as *mut _,
                     std::ptr::null_mut(),
                 );
@@ -754,7 +769,6 @@ pub async fn run_server(config: Config) -> anyhow::Result<()> {
             }
         }
 
-        let reset = HARD_RESET.clone();
         loop {
             tokio::select! {
                 _ = shutdown_receiver.recv() => {
