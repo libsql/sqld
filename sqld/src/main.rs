@@ -182,6 +182,15 @@ struct Cli {
     #[clap(long, env = "SQLD_SNAPSHOT_EXEC")]
     snapshot_exec: Option<String>,
 
+    /// The address and port for the replication HTTP API.
+    #[clap(long, env = "SQLD_HTTP_REPLICATION_LISTEN_ADDR")]
+    http_replication_listen_addr: Option<SocketAddr>,
+
+    /// Interval in seconds, in which WAL checkpoint is being called.
+    /// By default, the interval is 1 hour.
+    #[clap(long, env = "SQLD_CHECKPOINT_INTERVAL_S")]
+    checkpoint_interval_s: Option<u64>,
+
     /// By default, all request for which a namespace can't be determined fallaback to the default
     /// namespace `default`. This flag disables that.
     #[clap(long)]
