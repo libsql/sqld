@@ -307,6 +307,10 @@ mod test {
         ) -> crate::Result<DescribeResult> {
             unreachable!()
         }
+
+        async fn is_autocommit(&self) -> crate::Result<bool> {
+            unreachable!()
+        }
     }
 
     #[tokio::test]

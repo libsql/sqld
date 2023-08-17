@@ -37,6 +37,7 @@ pub struct Upgrade {
     pub response_tx: oneshot::Sender<hyper::Response<hyper::Body>>,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn serve<F: MakeNamespace>(
     auth: Arc<Auth>,
     idle_kicker: Option<IdleKicker>,
