@@ -6,7 +6,8 @@ use std::task;
 use tokio::sync::{mpsc, oneshot};
 
 use crate::auth::Authenticated;
-use crate::database::{Database, Program};
+use crate::connection::program::Program;
+use crate::connection::Connection;
 use crate::query_result_builder::{
     Column, QueryBuilderConfig, QueryResultBuilder, QueryResultBuilderError,
 };
@@ -14,8 +15,8 @@ use crate::query_result_builder::{
 use super::result_builder::{estimate_cols_json_size, value_json_size, value_to_proto};
 use super::{batch, proto, stmt};
 
-pub struct CursorHandle<D> {
-    open_tx: Option<oneshot::Sender<OpenReq<D>>>,
+pub struct CursorHandle<C> {
+    open_tx: Option<oneshot::Sender<OpenReq<C>>>,
     entry_rx: mpsc::Receiver<Result<SizedEntry>>,
 }
 
@@ -25,16 +26,16 @@ pub struct SizedEntry {
     pub size: u64,
 }
 
-struct OpenReq<D> {
-    db: Arc<D>,
+struct OpenReq<C> {
+    db: Arc<C>,
     auth: Authenticated,
     pgm: Program,
 }
 
-impl<D> CursorHandle<D> {
+impl<C> CursorHandle<C> {
     pub fn spawn(join_set: &mut tokio::task::JoinSet<()>) -> Self
     where
-        D: Database,
+        C: Connection,
     {
         let (open_tx, open_rx) = oneshot::channel();
         let (entry_tx, entry_rx) = mpsc::channel(1);
@@ -46,7 +47,7 @@ impl<D> CursorHandle<D> {
         }
     }
 
-    pub fn open(&mut self, db: Arc<D>, auth: Authenticated, pgm: Program) {
+    pub fn open(&mut self, db: Arc<C>, auth: Authenticated, pgm: Program) {
         let open_tx = self.open_tx.take().unwrap();
         let _: Result<_, _> = open_tx.send(OpenReq { db, auth, pgm });
     }
@@ -60,8 +61,8 @@ impl<D> CursorHandle<D> {
     }
 }
 
-async fn run_cursor<D: Database>(
-    open_rx: oneshot::Receiver<OpenReq<D>>,
+async fn run_cursor<C: Connection>(
+    open_rx: oneshot::Receiver<OpenReq<C>>,
     entry_tx: mpsc::Sender<Result<SizedEntry>>,
 ) {
     let Ok(open_req) = open_rx.await else {

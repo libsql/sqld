@@ -102,11 +102,12 @@ pub(super) fn handle_repeated_hello<F: MakeNamespace>(
     Ok(())
 }
 
-pub(super) async fn handle_request<D: Connection>(
-    session: &mut Session<D>,
+pub(super) async fn handle_request<F: MakeNamespace>(
+    server: &Server<F>,
+    session: &mut Session<<F::Database as Database>::Connection>,
     join_set: &mut tokio::task::JoinSet<()>,
     req: proto::Request,
-    connection_maker: Arc<dyn MakeConnection<Connection = D>>,
+    connection_maker: Arc<dyn MakeConnection<Connection = <F::Database as Database>::Connection>>,
 ) -> Result<oneshot::Receiver<Result<proto::Response>>> {
     // TODO: this function has rotten: it is too long and contains too much duplicated code. It
     // should be refactored at the next opportunity, together with code in stmt.rs and batch.rs

@@ -53,17 +53,19 @@ pub(super) async fn handle_tcp<F: MakeNamespace>(
     socket: tokio::net::TcpStream,
     conn_id: u64,
 ) -> Result<()> {
-    let (ws, version, encoding) = handshake::handshake_tcp(socket)
-        .await
-        .context("Could not perform the WebSocket handshake on TCP connection")?;
-    let (ws, version, encoding, ns) = handshake::handshake_tcp(
+    let handshake::Output {
+        ws,
+        version,
+        encoding,
+        namespace,
+    } = handshake::handshake_tcp(
         socket,
         server.disable_default_namespace,
         server.disable_namespaces,
     )
     .await
     .context("Could not perform the WebSocket handshake on TCP connection")?;
-    handle_ws(server, ws, version, encoding, conn_id, ns).await
+    handle_ws(server, ws, version, encoding, conn_id, namespace).await
 }
 
 pub(super) async fn handle_upgrade<F: MakeNamespace>(
@@ -71,14 +73,19 @@ pub(super) async fn handle_upgrade<F: MakeNamespace>(
     upgrade: Upgrade,
     conn_id: u64,
 ) -> Result<()> {
-    let (ws, version, encoding, ns) = handshake::handshake_upgrade(
+    let handshake::Output {
+        ws,
+        version,
+        encoding,
+        namespace,
+    } = handshake::handshake_upgrade(
         upgrade,
         server.disable_default_namespace,
         server.disable_namespaces,
     )
     .await
     .context("Could not perform the WebSocket handshake on HTTP connection")?;
-    handle_ws(server, ws, version, encoding, conn_id, ns).await
+    handle_ws(server, ws, version, encoding, conn_id, namespace).await
 }
 
 async fn handle_ws<F: MakeNamespace>(
@@ -210,7 +217,10 @@ async fn handle_client_msg<F: MakeNamespace>(
     }
 }
 
-async fn handle_hello_msg(conn: &mut Conn<impl Database>, jwt: Option<String>) -> Result<bool> {
+async fn handle_hello_msg<F: MakeNamespace>(
+    conn: &mut Conn<F>,
+    jwt: Option<String>,
+) -> Result<bool> {
     let hello_res = match conn.session.as_mut() {
         None => session::handle_initial_hello(&conn.server, conn.version, jwt)
             .map(|session| conn.session = Some(session)),
@@ -246,6 +256,7 @@ async fn handle_request_msg<F: MakeNamespace>(
     };
 
     let response_rx = session::handle_request(
+        &conn.server,
         session,
         &mut conn.join_set,
         request,

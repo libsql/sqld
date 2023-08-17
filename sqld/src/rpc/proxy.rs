@@ -249,7 +249,9 @@ pub mod rpc {
                 connection::program::Cond::And { conds } => cond::Cond::And(AndCond {
                     conds: conds.into_iter().map(|c| c.into()).collect(),
                 }),
-                database::Cond::IsAutocommit => cond::Cond::IsAutocommit(IsAutocommitCond {}),
+                connection::program::Cond::IsAutocommit => {
+                    cond::Cond::IsAutocommit(IsAutocommitCond {})
+                }
             };
 
             Self { cond: Some(cond) }

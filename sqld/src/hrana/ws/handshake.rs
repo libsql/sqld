@@ -6,7 +6,6 @@ use tungstenite::http;
 
 use crate::http::db_factory::namespace_from_headers;
 
-use super::super::Version;
 use super::super::{Encoding, Version};
 use super::Upgrade;
 
@@ -24,11 +23,19 @@ enum Subproto {
     Hrana3Protobuf,
 }
 
+#[derive(Debug)]
+pub struct Output {
+    pub ws: WebSocket,
+    pub version: Version,
+    pub encoding: Encoding,
+    pub namespace: Bytes,
+}
+
 pub async fn handshake_tcp(
     socket: tokio::net::TcpStream,
     disable_default_ns: bool,
     disable_namespaces: bool,
-) -> Result<(WebSocket, Version, Encoding, Bytes)> {
+) -> Result<Output> {
     socket
         .set_nodelay(true)
         .context("Could not disable Nagle's algorithm")?;
@@ -61,17 +68,22 @@ pub async fn handshake_tcp(
         tokio_tungstenite::accept_hdr_async_with_config(socket, callback, ws_config).await?;
 
     let (version, encoding) = subproto.unwrap().version_encoding();
-    Ok((WebSocket::Tcp(stream), version, encoding, namespace.unwrap()))
+    Ok(Output {
+        ws: WebSocket::Tcp(stream),
+        version,
+        encoding,
+        namespace: namespace.unwrap(),
+    })
 }
 
 pub async fn handshake_upgrade(
     upgrade: Upgrade,
     disable_default_ns: bool,
     disable_namespaces: bool,
-) -> Result<(WebSocket, Version, Encoding, Bytes)> {
+) -> Result<Output> {
     let mut req = upgrade.request;
 
-    let ns = namespace_from_headers(req.headers(), disable_default_ns, disable_namespaces)?;
+    let namespace = namespace_from_headers(req.headers(), disable_default_ns, disable_namespaces)?;
     let ws_config = Some(get_ws_config());
     let (mut resp, stream_fut_subproto_res) = match hyper_tungstenite::upgrade(&mut req, ws_config)
     {
@@ -112,7 +124,12 @@ pub async fn handshake_upgrade(
         .context("Could not upgrade HTTP request to a WebSocket")?;
 
     let (version, encoding) = subproto.version_encoding();
-    Ok((WebSocket::Upgraded(stream), version, encoding, ns))
+    Ok(Output {
+        ws: WebSocket::Upgraded(stream),
+        version,
+        encoding,
+        namespace,
+    })
 }
 
 fn negotiate_subproto(

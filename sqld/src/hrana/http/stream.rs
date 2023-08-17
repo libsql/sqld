@@ -104,8 +104,8 @@ impl<D> ServerStreamState<D> {
 /// otherwise we create a new stream.
 pub async fn acquire<'srv, D: Connection>(
     server: &'srv Server<D>,
+    connection_maker: Arc<dyn MakeConnection<Connection = D>>,
     baton: Option<&str>,
-    db_factory: Arc<dyn MakeConnection<Connection = D>>,
 ) -> Result<Guard<'srv, D>> {
     let stream = match baton {
         Some(baton) => {
@@ -148,7 +148,7 @@ pub async fn acquire<'srv, D: Connection>(
             stream
         }
         None => {
-            let db = db_factory
+            let db = connection_maker
                 .create()
                 .await
                 .context("Could not create a database connection")?;

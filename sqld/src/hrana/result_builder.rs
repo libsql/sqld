@@ -149,7 +149,7 @@ impl QueryResultBuilder for SingleStatementBuilder {
         let mut f = SizeFormatter::new();
         write!(&mut f, "{error}").unwrap();
         TOTAL_RESPONSE_SIZE.fetch_sub(self.current_size as usize, Ordering::Relaxed);
-        self.current_size = f.0;
+        self.current_size = f.size;
         TOTAL_RESPONSE_SIZE.fetch_add(self.current_size as usize, Ordering::Relaxed);
         self.err = Some(error);
 

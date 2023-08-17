@@ -112,9 +112,9 @@ fn parse_queries(queries: Vec<QueryObject>) -> crate::Result<Vec<Query>> {
     Ok(out)
 }
 
-async fn handle_query<D: Connection>(
+async fn handle_query<C: Connection>(
     auth: Authenticated,
-    MakeConnectionExtractor(connection_maker): MakeConnectionExtractor<D>,
+    MakeConnectionExtractor(connection_maker): MakeConnectionExtractor<C>,
     Json(query): Json<HttpQuery>,
 ) -> Result<axum::response::Response, Error> {
     let batch = parse_queries(query.statements)?;
@@ -252,14 +252,17 @@ where
 
     macro_rules! handle_hrana {
         ($endpoint:expr, $version:expr, $encoding:expr,) => {{
-            async fn handle_hrana<D: Database>(
-                AxumState(state): AxumState<AppState<D>>,
+            async fn handle_hrana<F: MakeNamespace>(
+                AxumState(state): AxumState<AppState<F>>,
+                MakeConnectionExtractor(connection_maker): MakeConnectionExtractor<
+                    <F::Database as Database>::Connection,
+                >,
                 auth: Authenticated,
                 req: Request<Body>,
             ) -> Result<Response<Body>, Error> {
                 Ok(state
                     .hrana_http_srv
-                    .handle_request(auth, req, $endpoint, $version, $encoding)
+                    .handle_request(connection_maker, auth, req, $endpoint, $version, $encoding)
                     .await?)
             }
             handle_hrana

@@ -42,19 +42,28 @@ impl<C: Connection> Server<C> {
 
     pub async fn handle_request(
         &self,
+        connection_maker: Arc<dyn MakeConnection<Connection = C>>,
         auth: Authenticated,
         req: hyper::Request<hyper::Body>,
         endpoint: Endpoint,
         version: Version,
         encoding: Encoding,
     ) -> Result<hyper::Response<hyper::Body>> {
-        handle_request(self, auth, req, endpoint, version, encoding)
-            .await
-            .or_else(|err| {
-                err.downcast::<stream::StreamError>()
-                    .map(|err| stream_error_response(err, encoding))
-            })
-            .or_else(|err| err.downcast::<ProtocolError>().map(protocol_error_response))
+        handle_request(
+            self,
+            connection_maker,
+            auth,
+            req,
+            endpoint,
+            version,
+            encoding,
+        )
+        .await
+        .or_else(|err| {
+            err.downcast::<stream::StreamError>()
+                .map(|err| stream_error_response(err, encoding))
+        })
+        .or_else(|err| err.downcast::<ProtocolError>().map(protocol_error_response))
     }
 }
 
@@ -65,8 +74,9 @@ pub(crate) async fn handle_index() -> hyper::Response<hyper::Body> {
     )
 }
 
-async fn handle_request<D: Database>(
-    server: &Server<D>,
+async fn handle_request<C: Connection>(
+    server: &Server<C>,
+    connection_maker: Arc<dyn MakeConnection<Connection = C>>,
     auth: Authenticated,
     req: hyper::Request<hyper::Body>,
     endpoint: Endpoint,
@@ -74,21 +84,26 @@ async fn handle_request<D: Database>(
     encoding: Encoding,
 ) -> Result<hyper::Response<hyper::Body>> {
     match endpoint {
-        Endpoint::Pipeline => handle_pipeline(server, auth, req, version, encoding).await,
-        Endpoint::Cursor => handle_cursor(server, auth, req, version, encoding).await,
+        Endpoint::Pipeline => {
+            handle_pipeline(server, connection_maker, auth, req, version, encoding).await
+        }
+        Endpoint::Cursor => {
+            handle_cursor(server, connection_maker, auth, req, version, encoding).await
+        }
     }
 }
 
-async fn handle_pipeline<D: Database>(
-    server: &Server<D>,
-    connection_maker: Arc<dyn MakeConnection<Connection = D>>,
+async fn handle_pipeline<C: Connection>(
+    server: &Server<C>,
+    connection_maker: Arc<dyn MakeConnection<Connection = C>>,
     auth: Authenticated,
     req: hyper::Request<hyper::Body>,
     version: Version,
     encoding: Encoding,
 ) -> Result<hyper::Response<hyper::Body>> {
     let req_body: proto::PipelineReqBody = read_decode_request(req, encoding).await?;
-    let mut stream_guard = stream::acquire(server, req_body.baton.as_deref()).await?;
+    let mut stream_guard =
+        stream::acquire(server, connection_maker, req_body.baton.as_deref()).await?;
 
     let mut results = Vec::with_capacity(req_body.requests.len());
     for request in req_body.requests.into_iter() {
@@ -106,15 +121,16 @@ async fn handle_pipeline<D: Database>(
     Ok(encode_response(hyper::StatusCode::OK, &resp_body, encoding))
 }
 
-async fn handle_cursor<D: Database>(
-    server: &Server<D>,
+async fn handle_cursor<C: Connection>(
+    server: &Server<C>,
+    connection_maker: Arc<dyn MakeConnection<Connection = C>>,
     auth: Authenticated,
     req: hyper::Request<hyper::Body>,
     version: Version,
     encoding: Encoding,
 ) -> Result<hyper::Response<hyper::Body>> {
     let req_body: proto::CursorReqBody = read_decode_request(req, encoding).await?;
-    let stream_guard = stream::acquire(server, req_body.baton.as_deref()).await?;
+    let stream_guard = stream::acquire(server, connection_maker, req_body.baton.as_deref()).await?;
 
     let mut join_set = tokio::task::JoinSet::new();
     let mut cursor_hnd = cursor::CursorHandle::spawn(&mut join_set);
