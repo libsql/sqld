@@ -208,7 +208,7 @@ where
         join_set.spawn(http::run_http(
             addr,
             auth,
-            namespaces,
+            namespaces.clone(),
             hrana_upgrade_tx,
             hrana_http_srv.clone(),
             config.enable_http_console,
@@ -233,7 +233,7 @@ where
     }
 
     if let Some(addr) = config.admin_addr {
-        join_set.spawn(admin_api::run_admin_api(addr, db_config_store));
+        join_set.spawn(admin_api::run_admin_api(addr, db_config_store, namespaces));
     }
 
     match &config.heartbeat_url {
@@ -466,7 +466,6 @@ async fn start_primary(
         stats: stats.clone(),
         config_store: config_store.clone(),
         max_response_size: config.max_response_size,
-        load_from_dump: None,
         max_total_response_size: config.max_total_response_size,
         checkpoint_interval: config.checkpoint_interval,
     };
