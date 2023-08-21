@@ -363,9 +363,11 @@ where
     S: Stream<Item = std::io::Result<Bytes>> + Unpin,
 {
     let mut retries = 0;
+    let auto_checkpoint = ctx.logger().auto_checkpoint;
     // there is a small chance we fail to acquire the lock right away, so we perform a few retries
     let conn = loop {
-        match block_in_place(|| open_db(db_path, &REPLICATION_METHODS, ctx, None)) {
+        match block_in_place(|| open_db(db_path, &REPLICATION_METHODS, ctx, None, auto_checkpoint))
+        {
             Ok(conn) => {
                 break conn;
             }
