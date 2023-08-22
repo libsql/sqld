@@ -60,7 +60,6 @@ mod test {
     fn timestamp_uuid_conversion() {
         let ts = Timestamp::now(NoContext);
         let uuid = new_v7(ts);
-        println!("{}", uuid.get_version_num());
         let actual = decode_unix_timestamp(&uuid);
         //TODO: information loss on encoding?
         let (s1, _) = actual.to_unix();
