@@ -809,7 +809,7 @@ impl ReplicationLogger {
     ) -> anyhow::Result<Self> {
         // It is necessary to checkpoint before we restore the replication log, since the WAL may
         // contain pages that are not in the database file.
-        checkpoint_db(&data_path, disable_auto_checkpoint)?;
+        checkpoint_db(&data_path)?;
         let mut log_file = log_file.reset()?;
         let snapshot_path = data_path.parent().unwrap().join("snapshots");
         // best effort, there may be no snapshots
@@ -912,7 +912,7 @@ impl ReplicationLogger {
     }
 }
 
-fn checkpoint_db(data_path: &Path, disable_auto_checkpoint: bool) -> anyhow::Result<()> {
+fn checkpoint_db(data_path: &Path) -> anyhow::Result<()> {
     unsafe {
         let conn = rusqlite::Connection::open(data_path)?;
         conn.query_row("PRAGMA journal_mode=WAL", (), |_| Ok(()))?;
@@ -926,15 +926,6 @@ fn checkpoint_db(data_path: &Path, disable_auto_checkpoint: bool) -> anyhow::Res
             );
             Ok(())
         })?;
-        // turn off auto_checkpointing - we'll use a fiber to checkpoint in time steps instead
-        if disable_auto_checkpoint {
-            let rc = rusqlite::ffi::sqlite3_wal_autocheckpoint(conn.handle(), 0);
-            if rc != 0 {
-                bail!("Failed to disable WAL autocheckpoint - error code: {}", rc)
-            } else {
-                tracing::info!("SQLite autocheckpoint disabled");
-            }
-        }
         let mut num_checkpointed: c_int = 0;
         let rc = rusqlite::ffi::sqlite3_wal_checkpoint_v2(
             conn.handle(),
