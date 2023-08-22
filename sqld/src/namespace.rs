@@ -296,6 +296,7 @@ impl Namespace<PrimaryDatabase> {
             config.extensions.clone(),
             config.max_response_size,
             config.max_total_response_size,
+            auto_checkpoint,
         )
         .await?
         .throttled(

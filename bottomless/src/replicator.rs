@@ -4,7 +4,6 @@ use crate::transaction_cache::TransactionPageCache;
 use crate::wal::WalFileReader;
 use anyhow::anyhow;
 use arc_swap::ArcSwap;
-use aws_sdk_s3::config::{Credentials, Region};
 use aws_sdk_s3::error::SdkError;
 use aws_sdk_s3::operation::get_object::builders::GetObjectFluentBuilder;
 use aws_sdk_s3::operation::list_objects::builders::ListObjectsFluentBuilder;
@@ -78,12 +77,6 @@ pub struct Options {
     pub use_compression: CompressionKind,
     pub aws_endpoint: Option<String>,
     pub db_id: Option<String>,
-    /// AWS bottomless access key ID.
-    pub access_key_id: Option<String>,
-    /// AWS bottomless secret access key.
-    pub secret_access_key: Option<String>,
-    /// AWS bottomless region.
-    pub region: Option<String>,
     /// Bucket directory name where all S3 objects are backed up. General schema is:
     /// - `{db-name}-{uuid-v7}` subdirectories:
     ///   - `.meta` file with database page size and initial WAL checksum.
@@ -109,20 +102,6 @@ pub struct Options {
 impl Options {
     pub async fn client_config(&self) -> Config {
         let mut loader = aws_config::from_env();
-        if let Some(region) = self.region.as_deref() {
-            loader = loader.region(Region::new(region.to_string()));
-        }
-        if let (Some(access_key_id), Some(secret_access_key)) =
-            (&self.access_key_id, &self.secret_access_key)
-        {
-            loader = loader.credentials_provider(Credentials::new(
-                access_key_id,
-                secret_access_key,
-                None,
-                None,
-                "Static",
-            ));
-        }
         if let Some(endpoint) = self.aws_endpoint.as_deref() {
             loader = loader.endpoint_url(endpoint);
         }
@@ -135,15 +114,6 @@ impl Options {
         let mut options = Self::default();
         if let Ok(key) = std::env::var("LIBSQL_BOTTOMLESS_ENDPOINT") {
             options.aws_endpoint = Some(key);
-        }
-        if let Ok(region) = std::env::var("LIBSQL_BOTTOMLESS_S3_REGION") {
-            options.region = Some(region);
-        }
-        if let Ok(access_key_id) = std::env::var("LIBSQL_BOTTOMLESS_ACCESS_KEY_ID") {
-            options.access_key_id = Some(access_key_id);
-        }
-        if let Ok(secret_access_key) = std::env::var("LIBSQL_BOTTOMLESS_SECRET_ACCESS_KEY") {
-            options.secret_access_key = Some(secret_access_key);
         }
         if let Ok(bucket_name) = std::env::var("LIBSQL_BOTTOMLESS_BUCKET") {
             options.bucket_name = bucket_name;
@@ -228,9 +198,6 @@ impl Default for Options {
             s3_upload_max_parallelism: 32,
             restore_transaction_page_swap_after: 1000,
             db_id,
-            access_key_id: None,
-            secret_access_key: None,
-            region: None,
             aws_endpoint: None,
             restore_transaction_cache_fpath: ".bottomless.restore".to_string(),
             bucket_name: "bottomless".to_string(),

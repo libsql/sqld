@@ -182,10 +182,6 @@ struct Cli {
     #[clap(long, env = "SQLD_SNAPSHOT_EXEC")]
     snapshot_exec: Option<String>,
 
-    /// The address and port for the replication HTTP API.
-    #[clap(long, env = "SQLD_HTTP_REPLICATION_LISTEN_ADDR")]
-    http_replication_listen_addr: Option<SocketAddr>,
-
     /// Interval in seconds, in which WAL checkpoint is being called.
     /// By default, the interval is 1 hour.
     #[clap(long, env = "SQLD_CHECKPOINT_INTERVAL_S")]
@@ -200,13 +196,6 @@ struct Cli {
     /// the default namespace.
     #[clap(long)]
     enable_namespaces: bool,
-    /// The address and port for the replication HTTP API.
-    #[clap(long, env = "SQLD_HTTP_REPLICATION_LISTEN_ADDR")]
-    http_replication_listen_addr: Option<SocketAddr>,
-    /// Interval in seconds, in which WAL checkpoint is being called.
-    /// By default, the interval is 1 hour.
-    #[clap(long, env = "SQLD_CHECKPOINT_INTERVAL_S")]
-    checkpoint_interval_s: Option<u64>,
 }
 
 #[derive(clap::Subcommand, Debug)]
@@ -320,7 +309,6 @@ fn config_from_args(args: Cli) -> Result<Config> {
         snapshot_exec: args.snapshot_exec,
         disable_default_namespace: args.disable_default_namespace,
         disable_namespaces: !args.enable_namespaces,
-        http_replication_addr: args.http_replication_listen_addr,
         checkpoint_interval: args.checkpoint_interval_s.map(Duration::from_secs),
     })
 }

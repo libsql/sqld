@@ -21,6 +21,7 @@ impl<'a> FrameInjector<'a> {
                 | OpenFlags::SQLITE_OPEN_NO_MUTEX,
             &INJECTOR_METHODS,
             hook_ctx,
+            // It's ok to leave auto-checkpoint to default, since replicas don't use bottomless.
             DEFAULT_AUTO_CHECKPOINT,
         )?;
 

@@ -61,16 +61,8 @@ pub mod version;
 
 const MAX_CONCURRENT_DBS: usize = 128;
 const DB_CREATE_TIMEOUT: Duration = Duration::from_secs(1);
-<<<<<<< HEAD
-<<<<<<< HEAD
 const DEFAULT_NAMESPACE_NAME: &str = "default";
-=======
 const DEFAULT_AUTO_CHECKPOINT: u32 = 1000;
->>>>>>> f5e8cc6 (made auto_checkpoint configurable at Connection::open level)
-=======
-const DEFAULT_AUTO_CHECKPOINT: u32 = 1000;
-const DEFAULT_NAMESPACE_NAME: &str = "default";
->>>>>>> 9d3ce22 (fixing mess after merge with main)
 
 #[derive(clap::ValueEnum, Clone, Debug, PartialEq)]
 pub enum Backend {
@@ -115,16 +107,9 @@ pub struct Config {
     pub max_response_size: u64,
     pub max_total_response_size: u64,
     pub snapshot_exec: Option<String>,
-<<<<<<< HEAD
     pub disable_default_namespace: bool,
     pub disable_namespaces: bool,
-    pub http_replication_addr: Option<SocketAddr>,
     pub checkpoint_interval: Option<Duration>,
-=======
-    pub http_replication_addr: Option<SocketAddr>,
-    pub checkpoint_interval: Option<Duration>,
-    pub disable_default_namespace: bool,
->>>>>>> 9d3ce22 (fixing mess after merge with main)
 }
 
 impl Default for Config {
@@ -164,16 +149,9 @@ impl Default for Config {
             max_response_size: 10 * 1024 * 1024,       // 10MiB
             max_total_response_size: 32 * 1024 * 1024, // 32MiB
             snapshot_exec: None,
-<<<<<<< HEAD
             disable_default_namespace: false,
             disable_namespaces: true,
-            http_replication_addr: None,
             checkpoint_interval: None,
-=======
-            http_replication_addr: None,
-            checkpoint_interval: None,
-            disable_default_namespace: false,
->>>>>>> 9d3ce22 (fixing mess after merge with main)
         }
     }
 }
@@ -554,6 +532,8 @@ async fn run_storage_monitor(db_path: PathBuf, stats: Stats) -> anyhow::Result<(
             // initialize a connection here, and keep it alive for the entirety of the program. If we
             // fail to open it, we wait for `duration` and try again later.
             let ctx = &mut ();
+            // We can safely open db with DEFAULT_AUTO_CHECKPOINT, since monitor is read-only: it 
+            // won't produce new updates, frames or generate checkpoints.
             let maybe_conn = match open_db(&db_path, &TRANSPARENT_METHODS, ctx, Some(rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY), DEFAULT_AUTO_CHECKPOINT) {
                 Ok(conn) => Some(conn),
                 Err(e) => {

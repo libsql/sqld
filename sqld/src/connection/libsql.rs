@@ -15,7 +15,7 @@ use crate::query::Query;
 use crate::query_analysis::{State, StmtKind};
 use crate::query_result_builder::{QueryBuilderConfig, QueryResultBuilder};
 use crate::stats::Stats;
-use crate::{Result, DEFAULT_AUTO_CHECKPOINT};
+use crate::Result;
 
 use super::config::DatabaseConfigStore;
 use super::program::{Cond, DescribeCol, DescribeParam, DescribeResponse, DescribeResult};
@@ -33,6 +33,7 @@ pub struct LibSqlDbFactory<W: WalHook + 'static> {
     extensions: Vec<PathBuf>,
     max_response_size: u64,
     max_total_response_size: u64,
+    auto_checkpoint: u32,
     /// In wal mode, closing the last database takes time, and causes other databases creation to
     /// return sqlite busy. To mitigate that, we hold on to one connection
     _db: Option<LibSqlConnection>,
@@ -53,6 +54,7 @@ where
         extensions: Vec<PathBuf>,
         max_response_size: u64,
         max_total_response_size: u64,
+        auto_checkpoint: u32,
     ) -> Result<Self>
     where
         F: Fn() -> W::Context + Sync + Send + 'static,
@@ -66,6 +68,7 @@ where
             extensions,
             max_response_size,
             max_total_response_size,
+            auto_checkpoint,
             _db: None,
         };
 
@@ -115,7 +118,7 @@ where
             QueryBuilderConfig {
                 max_size: Some(self.max_response_size),
                 max_total_size: Some(self.max_total_response_size),
-                auto_checkpoint: DEFAULT_AUTO_CHECKPOINT,
+                auto_checkpoint: self.auto_checkpoint,
             },
         )
         .await
