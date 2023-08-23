@@ -465,7 +465,7 @@ async fn start_primary(
         checkpoint_interval: config.checkpoint_interval,
     };
     let factory = PrimaryNamespaceMaker::new(conf);
-    let namespaces = Arc::new(NamespaceStore::new(factory, true));
+    let namespaces = Arc::new(NamespaceStore::new(factory, false));
 
     if let Some(ref addr) = config.rpc_server_addr {
         join_set.spawn(run_rpc_server(
