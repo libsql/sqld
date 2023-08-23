@@ -1,7 +1,7 @@
 use axum::response::IntoResponse;
 use hyper::StatusCode;
 
-use crate::{auth::AuthError, query_result_builder::QueryResultBuilderError};
+use crate::{auth::AuthError, query_result_builder::QueryResultBuilderError, replication::replica::error::ReplicationError};
 
 #[allow(clippy::enum_variant_names)]
 #[derive(Debug, thiserror::Error)]
@@ -53,6 +53,12 @@ pub enum Error {
     Anyhow(#[from] anyhow::Error),
     #[error("Invalid host header: `{0}`")]
     InvalidHost(String),
+    #[error("namespace `{0}` doesn't exist")]
+    UnexistingNamespace(String),
+    #[error("replication error: {0}")]
+    ReplicationError(#[from] ReplicationError),
+    #[error("Failed to connect to primary")]
+    PrimaryConnectionTimeout,
 }
 
 impl Error {
@@ -90,6 +96,9 @@ impl IntoResponse for Error {
             TooManyRequests => self.format_err(StatusCode::TOO_MANY_REQUESTS),
             QueryError(_) => self.format_err(StatusCode::BAD_REQUEST),
             InvalidHost(_) => self.format_err(StatusCode::BAD_REQUEST),
+            UnexistingNamespace(_) => self.format_err(StatusCode::BAD_REQUEST),
+            ReplicationError(_) => self.format_err(StatusCode::INTERNAL_SERVER_ERROR),
+            PrimaryConnectionTimeout => self.format_err(StatusCode::INTERNAL_SERVER_ERROR),
         }
     }
 }

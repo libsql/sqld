@@ -3,7 +3,6 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::bail;
 use async_lock::{RwLock, RwLockUpgradableReadGuard};
 use bytes::Bytes;
 use futures_core::Stream;
@@ -128,7 +127,7 @@ impl<F: MakeNamespace> NamespaceStore<F> {
         }
     }
 
-    pub async fn with<Fun, R>(&self, namespace: Bytes, f: Fun) -> anyhow::Result<R>
+    pub async fn with<Fun, R>(&self, namespace: Bytes, f: Fun) -> crate::Result<R>
     where
         Fun: FnOnce(&Namespace<F::Database>) -> R,
     {
@@ -142,7 +141,7 @@ impl<F: MakeNamespace> NamespaceStore<F> {
             lock.insert(namespace, ns);
             Ok(ret)
         } else {
-            bail!("namespace does not exist");
+            Err(crate::error::Error::UnexistingNamespace(String::from_utf8(namespace.to_vec()).unwrap_or_default()))
         }
     }
 
@@ -196,7 +195,6 @@ impl Namespace<ReplicaDatabase> {
     async fn new_replica(config: &ReplicaNamespaceConfig, name: Bytes) -> anyhow::Result<Self> {
         let name_str = std::str::from_utf8(&name)?;
         let db_path = config.base_path.join("dbs").join(name_str);
-        tokio::fs::create_dir_all(&db_path).await?;
         let mut join_set = JoinSet::new();
         let replicator = Replicator::new(
             db_path.clone(),
