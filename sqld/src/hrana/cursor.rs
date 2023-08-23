@@ -135,7 +135,7 @@ impl QueryResultBuilder for CursorResultBuilder {
                     affected_row_count,
                     last_insert_rowid,
                 }),
-                size: 100,
+                size: 100, // rough, order-of-magnitude estimate of the size of the entry
             }));
         }
 
