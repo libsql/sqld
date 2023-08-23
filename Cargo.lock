@@ -182,6 +182,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "async-once-cell"
+version = "0.5.3"
+
+[[package]]
 name = "async-stream"
 version = "0.3.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3732,6 +3736,7 @@ dependencies = [
  "anyhow",
  "arbitrary",
  "async-lock",
+ "async-once-cell",
  "async-trait",
  "aws-config",
  "aws-sdk-s3",

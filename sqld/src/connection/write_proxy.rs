@@ -1,7 +1,9 @@
 use std::path::PathBuf;
+use std::pin::Pin;
 use std::sync::Arc;
 
 use bytes::Bytes;
+use futures_core::Future;
 use parking_lot::Mutex as PMutex;
 use rusqlite::types::ValueRef;
 use sqld_libsql_bindings::wal_hook::TRANSPARENT_METHODS;
@@ -94,8 +96,31 @@ impl MakeConnection for MakeWriteProxyConnection {
     }
 }
 
+struct LazyConn {
+    make: Box<dyn Fn() -> Pin<Box<dyn Future<Output = Result<LibSqlConnection>> + Send>> + Send + Sync>,
+    db: async_once_cell::OnceCell<LibSqlConnection>,
+}
+
+impl LazyConn {
+    fn new<F>(f: F) -> Self 
+    where
+        F: Fn() -> Pin<Box<dyn Future<Output = Result<LibSqlConnection>> + Send>> + Send + Sync + 'static
+    {
+        Self {
+            make: Box::new(f),
+            db: async_once_cell::OnceCell::new(),
+        }
+    }
+
+    async fn get(&self) -> Result<&LibSqlConnection> {
+        self.db.get_or_try_init(|| (self.make)()).await
+    }
+
+}
+
 pub struct WriteProxyConnection {
-    read_db: LibSqlConnection,
+    /// Lazily initialized read connection
+    read_db: LazyConn,
     write_proxy: ProxyClient<Channel>,
     state: Mutex<State>,
     client_id: Uuid,
@@ -160,7 +185,7 @@ impl WriteProxyConnection {
     #[allow(clippy::too_many_arguments)]
     async fn new(
         write_proxy: ProxyClient<Channel>,
-        path: PathBuf,
+        db_path: PathBuf,
         extensions: Vec<PathBuf>,
         stats: Stats,
         config_store: Arc<DatabaseConfigStore>,
@@ -168,16 +193,27 @@ impl WriteProxyConnection {
         builder_config: QueryBuilderConfig,
         namespace: Bytes,
     ) -> Result<Self> {
-        let read_db = LibSqlConnection::new(
-            path,
-            extensions,
-            &TRANSPARENT_METHODS,
-            (),
-            stats.clone(),
-            config_store,
-            builder_config,
-        )
-        .await?;
+        let read_db = LazyConn::new({
+            let stats = stats.clone();
+            move || {
+                let db_path = db_path.clone();
+                let extensions = extensions.clone();
+                let stats = stats.clone();
+                let config_store = config_store.clone();
+                let builder_config = builder_config.clone();
+                Box::pin(
+                    LibSqlConnection::new(
+                        db_path,
+                        extensions,
+                        &TRANSPARENT_METHODS,
+                        (),
+                        stats,
+                        config_store,
+                        builder_config,
+                    ))
+            }
+        });
+
         Ok(Self {
             read_db,
             write_proxy,
@@ -272,15 +308,15 @@ impl Connection for WriteProxyConnection {
         let mut state = self.state.lock().await;
         if *state == State::Init && pgm.is_read_only() {
             self.wait_replication_sync().await?;
+            let read_db = self.read_db.get().await?;
             // We know that this program won't perform any writes. We attempt to run it on the
             // replica. If it leaves an open transaction, then this program is an interactive
             // transaction, so we rollback the replica, and execute again on the primary.
-            let (builder, new_state) = self
-                .read_db
+            let (builder, new_state) = read_db
                 .execute_program(pgm.clone(), auth, builder)
                 .await?;
             if new_state != State::Init {
-                self.read_db.rollback(auth).await?;
+                read_db.rollback(auth).await?;
                 self.execute_remote(pgm, &mut state, auth, builder).await
             } else {
                 Ok((builder, new_state))
@@ -292,7 +328,7 @@ impl Connection for WriteProxyConnection {
 
     async fn describe(&self, sql: String, auth: Authenticated) -> Result<DescribeResult> {
         self.wait_replication_sync().await?;
-        self.read_db.describe(sql, auth).await
+        self.read_db.get().await?.describe(sql, auth).await
     }
 
     async fn is_autocommit(&self) -> Result<bool> {
