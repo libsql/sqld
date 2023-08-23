@@ -327,7 +327,7 @@ async fn start_replica(
         hard_reset: hard_reset_snd,
     };
     let factory = ReplicaNamespaceMaker::new(conf);
-    let namespaces = Arc::new(NamespaceStore::new(factory));
+    let namespaces = Arc::new(NamespaceStore::new(factory, true));
 
     // start the hard reset monitor
     join_set.spawn({
@@ -465,7 +465,7 @@ async fn start_primary(
         checkpoint_interval: config.checkpoint_interval,
     };
     let factory = PrimaryNamespaceMaker::new(conf);
-    let namespaces = Arc::new(NamespaceStore::new(factory));
+    let namespaces = Arc::new(NamespaceStore::new(factory, true));
 
     if let Some(ref addr) = config.rpc_server_addr {
         join_set.spawn(run_rpc_server(

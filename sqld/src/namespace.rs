@@ -99,6 +99,7 @@ pub struct NamespaceStore<F: MakeNamespace> {
     inner: RwLock<HashMap<Bytes, Namespace<F::Database>>>,
     /// The namespace factory, to create new namespaces.
     factory: F,
+    allow_lazy_creation: bool,
 }
 
 impl NamespaceStore<ReplicaNamespaceMaker> {
@@ -119,10 +120,11 @@ impl NamespaceStore<ReplicaNamespaceMaker> {
 }
 
 impl<F: MakeNamespace> NamespaceStore<F> {
-    pub fn new(factory: F) -> Self {
+    pub fn new(factory: F, allow_lazy_creation: bool) -> Self {
         Self {
             inner: Default::default(),
             factory,
+            allow_lazy_creation,
         }
     }
 
@@ -133,12 +135,14 @@ impl<F: MakeNamespace> NamespaceStore<F> {
         let lock = self.inner.upgradable_read().await;
         if let Some(ns) = lock.get(&namespace) {
             Ok(f(ns))
-        } else {
+        } else if self.allow_lazy_creation {
             let mut lock = RwLockUpgradableReadGuard::upgrade(lock).await;
             let ns = self.factory.create(namespace.clone(), None).await?;
             let ret = f(&ns);
             lock.insert(namespace, ns);
             Ok(ret)
+        } else {
+            bail!("namespace does not exist");
         }
     }
 
