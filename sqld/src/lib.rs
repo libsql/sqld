@@ -48,6 +48,7 @@ mod error;
 mod heartbeat;
 mod hrana;
 mod http;
+mod migration;
 mod namespace;
 mod query;
 mod query_analysis;
@@ -59,7 +60,6 @@ mod stats;
 mod test;
 mod utils;
 pub mod version;
-mod migration;
 
 const MAX_CONCURRENT_DBS: usize = 128;
 const DB_CREATE_TIMEOUT: Duration = Duration::from_secs(1);
@@ -642,9 +642,26 @@ fn init_sentinel_file(path: &Path) -> anyhow::Result<bool> {
     Ok(false)
 }
 
+fn init_version_file(db_path: &Path) -> anyhow::Result<()> {
+    // try to detect the presence of the data file at the root of db_path. If it's there, it's a
+    // pre-0.18.0 database and needs to be migrated
+    if db_path.join("data").exists() {
+        return Ok(());
+    }
+
+    let version_path = db_path.join("dbs").join(".version");
+    if !version_path.exists() {
+        std::fs::create_dir_all(db_path.join("dbs"))?;
+        std::fs::write(version_path, env!("CARGO_PKG_VERSION"))?;
+    }
+
+    Ok(())
+}
+
 pub async fn run_server(config: Config) -> anyhow::Result<()> {
     tracing::trace!("Backend: {:?}", config.backend);
 
+    init_version_file(&config.db_path)?;
     maybe_migrate(&config.db_path)?;
 
     if config.bottomless_replication.is_some() {

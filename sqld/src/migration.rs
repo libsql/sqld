@@ -1,5 +1,5 @@
-use std::path::Path;
 use std::fs::read_to_string;
+use std::path::Path;
 
 use anyhow::Context;
 use semver::Version as SemVer;
@@ -23,7 +23,7 @@ pub fn maybe_migrate(db_path: &Path) -> anyhow::Result<()> {
 fn detect_version(db_path: &Path) -> anyhow::Result<Version> {
     let version_file_path = db_path.join(".version");
     if !version_file_path.exists() {
-        return Ok(Version::Pre0_18)
+        return Ok(Version::Pre0_18);
     }
 
     let version_str = read_to_string(version_file_path)?;
@@ -40,20 +40,20 @@ fn migrate_step_from_pre_0_18(db_path: &Path) -> anyhow::Result<()> {
         let ns_dir = db_path.join("dbs").join("default");
         std::fs::create_dir_all(&ns_dir)?;
 
-        macro_rules! maybe_link {
-            ($name:expr) => {
-                if db_path.join($name).exists() {
-                    std::fs::hard_link(db_path.join($name), ns_dir.join($name))?;
-                }
-            };
-        }
+        let maybe_link = |name| -> anyhow::Result<()> {
+            if db_path.join(name).exists() {
+                std::fs::hard_link(db_path.join(name), ns_dir.join(name))?;
+            }
+
+            Ok(())
+        };
 
         // link standalone files
-        maybe_link!("data");
-        maybe_link!("data-shm");
-        maybe_link!("data-wal");
-        maybe_link!("wallog");
-        maybe_link!("client_wal_index");
+        maybe_link("data")?;
+        maybe_link("data-shm")?;
+        maybe_link("data-wal")?;
+        maybe_link("wallog")?;
+        maybe_link("client_wal_index")?;
 
         // link snapshots
         let snapshot_dir = db_path.join("snapshots");
@@ -76,12 +76,22 @@ fn migrate_step_from_pre_0_18(db_path: &Path) -> anyhow::Result<()> {
         return Err(e);
     }
 
-    // best effort cleanup 
-    let _ = std::fs::remove_file(db_path.join("data"));
-    let _ = std::fs::remove_file(db_path.join("data-shm"));
-    let _ = std::fs::remove_file(db_path.join("data-wal"));
-    let _ = std::fs::remove_file(db_path.join("wallog"));
-    let _ = std::fs::remove_file(db_path.join("client_wal_index"));
+    // best effort cleanup
+    let try_remove = |name| {
+        let path = db_path.join(name);
+        if let Err(e) = std::fs::remove_file(&path) {
+            tracing::warn!(
+                "failed to remove stale file `{}` during migration: {e}",
+                path.display()
+            );
+        }
+    };
+
+    try_remove(db_path.join("data"));
+    try_remove(db_path.join("data-shm"));
+    try_remove(db_path.join("data-wal"));
+    try_remove(db_path.join("wallog"));
+    try_remove(db_path.join("client_wal_index"));
 
     Ok(())
 }
