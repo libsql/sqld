@@ -634,9 +634,9 @@ impl Replicator {
 
                 let key = format!("{}-{}/db.gz", self.db_name, self.generation);
 
-                // Unfortunally we can't send the gzip output in a single call without buffering
-                // the whole snapshot in memory because S3 requires the `Content-Length` header
-                // to be set.
+                // Since it's not possible to know the exact size of a gzip stream and the
+                // PutObject operation requires the Content-Length header to be set, we need to
+                // send the content in chunks of known size.
                 upload_s3_multipart(&self.client, &key, &self.bucket, gzip_reader).await?;
             }
         };
