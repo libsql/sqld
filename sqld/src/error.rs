@@ -53,10 +53,12 @@ pub enum Error {
     Anyhow(#[from] anyhow::Error),
     #[error("Invalid host header: `{0}`")]
     InvalidHost(String),
-    #[error("namespace `{0}` doesn't exist")]
+    #[error("Namespace `{0}` doesn't exist")]
     UnexistingNamespace(String),
-    #[error("namespace `{0}` already exists")]
+    #[error("Namespace `{0}` already exists")]
     NamespaceAlreadyExist(String),
+    #[error("Invalid namespace")]
+    InvalidNamespace,
     #[error("replication error: {0}")]
     ReplicationError(#[from] ReplicationError),
     #[error("Failed to connect to primary")]
@@ -102,6 +104,7 @@ impl IntoResponse for Error {
             ReplicationError(_) => self.format_err(StatusCode::INTERNAL_SERVER_ERROR),
             PrimaryConnectionTimeout => self.format_err(StatusCode::INTERNAL_SERVER_ERROR),
             NamespaceAlreadyExist(_) => self.format_err(StatusCode::BAD_REQUEST),
+            InvalidNamespace => self.format_err(StatusCode::BAD_REQUEST),
         }
     }
 }

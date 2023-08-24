@@ -67,7 +67,9 @@ impl Replicator {
             hard_reset,
         };
 
+        dbg!();
         this.try_perform_handshake().await?;
+        dbg!();
 
         let meta_file = Arc::new(WalIndexMeta::open(&db_path)?);
         let meta = this.meta.clone();
@@ -138,6 +140,7 @@ impl Replicator {
     }
 
     pub async fn run(mut self) -> anyhow::Result<()> {
+        dbg!();
         loop {
             self.try_perform_handshake().await?;
 
@@ -150,42 +153,54 @@ impl Replicator {
         }
     }
 
+    async fn handle_replication_error(&self, error: ReplicationError) -> crate::error::Error {
+        match error {
+            ReplicationError::Lagging => {
+                tracing::error!("Replica ahead of primary: hard-reseting replica");
+                self.hard_reset
+                    .send(self.namespace.clone())
+                    .await
+                    .expect("reset loop exited");
+
+                return error.into()
+            }
+            ReplicationError::DbIncompatible => {
+                tracing::error!("Primary is attempting to replicate a different database, overwriting replica.");
+                self.hard_reset
+                    .send(self.namespace.clone())
+                    .await
+                    .expect("reset loop exited");
+
+                return error.into()
+            }
+            _ => return error.into(),
+        }
+    }
+
     async fn try_perform_handshake(&mut self) -> crate::Result<()> {
+        dbg!();
+
         let mut error_printed = false;
         for _ in 0..HANDSHAKE_MAX_RETRIES {
             tracing::info!("Attempting to perform handshake with primary.");
             let req = self.make_request(HelloRequest {});
             match self.client.hello(req).await {
                 Ok(resp) => {
+                    dbg!();
                     let hello = resp.into_inner();
 
                     let mut lock = self.meta.lock().await;
                     let meta = match *lock {
                         Some(meta) => match meta.merge_from_hello(hello) {
                             Ok(meta) => meta,
-                            Err(e @ ReplicationError::Lagging) => {
-                                tracing::error!("Replica ahead of primary: hard-reseting replica");
-                                self.hard_reset
-                                    .send(self.namespace.clone())
-                                    .await
-                                    .expect("reset loop exited");
-
-                                return Err(e.into())
-                            }
-                            Err(e @ ReplicationError::DbIncompatible) => {
-                                tracing::error!("Primary is attempting to replicate a different database, overwriting replica.");
-                                self.hard_reset
-                                    .send(self.namespace.clone())
-                                    .await
-                                    .expect("reset loop exited");
-
-                                return Err(e.into())
-                            }
-                            Err(e) => return Err(e.into()),
+                            Err(e) => return Err(self.handle_replication_error(e).await),
                         },
                         None => {
                             match WalIndexMeta::read_from_path(&self.db_path)? {
-                                Some(meta) => meta.merge_from_hello(hello)?,
+                                Some(meta) => match meta.merge_from_hello(hello) {
+                                    Ok(meta) => meta,
+                                    Err(e) => return Err(self.handle_replication_error(e).await),
+                                },
                                 None => WalIndexMeta::new_from_hello(hello)?,
                             }
                         },
@@ -196,9 +211,11 @@ impl Replicator {
                     return Ok(());
                 }
                 Err(e) if e.code() == Code::FailedPrecondition && e.message() == UNEXISTING_NAMESPACE => {
+                    dbg!();
                     return Err(crate::error::Error::UnexistingNamespace(String::from_utf8(self.namespace.to_vec()).unwrap_or_default()));
                 }
                 Err(e) if !error_printed => {
+                    dbg!();
                     tracing::error!("error connecting to primary. retrying. error: {e}");
                     error_printed = true;
                 }

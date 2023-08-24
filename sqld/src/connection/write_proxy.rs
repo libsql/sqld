@@ -113,7 +113,7 @@ impl LazyConn {
     }
 
     async fn get(&self) -> Result<&LibSqlConnection> {
-        self.db.get_or_try_init(|| (self.make)()).await
+        self.db.get_or_try_init_with(|| (self.make)()).await
     }
 
 }

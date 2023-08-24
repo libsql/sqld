@@ -184,6 +184,7 @@ dependencies = [
 [[package]]
 name = "async-once-cell"
 version = "0.5.3"
+source = "git+https://github.com/MarinPostma/async-once-cell.git?rev=93d8f5b#93d8f5ba53152bb6c5448dac9a6d1a11219705e1"
 
 [[package]]
 name = "async-stream"

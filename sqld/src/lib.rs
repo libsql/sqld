@@ -334,6 +334,7 @@ async fn start_replica(
         let namespaces = namespaces.clone();
         async move {
             while let Some(ns) = hard_reset_rcv.recv().await {
+                dbg!();
                 tracing::warn!(
                     "received reset signal for: {:?}",
                     std::str::from_utf8(&ns).ok()
