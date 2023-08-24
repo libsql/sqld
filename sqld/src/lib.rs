@@ -32,6 +32,7 @@ use self::connection::config::DatabaseConfigStore;
 use self::connection::libsql::open_db;
 use crate::auth::Auth;
 use crate::error::Error;
+use crate::migration::maybe_migrate;
 use crate::stats::Stats;
 
 use sha256::try_digest;
@@ -58,6 +59,7 @@ mod stats;
 mod test;
 mod utils;
 pub mod version;
+mod migration;
 
 const MAX_CONCURRENT_DBS: usize = 128;
 const DB_CREATE_TIMEOUT: Duration = Duration::from_secs(1);
@@ -642,6 +644,8 @@ fn init_sentinel_file(path: &Path) -> anyhow::Result<bool> {
 
 pub async fn run_server(config: Config) -> anyhow::Result<()> {
     tracing::trace!("Backend: {:?}", config.backend);
+
+    maybe_migrate(&config.db_path)?;
 
     if config.bottomless_replication.is_some() {
         bottomless::static_init::register_bottomless_methods();
