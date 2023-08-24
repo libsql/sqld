@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
+use anyhow::bail;
 use async_lock::{RwLock, RwLockUpgradableReadGuard};
 use bytes::Bytes;
 use futures_core::Stream;
@@ -145,13 +146,13 @@ impl<F: MakeNamespace> NamespaceStore<F> {
         }
     }
 
-    pub async fn create_with_dump(&self, namespace: Bytes, dump: DumpStream) -> anyhow::Result<()> {
+    pub async fn create(&self, namespace: Bytes, dump: Option<DumpStream>) -> crate::Result<()> {
         let lock = self.inner.upgradable_read().await;
         if lock.contains_key(&namespace) {
-            bail!("cannot create from dump: the namespace already exists");
+            return Err(crate::error::Error::NamespaceAlreadyExist(String::from_utf8(namespace.to_vec()).unwrap_or_default()))
         }
 
-        let ns = self.factory.create(namespace.clone(), Some(dump)).await?;
+        let ns = self.factory.create(namespace.clone(), dump).await?;
 
         let mut lock = RwLockUpgradableReadGuard::upgrade(lock).await;
         lock.insert(namespace, ns);

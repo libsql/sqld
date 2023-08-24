@@ -55,6 +55,8 @@ pub enum Error {
     InvalidHost(String),
     #[error("namespace `{0}` doesn't exist")]
     UnexistingNamespace(String),
+    #[error("namespace `{0}` already exists")]
+    NamespaceAlreadyExist(String),
     #[error("replication error: {0}")]
     ReplicationError(#[from] ReplicationError),
     #[error("Failed to connect to primary")]
@@ -99,6 +101,7 @@ impl IntoResponse for Error {
             UnexistingNamespace(_) => self.format_err(StatusCode::BAD_REQUEST),
             ReplicationError(_) => self.format_err(StatusCode::INTERNAL_SERVER_ERROR),
             PrimaryConnectionTimeout => self.format_err(StatusCode::INTERNAL_SERVER_ERROR),
+            NamespaceAlreadyExist(_) => self.format_err(StatusCode::BAD_REQUEST),
         }
     }
 }

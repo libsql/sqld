@@ -26,6 +26,10 @@ pub async fn run_admin_api<F: MakeNamespace>(
         .route("/v1/block", post(handle_post_block))
         .route(
             "/v1/namespaces/:namespace/create-with-dump",
+            post(handle_create_namespace_with_dump),
+        )
+        .route(
+            "/v1/namespaces/:namespace/create",
             post(handle_create_namespace),
         )
         .with_state(Arc::new(AppState {
@@ -86,7 +90,7 @@ struct Error {
     msg: String,
 }
 
-async fn handle_create_namespace<F: MakeNamespace>(
+async fn handle_create_namespace_with_dump<F: MakeNamespace>(
     State(app_state): State<Arc<AppState<F>>>,
     Path(namespace): Path<String>,
     body: BodyStream,
@@ -94,7 +98,21 @@ async fn handle_create_namespace<F: MakeNamespace>(
     let dump = Box::new(body.map_err(|e| std::io::Error::new(ErrorKind::Other, e)));
     match app_state
         .namespaces
-        .create_with_dump(namespace.into(), dump)
+        .create(namespace.into(), Some(dump))
+        .await
+    {
+        Ok(_) => Ok(()),
+        Err(e) => Err(Json(Error { msg: e.to_string() })),
+    }
+}
+
+async fn handle_create_namespace<F: MakeNamespace>(
+    State(app_state): State<Arc<AppState<F>>>,
+    Path(namespace): Path<String>,
+) -> Result<(), Json<Error>> {
+    match app_state
+        .namespaces
+        .create(namespace.into(), None)
         .await
     {
         Ok(_) => Ok(()),
