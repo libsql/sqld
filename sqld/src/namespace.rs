@@ -103,8 +103,7 @@ impl MakeNamespace for ReplicaNamespaceMaker {
         allow_creation: bool,
     ) -> crate::Result<Namespace<Self::Database>> {
         if dump.is_some() {
-            // bail!("cannot load dump on replica");
-            todo!()
+            return Err(Error::ReplicaLoadDump);
         }
 
         Namespace::new_replica(&self.config, name, allow_creation).await
@@ -235,7 +234,7 @@ impl Namespace<ReplicaDatabase> {
 
         // there isn't a database folder for this database, and we're not allowed to create it.
         if !allow_creation && !db_path.exists() {
-            return Err(crate::error::Error::UnexistingNamespace(
+            return Err(crate::error::Error::NamespaceDoesntExist(
                 String::from_utf8(name.to_vec()).unwrap_or_default(),
             ));
         }
@@ -323,7 +322,7 @@ impl Namespace<PrimaryDatabase> {
         // The database folder doesn't exist, bottomless replication is disabled (no db to recover)
         // and we're not allowed to create a new database, return an error.
         if !allow_creation && config.bottomless_replication.is_none() && !db_path.exists() {
-            return Err(crate::error::Error::UnexistingNamespace(
+            return Err(crate::error::Error::NamespaceDoesntExist(
                 String::from_utf8(name.to_vec()).unwrap_or_default(),
             ));
         }
@@ -345,7 +344,7 @@ impl Namespace<PrimaryDatabase> {
                 // FIXME: this is not atomic, we could be left with a stale directory. Maybe do
                 // setup in a temp directory and then atomically rename it?
                 let _ = tokio::fs::remove_dir_all(&db_path).await;
-                return Err(crate::error::Error::UnexistingNamespace(
+                return Err(crate::error::Error::NamespaceDoesntExist(
                     String::from_utf8(name.to_vec()).unwrap_or_default(),
                 ));
             }
@@ -404,8 +403,7 @@ impl Namespace<PrimaryDatabase> {
 
         if let Some(dump) = dump {
             if !is_fresh_db {
-                todo!();
-                // anyhow::bail!("cannot load from a dump if a database already exists.\nIf you're sure you want to load from a dump, delete your database folder at `{}`", db_path.display());
+                return Err(Error::LoadDumpExistingDb);
             }
             let mut ctx = ctx_builder();
             load_dump(&db_path, dump, &mut ctx).await?;

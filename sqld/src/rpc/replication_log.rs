@@ -25,7 +25,7 @@ use crate::DEFAULT_NAMESPACE_NAME;
 use self::rpc::replication_log_server::ReplicationLog;
 use self::rpc::{Frame, Frames, HelloRequest, HelloResponse, LogOffset};
 
-use super::UNEXISTING_NAMESPACE;
+use super::NAMESPACE_DOESNT_EXIST;
 
 pub struct ReplicationLogService {
     namespaces: Arc<NamespaceStore<PrimaryNamespaceMaker>>,
@@ -161,8 +161,8 @@ impl ReplicationLog for ReplicationLogService {
             .with(namespace, |ns| ns.db.logger.clone())
             .await
             .map_err(|e| {
-                if let crate::error::Error::UnexistingNamespace(_) = e {
-                    Status::failed_precondition(UNEXISTING_NAMESPACE)
+                if let crate::error::Error::NamespaceDoesntExist(_) = e {
+                    Status::failed_precondition(NAMESPACE_DOESNT_EXIST)
                 } else {
                     Status::internal(e.to_string())
                 }
@@ -200,8 +200,8 @@ impl ReplicationLog for ReplicationLogService {
             .with(namespace, |ns| ns.db.logger.clone())
             .await
             .map_err(|e| {
-                if let crate::error::Error::UnexistingNamespace(_) = e {
-                    Status::failed_precondition(UNEXISTING_NAMESPACE)
+                if let crate::error::Error::NamespaceDoesntExist(_) = e {
+                    Status::failed_precondition(NAMESPACE_DOESNT_EXIST)
                 } else {
                     Status::internal(e.to_string())
                 }
@@ -239,8 +239,8 @@ impl ReplicationLog for ReplicationLogService {
             .with(namespace, |ns| ns.db.logger.clone())
             .await
             .map_err(|e| {
-                if let crate::error::Error::UnexistingNamespace(_) = e {
-                    Status::failed_precondition(UNEXISTING_NAMESPACE)
+                if let crate::error::Error::NamespaceDoesntExist(_) = e {
+                    Status::failed_precondition(NAMESPACE_DOESNT_EXIST)
                 } else {
                     Status::internal(e.to_string())
                 }

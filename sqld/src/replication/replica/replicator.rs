@@ -20,7 +20,7 @@ use crate::rpc::replication_log::rpc::{
     replication_log_client::ReplicationLogClient, HelloRequest, LogOffset,
 };
 use crate::rpc::replication_log::NEED_SNAPSHOT_ERROR_MSG;
-use crate::rpc::UNEXISTING_NAMESPACE;
+use crate::rpc::NAMESPACE_DOESNT_EXIST;
 
 use super::hook::{Frames, InjectorHookCtx};
 use super::injector::FrameInjector;
@@ -205,9 +205,9 @@ impl Replicator {
                 }
                 Err(e)
                     if e.code() == Code::FailedPrecondition
-                        && e.message() == UNEXISTING_NAMESPACE =>
+                        && e.message() == NAMESPACE_DOESNT_EXIST =>
                 {
-                    return Err(crate::error::Error::UnexistingNamespace(
+                    return Err(crate::error::Error::NamespaceDoesntExist(
                         String::from_utf8(self.namespace.to_vec()).unwrap_or_default(),
                     ));
                 }

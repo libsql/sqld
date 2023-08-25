@@ -16,7 +16,7 @@ pub mod replication_log;
 pub mod replication_log_proxy;
 
 /// A tonic error code to signify that a namespace doesn't exist.
-pub const UNEXISTING_NAMESPACE: &str = "NEED_SNAPSHOT";
+pub const NAMESPACE_DOESNT_EXIST: &str = "NAMESPACE_DOESNT_EXIST";
 
 #[allow(clippy::too_many_arguments)]
 pub async fn run_rpc_server(

@@ -57,7 +57,7 @@ pub enum Error {
     #[error("Invalid host header: `{0}`")]
     InvalidHost(String),
     #[error("Namespace `{0}` doesn't exist")]
-    UnexistingNamespace(String),
+    NamespaceDoesntExist(String),
     #[error("Namespace `{0}` already exists")]
     NamespaceAlreadyExist(String),
     #[error("Invalid namespace")]
@@ -66,6 +66,10 @@ pub enum Error {
     ReplicationError(#[from] ReplicationError),
     #[error("Failed to connect to primary")]
     PrimaryConnectionTimeout,
+    #[error("Cannot load a dump on a replica")]
+    ReplicaLoadDump,
+    #[error("cannot load from a dump if a database already exists.")]
+    LoadDumpExistingDb,
 }
 
 impl Error {
@@ -103,11 +107,13 @@ impl IntoResponse for Error {
             TooManyRequests => self.format_err(StatusCode::TOO_MANY_REQUESTS),
             QueryError(_) => self.format_err(StatusCode::BAD_REQUEST),
             InvalidHost(_) => self.format_err(StatusCode::BAD_REQUEST),
-            UnexistingNamespace(_) => self.format_err(StatusCode::BAD_REQUEST),
+            NamespaceDoesntExist(_) => self.format_err(StatusCode::BAD_REQUEST),
             ReplicationError(_) => self.format_err(StatusCode::INTERNAL_SERVER_ERROR),
             PrimaryConnectionTimeout => self.format_err(StatusCode::INTERNAL_SERVER_ERROR),
             NamespaceAlreadyExist(_) => self.format_err(StatusCode::BAD_REQUEST),
             InvalidNamespace => self.format_err(StatusCode::BAD_REQUEST),
+            ReplicaLoadDump => self.format_err(StatusCode::BAD_REQUEST),
+            LoadDumpExistingDb => self.format_err(StatusCode::BAD_REQUEST),
         }
     }
 }
