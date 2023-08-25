@@ -97,14 +97,19 @@ impl MakeConnection for MakeWriteProxyConnection {
 }
 
 struct LazyConn {
-    make: Box<dyn Fn() -> Pin<Box<dyn Future<Output = Result<LibSqlConnection>> + Send>> + Send + Sync>,
+    make: Box<
+        dyn Fn() -> Pin<Box<dyn Future<Output = Result<LibSqlConnection>> + Send>> + Send + Sync,
+    >,
     db: async_once_cell::OnceCell<LibSqlConnection>,
 }
 
 impl LazyConn {
-    fn new<F>(f: F) -> Self 
+    fn new<F>(f: F) -> Self
     where
-        F: Fn() -> Pin<Box<dyn Future<Output = Result<LibSqlConnection>> + Send>> + Send + Sync + 'static
+        F: Fn() -> Pin<Box<dyn Future<Output = Result<LibSqlConnection>> + Send>>
+            + Send
+            + Sync
+            + 'static,
     {
         Self {
             make: Box::new(f),
@@ -115,7 +120,6 @@ impl LazyConn {
     async fn get(&self) -> Result<&LibSqlConnection> {
         self.db.get_or_try_init_with(|| (self.make)()).await
     }
-
 }
 
 pub struct WriteProxyConnection {
@@ -200,17 +204,15 @@ impl WriteProxyConnection {
                 let extensions = extensions.clone();
                 let stats = stats.clone();
                 let config_store = config_store.clone();
-                let builder_config = builder_config.clone();
-                Box::pin(
-                    LibSqlConnection::new(
-                        db_path,
-                        extensions,
-                        &TRANSPARENT_METHODS,
-                        (),
-                        stats,
-                        config_store,
-                        builder_config,
-                    ))
+                Box::pin(LibSqlConnection::new(
+                    db_path,
+                    extensions,
+                    &TRANSPARENT_METHODS,
+                    (),
+                    stats,
+                    config_store,
+                    builder_config,
+                ))
             }
         });
 
@@ -312,9 +314,7 @@ impl Connection for WriteProxyConnection {
             // We know that this program won't perform any writes. We attempt to run it on the
             // replica. If it leaves an open transaction, then this program is an interactive
             // transaction, so we rollback the replica, and execute again on the primary.
-            let (builder, new_state) = read_db
-                .execute_program(pgm.clone(), auth, builder)
-                .await?;
+            let (builder, new_state) = read_db.execute_program(pgm.clone(), auth, builder).await?;
             if new_state != State::Init {
                 read_db.rollback(auth).await?;
                 self.execute_remote(pgm, &mut state, auth, builder).await

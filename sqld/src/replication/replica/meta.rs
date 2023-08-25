@@ -33,13 +33,13 @@ pub struct WalIndexMeta {
 impl WalIndexMeta {
     pub fn open(db_path: &Path) -> crate::Result<File> {
         let path = db_path.join("client_wal_index");
-        std::fs::create_dir_all(&db_path)?;
+        std::fs::create_dir_all(db_path)?;
 
         Ok(OpenOptions::new()
-          .create(true)
-          .read(true)
-          .write(true)
-          .open(path)?)
+            .create(true)
+            .read(true)
+            .write(true)
+            .open(path)?)
     }
 
     pub fn read_from_path(db_path: &Path) -> anyhow::Result<Option<Self>> {

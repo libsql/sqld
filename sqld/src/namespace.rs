@@ -70,7 +70,11 @@ impl MakeNamespace for PrimaryNamespaceMaker {
     }
 
     async fn destroy(&self, namespace: &Bytes) -> crate::Result<()> {
-        let ns_path = self.config.base_path.join("dbs").join(std::str::from_utf8(namespace).unwrap());
+        let ns_path = self
+            .config
+            .base_path
+            .join("dbs")
+            .join(std::str::from_utf8(namespace).unwrap());
         tokio::fs::remove_dir_all(ns_path).await?;
         Ok(())
     }
@@ -107,7 +111,11 @@ impl MakeNamespace for ReplicaNamespaceMaker {
     }
 
     async fn destroy(&self, namespace: &Bytes) -> crate::Result<()> {
-        let ns_path = self.config.base_path.join("dbs").join(std::str::from_utf8(namespace).unwrap());
+        let ns_path = self
+            .config
+            .base_path
+            .join("dbs")
+            .join(std::str::from_utf8(namespace).unwrap());
         tokio::fs::remove_dir_all(ns_path).await?;
         Ok(())
     }
@@ -133,7 +141,7 @@ impl NamespaceStore<ReplicaNamespaceMaker> {
 
             // deallocate in-memory resources
             ns.destroy().await?;
-        } 
+        }
 
         // destroy on-disk database
         self.factory.destroy(&namespace).await?;
@@ -164,17 +172,22 @@ impl<F: MakeNamespace> NamespaceStore<F> {
             Ok(f(ns))
         } else {
             let mut lock = RwLockUpgradableReadGuard::upgrade(lock).await;
-            let ns = self.factory.create(namespace.clone(), None, self.allow_lazy_creation).await?;
+            let ns = self
+                .factory
+                .create(namespace.clone(), None, self.allow_lazy_creation)
+                .await?;
             let ret = f(&ns);
             lock.insert(namespace, ns);
             Ok(ret)
-        } 
+        }
     }
 
     pub async fn create(&self, namespace: Bytes, dump: Option<DumpStream>) -> crate::Result<()> {
         let lock = self.inner.upgradable_read().await;
         if lock.contains_key(&namespace) {
-            return Err(crate::error::Error::NamespaceAlreadyExist(String::from_utf8(namespace.to_vec()).unwrap_or_default()))
+            return Err(crate::error::Error::NamespaceAlreadyExist(
+                String::from_utf8(namespace.to_vec()).unwrap_or_default(),
+            ));
         }
 
         let ns = self.factory.create(namespace.clone(), dump, true).await?;
@@ -216,13 +229,19 @@ pub struct ReplicaNamespaceConfig {
 }
 
 impl Namespace<ReplicaDatabase> {
-    async fn new_replica(config: &ReplicaNamespaceConfig, name: Bytes, allow_creation: bool) -> crate::Result<Self> {
+    async fn new_replica(
+        config: &ReplicaNamespaceConfig,
+        name: Bytes,
+        allow_creation: bool,
+    ) -> crate::Result<Self> {
         let name_str = std::str::from_utf8(&name).map_err(|_| Error::InvalidNamespace)?;
         let db_path = config.base_path.join("dbs").join(name_str);
 
         // there isn't a database folder for this database, and we're not allowed to create it.
         if !allow_creation && !db_path.exists() {
-            return Err(crate::error::Error::UnexistingNamespace(String::from_utf8(name.to_vec()).unwrap_or_default()))
+            return Err(crate::error::Error::UnexistingNamespace(
+                String::from_utf8(name.to_vec()).unwrap_or_default(),
+            ));
         }
 
         let mut join_set = JoinSet::new();
@@ -308,7 +327,9 @@ impl Namespace<PrimaryDatabase> {
         // and we're not allowed to create a new database, return an error.
         if !allow_creation && config.bottomless_replication.is_none() && !db_path.exists() {
             dbg!();
-            return Err(crate::error::Error::UnexistingNamespace(String::from_utf8(name.to_vec()).unwrap_or_default()))
+            return Err(crate::error::Error::UnexistingNamespace(
+                String::from_utf8(name.to_vec()).unwrap_or_default(),
+            ));
         }
         let mut is_dirty = config.db_is_dirty;
 
@@ -331,7 +352,9 @@ impl Namespace<PrimaryDatabase> {
                 // FIXME: this is not atomic, we could be left with a stale directory. Maybe do
                 // setup in a temp directory and then atomically rename it?
                 let _ = tokio::fs::remove_dir_all(&db_path).await;
-                return Err(crate::error::Error::UnexistingNamespace(String::from_utf8(name.to_vec()).unwrap_or_default()))
+                return Err(crate::error::Error::UnexistingNamespace(
+                    String::from_utf8(name.to_vec()).unwrap_or_default(),
+                ));
             }
 
             is_dirty |= did_recover;

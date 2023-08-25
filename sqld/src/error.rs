@@ -1,7 +1,10 @@
 use axum::response::IntoResponse;
 use hyper::StatusCode;
 
-use crate::{auth::AuthError, query_result_builder::QueryResultBuilderError, replication::replica::error::ReplicationError};
+use crate::{
+    auth::AuthError, query_result_builder::QueryResultBuilderError,
+    replication::replica::error::ReplicationError,
+};
 
 #[allow(clippy::enum_variant_names)]
 #[derive(Debug, thiserror::Error)]

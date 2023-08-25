@@ -110,11 +110,7 @@ async fn handle_create_namespace<F: MakeNamespace>(
     State(app_state): State<Arc<AppState<F>>>,
     Path(namespace): Path<String>,
 ) -> Result<(), Json<Error>> {
-    match app_state
-        .namespaces
-        .create(namespace.into(), None)
-        .await
-    {
+    match app_state.namespaces.create(namespace.into(), None).await {
         Ok(_) => Ok(()),
         Err(e) => Err(Json(Error { msg: e.to_string() })),
     }

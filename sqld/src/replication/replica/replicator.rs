@@ -16,11 +16,11 @@ use crate::replication::frame::Frame;
 use crate::replication::replica::error::ReplicationError;
 use crate::replication::replica::snapshot::TempSnapshot;
 use crate::replication::FrameNo;
-use crate::rpc::UNEXISTING_NAMESPACE;
 use crate::rpc::replication_log::rpc::{
     replication_log_client::ReplicationLogClient, HelloRequest, LogOffset,
 };
 use crate::rpc::replication_log::NEED_SNAPSHOT_ERROR_MSG;
+use crate::rpc::UNEXISTING_NAMESPACE;
 
 use super::hook::{Frames, InjectorHookCtx};
 use super::injector::FrameInjector;
@@ -106,7 +106,6 @@ impl Replicator {
                 Ok(())
             }
         };
-        
 
         let (snd, rcv) = oneshot::channel();
         join_set.spawn_blocking({
@@ -162,18 +161,20 @@ impl Replicator {
                     .await
                     .expect("reset loop exited");
 
-                return error.into()
+                error.into()
             }
             ReplicationError::DbIncompatible => {
-                tracing::error!("Primary is attempting to replicate a different database, overwriting replica.");
+                tracing::error!(
+                    "Primary is attempting to replicate a different database, overwriting replica."
+                );
                 self.hard_reset
                     .send(self.namespace.clone())
                     .await
                     .expect("reset loop exited");
 
-                return error.into()
+                error.into()
             }
-            _ => return error.into(),
+            _ => error.into(),
         }
     }
 
@@ -195,14 +196,12 @@ impl Replicator {
                             Ok(meta) => meta,
                             Err(e) => return Err(self.handle_replication_error(e).await),
                         },
-                        None => {
-                            match WalIndexMeta::read_from_path(&self.db_path)? {
-                                Some(meta) => match meta.merge_from_hello(hello) {
-                                    Ok(meta) => meta,
-                                    Err(e) => return Err(self.handle_replication_error(e).await),
-                                },
-                                None => WalIndexMeta::new_from_hello(hello)?,
-                            }
+                        None => match WalIndexMeta::read_from_path(&self.db_path)? {
+                            Some(meta) => match meta.merge_from_hello(hello) {
+                                Ok(meta) => meta,
+                                Err(e) => return Err(self.handle_replication_error(e).await),
+                            },
+                            None => WalIndexMeta::new_from_hello(hello)?,
                         },
                     };
 
@@ -210,9 +209,14 @@ impl Replicator {
 
                     return Ok(());
                 }
-                Err(e) if e.code() == Code::FailedPrecondition && e.message() == UNEXISTING_NAMESPACE => {
+                Err(e)
+                    if e.code() == Code::FailedPrecondition
+                        && e.message() == UNEXISTING_NAMESPACE =>
+                {
                     dbg!();
-                    return Err(crate::error::Error::UnexistingNamespace(String::from_utf8(self.namespace.to_vec()).unwrap_or_default()));
+                    return Err(crate::error::Error::UnexistingNamespace(
+                        String::from_utf8(self.namespace.to_vec()).unwrap_or_default(),
+                    ));
                 }
                 Err(e) if !error_printed => {
                     dbg!();
