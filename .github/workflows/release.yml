@@ -46,7 +46,7 @@ on:
 
 jobs:
   # Create the Github Release™ so the packages have something to be uploaded to
-  create-release:
+  cargo-dist-plan:
     runs-on: ubuntu-latest
     outputs:
       has-releases: ${{ steps.create-release.outputs.has-releases }}
@@ -59,18 +59,11 @@ jobs:
           submodules: recursive
       - name: Install cargo-dist
         run: "curl --proto '=https' --tlsv1.2 -LsSf https://github.com/axodotdev/cargo-dist/releases/download/v0.2.0-prerelease.5/cargo-dist-installer.sh | sh"
-      - id: create-release
+      - id: cargo-dist-plan
         run: |
           cargo dist plan --tag=${{ github.ref_name }} --output-format=json > dist-manifest.json
           echo "dist plan ran successfully"
           cat dist-manifest.json
-
-          # Create the Github Release™ based on what cargo-dist thinks it should be
-          ANNOUNCEMENT_TITLE=$(jq --raw-output ".announcement_title" dist-manifest.json)
-          IS_PRERELEASE=$(jq --raw-output ".announcement_is_prerelease" dist-manifest.json)
-          jq --raw-output ".announcement_github_body" dist-manifest.json > new_dist_announcement.md
-          gh release create ${{ github.ref_name }} --draft --prerelease="$IS_PRERELEASE" --title="$ANNOUNCEMENT_TITLE" --notes-file=new_dist_announcement.md
-          echo "created announcement!"
 
           # Upload the manifest to the Github Release™
           gh release upload ${{ github.ref_name }} dist-manifest.json
@@ -84,7 +77,7 @@ jobs:
   # Build and packages all the platform-specific things
   upload-local-artifacts:
     # Let the initial task tell us to not run (currently very blunt)
-    needs: create-release
+    needs: cargo-dist-plan
     if: ${{ needs.create-release.outputs.has-releases == 'true' }}
     strategy:
       fail-fast: false
