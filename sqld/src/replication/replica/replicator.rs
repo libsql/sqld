@@ -67,9 +67,7 @@ impl Replicator {
             hard_reset,
         };
 
-        dbg!();
         this.try_perform_handshake().await?;
-        dbg!();
 
         let meta_file = Arc::new(WalIndexMeta::open(&db_path)?);
         let meta = this.meta.clone();
@@ -139,7 +137,6 @@ impl Replicator {
     }
 
     pub async fn run(mut self) -> anyhow::Result<()> {
-        dbg!();
         loop {
             self.try_perform_handshake().await?;
 
@@ -179,15 +176,12 @@ impl Replicator {
     }
 
     async fn try_perform_handshake(&mut self) -> crate::Result<()> {
-        dbg!();
-
         let mut error_printed = false;
         for _ in 0..HANDSHAKE_MAX_RETRIES {
             tracing::info!("Attempting to perform handshake with primary.");
             let req = self.make_request(HelloRequest {});
             match self.client.hello(req).await {
                 Ok(resp) => {
-                    dbg!();
                     let hello = resp.into_inner();
 
                     let mut lock = self.meta.lock().await;
@@ -213,13 +207,11 @@ impl Replicator {
                     if e.code() == Code::FailedPrecondition
                         && e.message() == UNEXISTING_NAMESPACE =>
                 {
-                    dbg!();
                     return Err(crate::error::Error::UnexistingNamespace(
                         String::from_utf8(self.namespace.to_vec()).unwrap_or_default(),
                     ));
                 }
                 Err(e) if !error_printed => {
-                    dbg!();
                     tracing::error!("error connecting to primary. retrying. error: {e}");
                     error_printed = true;
                 }

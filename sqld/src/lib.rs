@@ -334,7 +334,6 @@ async fn start_replica(
         let namespaces = namespaces.clone();
         async move {
             while let Some(ns) = hard_reset_rcv.recv().await {
-                dbg!();
                 tracing::warn!(
                     "received reset signal for: {:?}",
                     std::str::from_utf8(&ns).ok()
@@ -464,6 +463,7 @@ async fn start_primary(
         max_response_size: config.max_response_size,
         max_total_response_size: config.max_total_response_size,
         checkpoint_interval: config.checkpoint_interval,
+        disable_namespace: config.disable_namespaces,
     };
     let factory = PrimaryNamespaceMaker::new(conf);
     let namespaces = Arc::new(NamespaceStore::new(factory, false));

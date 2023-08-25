@@ -27,7 +27,7 @@ use crate::replication::{NamespacedSnapshotCallback, ReplicationLogger};
 use crate::stats::Stats;
 use crate::{
     check_fresh_db, init_bottomless_replicator, run_periodic_compactions, DB_CREATE_TIMEOUT,
-    DEFAULT_AUTO_CHECKPOINT, MAX_CONCURRENT_DBS,
+    DEFAULT_AUTO_CHECKPOINT, DEFAULT_NAMESPACE_NAME, MAX_CONCURRENT_DBS,
 };
 
 /// Creates a new `Namespace` for database of the `Self::Database` type.
@@ -131,9 +131,7 @@ pub struct NamespaceStore<F: MakeNamespace> {
 
 impl NamespaceStore<ReplicaNamespaceMaker> {
     pub async fn reset(&self, namespace: Bytes) -> anyhow::Result<()> {
-        dbg!();
         let mut lock = self.inner.write().await;
-        dbg!();
         if let Some(ns) = lock.remove(&namespace) {
             // FIXME: when destroying, we are waiting for all the tasks associated with the
             // allocation to finnish, which create a lot of contention on the lock. Need to use a
@@ -147,8 +145,6 @@ impl NamespaceStore<ReplicaNamespaceMaker> {
         self.factory.destroy(&namespace).await?;
         let ns = self.factory.create(namespace.clone(), None, true).await?;
         lock.insert(namespace, ns);
-
-        dbg!();
 
         Ok(())
     }
@@ -304,6 +300,7 @@ pub struct PrimaryNamespaceConfig {
     pub max_response_size: u64,
     pub max_total_response_size: u64,
     pub checkpoint_interval: Option<Duration>,
+    pub disable_namespace: bool,
 }
 
 type DumpStream = Box<dyn Stream<Item = std::io::Result<Bytes>> + Send + Sync + 'static + Unpin>;
@@ -315,18 +312,17 @@ impl Namespace<PrimaryDatabase> {
         dump: Option<DumpStream>,
         allow_creation: bool,
     ) -> crate::Result<Self> {
-        dbg!();
+        // if namespaces are disabled, then we allow creation for the default namespace.
+        let allow_creation =
+            allow_creation || (config.disable_namespace && name == DEFAULT_NAMESPACE_NAME);
+
         let mut join_set = JoinSet::new();
-        dbg!();
         let name_str = std::str::from_utf8(&name).map_err(|_| Error::InvalidNamespace)?;
-        dbg!();
         let db_path = config.base_path.join("dbs").join(name_str);
-        dbg!();
 
         // The database folder doesn't exist, bottomless replication is disabled (no db to recover)
         // and we're not allowed to create a new database, return an error.
         if !allow_creation && config.bottomless_replication.is_none() && !db_path.exists() {
-            dbg!();
             return Err(crate::error::Error::UnexistingNamespace(
                 String::from_utf8(name.to_vec()).unwrap_or_default(),
             ));
@@ -338,16 +334,13 @@ impl Namespace<PrimaryDatabase> {
         let bottomless_replicator = if let Some(options) = &config.bottomless_replication {
             let mut options = options.clone();
             let db_id = format!("ns-{}", std::str::from_utf8(&name).unwrap());
-            dbg!(&db_id);
             options.db_id = Some(db_id);
             let (replicator, did_recover) =
-                dbg!(init_bottomless_replicator(db_path.join("data"), options.clone()).await)?;
+                init_bottomless_replicator(db_path.join("data"), options.clone()).await?;
 
-            dbg!();
             // There wasn't any database to recover from bottomless, and we are not allowed to
             // create a new database
             if !did_recover && !allow_creation {
-                dbg!();
                 // clean stale directory
                 // FIXME: this is not atomic, we could be left with a stale directory. Maybe do
                 // setup in a temp directory and then atomically rename it?
