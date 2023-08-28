@@ -149,3 +149,12 @@ async fn handle_delete_namespace<F: MakeNamespace>(
     app_state.namespaces.destroy(namespace.into()).await?;
     Ok(())
 }
+
+
+
+async fn handle_delete_namespace<F: MakeNamespace>(
+    State(app_state): State<Arc<AppState<F>>>,
+    Path(namespace): Path<String>,
+) -> crate::Result<()> {
+    todo!();
+}
