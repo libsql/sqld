@@ -12,6 +12,7 @@ use tonic::metadata::BinaryMetadataValue;
 use tonic::transport::Channel;
 use tonic::{Code, Request};
 
+use crate::ResetOp;
 use crate::replication::frame::Frame;
 use crate::replication::replica::error::ReplicationError;
 use crate::replication::replica::snapshot::TempSnapshot;
