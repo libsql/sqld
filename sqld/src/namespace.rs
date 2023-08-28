@@ -27,7 +27,7 @@ use crate::replication::{NamespacedSnapshotCallback, ReplicationLogger};
 use crate::stats::Stats;
 use crate::{
     check_fresh_db, init_bottomless_replicator, run_periodic_compactions, DB_CREATE_TIMEOUT,
-    DEFAULT_AUTO_CHECKPOINT, DEFAULT_NAMESPACE_NAME, MAX_CONCURRENT_DBS,
+    DEFAULT_AUTO_CHECKPOINT, DEFAULT_NAMESPACE_NAME, MAX_CONCURRENT_DBS, ResetOp,
 };
 
 /// Creates a new `Namespace` for database of the `Self::Database` type.
@@ -255,7 +255,7 @@ pub struct ReplicaNamespaceConfig {
     /// hard reset sender.
     /// When a replica need to be wiped and recovered from scratch, its namespace
     /// is sent to this channel
-    pub hard_reset: mpsc::Sender<Bytes>,
+    pub hard_reset: mpsc::Sender<ResetOp>,
 }
 
 impl Namespace<ReplicaDatabase> {

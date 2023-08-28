@@ -12,6 +12,7 @@ use tonic::metadata::AsciiMetadataValue;
 use tonic::transport::Channel;
 use tonic::{Code, Request};
 
+use crate::ResetOp;
 use crate::replication::frame::Frame;
 use crate::replication::replica::error::ReplicationError;
 use crate::replication::replica::snapshot::TempSnapshot;
@@ -41,7 +42,7 @@ pub struct Replicator {
     pub current_frame_no_notifier: watch::Receiver<FrameNo>,
     frames_sender: mpsc::Sender<Frames>,
     /// hard reset channel: send the namespace there, to reset it
-    hard_reset: mpsc::Sender<Bytes>,
+    hard_reset: mpsc::Sender<ResetOp>,
 }
 
 impl Replicator {
@@ -51,7 +52,7 @@ impl Replicator {
         uri: tonic::transport::Uri,
         namespace: Bytes,
         join_set: &mut JoinSet<anyhow::Result<()>>,
-        hard_reset: mpsc::Sender<Bytes>,
+        hard_reset: mpsc::Sender<ResetOp>,
     ) -> anyhow::Result<Self> {
         let client = Client::with_origin(channel, uri);
         let (applied_frame_notifier, current_frame_no_notifier) = watch::channel(FrameNo::MAX);
@@ -154,7 +155,7 @@ impl Replicator {
             ReplicationError::Lagging => {
                 tracing::error!("Replica ahead of primary: hard-reseting replica");
                 self.hard_reset
-                    .send(self.namespace.clone())
+                    .send(ResetOp::Reset(self.namespace.clone()))
                     .await
                     .expect("reset loop exited");
 
@@ -165,7 +166,7 @@ impl Replicator {
                     "Primary is attempting to replicate a different database, overwriting replica."
                 );
                 self.hard_reset
-                    .send(self.namespace.clone())
+                    .send(ResetOp::Reset(self.namespace.clone()))
                     .await
                     .expect("reset loop exited");
 
@@ -207,7 +208,8 @@ impl Replicator {
                     if e.code() == Code::FailedPrecondition
                         && e.message() == NAMESPACE_DOESNT_EXIST =>
                 {
-                    dbg!();
+                    tracing::info!("namespace `{}` doesn't exist, cleaning...", std::str::from_utf8(&self.namespace).unwrap_or_default());
+                    let _ = self.hard_reset.send(ResetOp::Destroy(self.namespace.clone())).await;
                     return Err(crate::error::Error::NamespaceDoesntExist(
                         String::from_utf8(self.namespace.to_vec()).unwrap_or_default(),
                     ));
