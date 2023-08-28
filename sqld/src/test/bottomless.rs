@@ -1,6 +1,8 @@
 use crate::{run_server, Config};
 use anyhow::Result;
 use aws_sdk_s3::config::{Credentials, Region};
+use aws_sdk_s3::types::{Delete, ObjectIdentifier};
+use aws_sdk_s3::Client;
 use libsql_client::{Connection, QueryResult, Statement, Value};
 use std::net::ToSocketAddrs;
 use std::path::PathBuf;
@@ -190,6 +192,43 @@ async fn backup_restore() {
         db_job.abort();
         drop(cleaner);
     }
+
+    {
+        // make sure that we can follow back until the generation from which snapshot could be possible
+        tracing::info!("---STEP 5: recreate database from generation missing snapshot ---");
+        remove_snapshots(BUCKET).await;
+
+        let cleaner = DbFileCleaner::new(PATH);
+        let db_job = start_db(4, &db_config);
+
+        sleep(Duration::from_secs(2)).await;
+
+        let result = sql(&connection_addr, ["SELECT id, name FROM t ORDER BY id;"])
+            .await
+            .unwrap();
+        let rs = result
+            .into_iter()
+            .next()
+            .unwrap()
+            .into_result_set()
+            .unwrap();
+        assert_eq!(rs.rows.len(), ROWS, "unexpected number of rows");
+        let base = if OPS < 10 { 0 } else { OPS - 10 } as i64;
+        for (i, row) in rs.rows.iter().enumerate() {
+            let i = i as i64;
+            let id = row.cells["id"].clone();
+            let name = row.cells["name"].clone();
+            assert_eq!(
+                (id, name),
+                (Value::Integer(i), Value::Text(format!("{}-x", base + i))),
+                "unexpected values for row {}",
+                i
+            );
+        }
+
+        db_job.abort();
+        drop(cleaner);
+    }
 }
 
 #[tokio::test]
@@ -340,12 +379,52 @@ async fn s3_config() -> aws_sdk_s3::config::Config {
         .build()
 }
 
+async fn s3_client() -> Result<Client> {
+    let loader = s3_config()
+    let conf = aws_sdk_s3::config::Builder::from(&loader.load().await)
+        .force_path_style(true)
+        .build();
+    let client = Client::from_conf(conf);
+    Ok(client)
+}
+
+/// Remove a snapshot objects from all generation. This may trigger bottomless to do rollup restore
+/// across all generations.
+async fn remove_snapshots(bucket: &str) {
+    let client = s3_client().await.unwrap();
+    if let Ok(out) = client.list_objects().bucket(bucket).send().await {
+        let keys = out
+            .contents()
+            .unwrap()
+            .iter()
+            .map(|o| {
+                let key = o.key().unwrap();
+                let prefix = key.split('/').next().unwrap();
+                format!("{}/db.gz", prefix)
+            })
+            .unique()
+            .map(|key| ObjectIdentifier::builder().key(key).build())
+            .collect();
+
+        client
+            .delete_objects()
+            .bucket(bucket)
+            .delete(
+                Delete::builder()
+                    .set_objects(Some(keys))
+                    .quiet(true)
+                    .build(),
+            )
+            .send()
+            .await
+            .unwrap();
+    }
+}
+
 /// Checks if the corresponding bucket is empty (has any elements) or not.
 /// If bucket was not found, it's equivalent of an empty one.
 async fn assert_bucket_occupancy(bucket: &str, expect_empty: bool) {
-    use aws_sdk_s3::Client;
-
-    let client = Client::from_conf(s3_config().await);
+    let client = s3_client().await.unwrap();
     if let Ok(out) = client.list_objects().bucket(bucket).send().await {
         let contents = out.contents().unwrap_or_default();
         if expect_empty {
@@ -399,10 +478,7 @@ impl S3BucketCleaner {
 
     /// Delete all objects from S3 bucket with provided name (doesn't delete bucket itself).
     async fn cleanup(bucket: &str) -> Result<()> {
-        use aws_sdk_s3::types::{Delete, ObjectIdentifier};
-        use aws_sdk_s3::Client;
-
-        let client = Client::from_conf(s3_config().await);
+        let client = s3_client().await?;
         let objects = client.list_objects().bucket(bucket).send().await?;
         let mut delete_keys = Vec::new();
         for o in objects.contents().unwrap_or_default() {
