@@ -6,6 +6,7 @@ use anyhow::anyhow;
 use arc_swap::ArcSwap;
 use aws_sdk_s3::error::SdkError;
 use aws_sdk_s3::operation::get_object::builders::GetObjectFluentBuilder;
+use aws_sdk_s3::operation::head_object::HeadObjectError;
 use aws_sdk_s3::operation::list_objects::builders::ListObjectsFluentBuilder;
 use aws_sdk_s3::operation::list_objects::ListObjectsOutput;
 use aws_sdk_s3::primitives::ByteStream;
@@ -795,6 +796,14 @@ impl Replicator {
         generation: Uuid,
         utc_time: Option<DateTime<Utc>>,
     ) -> Result<RestoreAction> {
+        if self.is_tombstoned().await? {
+            tracing::error!(
+                "Restoration failed. Database '{}' has been tombstoned.",
+                self.db_name
+            );
+            return Ok(RestoreAction::None);
+        }
+
         // first check if there are any remaining files that we didn't manage to upload
         // on time in the last run
         self.upload_remaining_files(&generation).await?;
@@ -1149,6 +1158,43 @@ impl Replicator {
             Ok(Some((page_size, crc)))
         } else {
             Ok(None)
+        }
+    }
+
+    /// Marks current replicator database as deleted, invalidating all generations.
+    pub async fn tombstone(&mut self) -> Result<()> {
+        tracing::info!(
+            "Called for tombstoning of all contents of the '{}' database",
+            self.db_name
+        );
+        let key = format!("{}.tombstone", self.db_name);
+        self.client
+            .put_object()
+            .bucket(&self.bucket)
+            .key(key)
+            .body(ByteStream::default())
+            .send()
+            .await?;
+        Ok(())
+    }
+
+    /// Checks if current replicator database has been marked as deleted.
+    pub async fn is_tombstoned(&self) -> Result<bool> {
+        let key = format!("{}.tombstone", self.db_name);
+        let resp = self
+            .client
+            .head_object()
+            .bucket(&self.bucket)
+            .key(key)
+            .send()
+            .await;
+        match resp {
+            Ok(_) => Ok(true),
+            Err(SdkError::ServiceError(se)) => match se.into_err() {
+                HeadObjectError::NotFound(_) => Ok(false),
+                e => Err(e.into()),
+            },
+            Err(e) => Err(e.into()),
         }
     }
 }
