@@ -160,7 +160,7 @@ impl ReplicationLog for ReplicationLogService {
                 .map_err(|e| Status::internal(e.to_string()))?,
             self.idle_shutdown_layer.clone(),
         )
-        .map(map_frame_stream_output);
+            .map(map_frame_stream_output);
 
         Ok(tonic::Response::new(Box::pin(stream)))
     }
