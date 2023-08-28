@@ -31,6 +31,7 @@ pub async fn run_admin_api<F: MakeNamespace>(
             "/v1/namespaces/:namespace/create",
             post(handle_create_namespace),
         )
+        .route("/v1/namespaces/:namespace", delete(handle_delete_namespace))    
         .with_state(Arc::new(AppState {
             db_config_store,
             namespaces,
@@ -93,7 +94,7 @@ async fn handle_create_namespace<F: MakeNamespace>(
     State(app_state): State<Arc<AppState<F>>>,
     Path(namespace): Path<String>,
     Json(req): Json<CreateNamespaceReq>,
-) -> Result<(), crate::error::Error> {
+) -> create::Result<()> {
     let maybe_dump = match req.dump_url {
         Some(ref url) => Some(dump_stream_from_url(url).await?),
         None => None,
@@ -138,4 +139,11 @@ async fn dump_stream_from_url(url: &Url) -> Result<DumpStream, LoadDumpError> {
         }
         scheme => Err(LoadDumpError::UnsupportedUrlScheme(scheme.to_string())),
     }
+}
+
+async fn handle_delete_namespace<F: MakeNamespace>(
+    State(app_state): State<Arc<AppState<F>>>,
+    Path(namespace): Path<String>,
+) -> crate::Result<()> {
+    todo!();
 }
