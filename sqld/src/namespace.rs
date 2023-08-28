@@ -35,6 +35,7 @@ use crate::{
 pub trait MakeNamespace: Sync + Send + 'static {
     type Database: Database;
 
+    /// Create a new Namespace instance
     async fn create(
         &self,
         name: Bytes,
@@ -42,8 +43,10 @@ pub trait MakeNamespace: Sync + Send + 'static {
         allow_creation: bool,
     ) -> crate::Result<Namespace<Self::Database>>;
 
+    /// Destroy all resources associated with `namespace`
     async fn destroy(&self, namespace: &Bytes) -> crate::Result<()>;
 }
+
 /// Creates new primary `Namespace`
 pub struct PrimaryNamespaceMaker {
     /// base config to create primary namespaces
@@ -76,6 +79,9 @@ impl MakeNamespace for PrimaryNamespaceMaker {
             .join("dbs")
             .join(std::str::from_utf8(namespace).unwrap());
         tokio::fs::remove_dir_all(ns_path).await?;
+
+        //TODO: remove from bottomless
+
         Ok(())
     }
 }
@@ -121,11 +127,32 @@ impl MakeNamespace for ReplicaNamespaceMaker {
 }
 
 /// Stores and manage a set of namespaces.
-pub struct NamespaceStore<F: MakeNamespace> {
-    inner: RwLock<HashMap<Bytes, Namespace<F::Database>>>,
+pub struct NamespaceStore<M: MakeNamespace> {
+    inner: RwLock<HashMap<Bytes, Namespace<M::Database>>>,
     /// The namespace factory, to create new namespaces.
-    factory: F,
+    make_namespace: M,
     allow_lazy_creation: bool,
+}
+
+impl<M: MakeNamespace> NamespaceStore<M> {
+    pub async fn destroy(&self, namespace: Bytes) -> crate::Result<()> {
+        let mut lock = self.inner.write().await;
+        if let Some(ns) = lock.remove(&namespace) {
+            // FIXME: when destroying, we are waiting for all the tasks associated with the
+            // allocation to finnish, which create a lot of contention on the lock. Need to use a
+            // conccurent hashmap to deal with this issue.
+
+            // deallocate in-memory resources
+            ns.destroy().await?;
+        }
+
+        // destroy on-disk database
+        self.make_namespace.destroy(&namespace).await?;
+
+        tracing::info!("destroyed namespace: {}", std::str::from_utf8(&namespace).unwrap_or_default());
+
+        Ok(())
+    }
 }
 
 impl NamespaceStore<ReplicaNamespaceMaker> {
@@ -141,8 +168,8 @@ impl NamespaceStore<ReplicaNamespaceMaker> {
         }
 
         // destroy on-disk database
-        self.factory.destroy(&namespace).await?;
-        let ns = self.factory.create(namespace.clone(), None, true).await?;
+        self.make_namespace.destroy(&namespace).await?;
+        let ns = self.make_namespace.create(namespace.clone(), None, true).await?;
         lock.insert(namespace, ns);
 
         Ok(())
@@ -153,7 +180,7 @@ impl<F: MakeNamespace> NamespaceStore<F> {
     pub fn new(factory: F, allow_lazy_creation: bool) -> Self {
         Self {
             inner: Default::default(),
-            factory,
+            make_namespace: factory,
             allow_lazy_creation,
         }
     }
@@ -168,7 +195,7 @@ impl<F: MakeNamespace> NamespaceStore<F> {
         } else {
             let mut lock = RwLockUpgradableReadGuard::upgrade(lock).await;
             let ns = self
-                .factory
+                .make_namespace
                 .create(namespace.clone(), None, self.allow_lazy_creation)
                 .await?;
             let ret = f(&ns);
@@ -185,7 +212,7 @@ impl<F: MakeNamespace> NamespaceStore<F> {
             ));
         }
 
-        let ns = self.factory.create(namespace.clone(), dump, true).await?;
+        let ns = self.make_namespace.create(namespace.clone(), dump, true).await?;
 
         let mut lock = RwLockUpgradableReadGuard::upgrade(lock).await;
         lock.insert(namespace, ns);
@@ -200,6 +227,14 @@ pub struct Namespace<T: Database> {
     pub db: T,
     /// The set of tasks associated with this namespace
     tasks: JoinSet<anyhow::Result<()>>,
+}
+
+impl<T: Database> Namespace<T> {
+    async fn destroy(mut self) -> anyhow::Result<()> {
+        self.tasks.shutdown().await;
+
+        Ok(())
+    }
 }
 
 pub struct ReplicaNamespaceConfig {
@@ -278,11 +313,6 @@ impl Namespace<ReplicaDatabase> {
                 connection_maker: Arc::new(connection_maker),
             },
         })
-    }
-
-    async fn destroy(mut self) -> anyhow::Result<()> {
-        self.tasks.shutdown().await;
-        Ok(())
     }
 }
 

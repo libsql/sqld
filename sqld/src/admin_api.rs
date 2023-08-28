@@ -1,6 +1,7 @@
 use anyhow::Context as _;
 use axum::extract::{Path, State};
 use axum::Json;
+use axum::routing::delete;
 use futures::TryStreamExt;
 use serde::Deserialize;
 use std::sync::Arc;
@@ -145,5 +146,6 @@ async fn handle_delete_namespace<F: MakeNamespace>(
     State(app_state): State<Arc<AppState<F>>>,
     Path(namespace): Path<String>,
 ) -> crate::Result<()> {
-    todo!();
+    app_state.namespaces.destroy(namespace.into()).await?;
+    Ok(())
 }
