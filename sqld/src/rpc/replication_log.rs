@@ -169,10 +169,10 @@ impl ReplicationLog for ReplicationLogService {
             })?;
 
         let stream = StreamGuard::new(
-            FrameStream::new(logger, req.next_offset, true),
+            FrameStream::new(Arc::downgrade(&logger), req.next_offset, true).unwrap(),
             self.idle_shutdown_layer.clone(),
         )
-        .map(map_frame_stream_output);
+            .map(map_frame_stream_output);
 
         Ok(tonic::Response::new(Box::pin(stream)))
     }
@@ -208,7 +208,7 @@ impl ReplicationLog for ReplicationLogService {
             })?;
 
         let frames = StreamGuard::new(
-            FrameStream::new(logger.clone(), req.next_offset, false),
+            FrameStream::new(Arc::downgrade(&logger), req.next_offset, false).unwrap(),
             self.idle_shutdown_layer.clone(),
         )
         .map(map_frame_stream_output)

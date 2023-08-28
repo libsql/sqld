@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::sync::Weak;
 use std::task::{ready, Poll};
 use std::{pin::Pin, task::Context};
 
@@ -13,25 +13,27 @@ use crate::replication::{FrameNo, LogReadError, ReplicationLogger};
 pub struct FrameStream {
     pub(crate) current_frame_no: FrameNo,
     pub(crate) max_available_frame_no: FrameNo,
-    logger: Arc<ReplicationLogger>,
+    logger: Weak<ReplicationLogger>,
     state: FrameStreamState,
     wait_for_more: bool,
 }
 
 impl FrameStream {
     pub fn new(
-        logger: Arc<ReplicationLogger>,
+        logger: Weak<ReplicationLogger>,
         current_frameno: FrameNo,
         wait_for_more: bool,
-    ) -> Self {
-        let max_available_frame_no = *logger.new_frame_notifier.subscribe().borrow();
-        Self {
+    ) -> crate::Result<Self> {
+        let Some(logger_arc) = logger.upgrade() else { todo!("logger closed") };
+        let max_available_frame_no = *logger_arc.new_frame_notifier.subscribe().borrow();
+
+        Ok(Self {
             current_frame_no: current_frameno,
             max_available_frame_no,
             logger,
             state: FrameStreamState::Init,
             wait_for_more,
-        }
+        })
     }
 
     fn transition_state_next_frame(&mut self) {
@@ -42,6 +44,7 @@ impl FrameStream {
         let next_frameno = self.current_frame_no;
         let logger = self.logger.clone();
         let fut = async move {
+            let Some(logger) = logger.upgrade() else { return Err(LogReadError::Error(anyhow::anyhow!("logger closed"))) };
             let res = tokio::task::spawn_blocking(move || logger.get_frame(next_frameno)).await;
             match res {
                 Ok(Ok(frame)) => Ok(frame),
@@ -97,7 +100,11 @@ impl Stream for FrameStream {
                         return Poll::Ready(None);
                     }
 
-                    let mut notifier = self.logger.new_frame_notifier.subscribe();
+                    let Some(logger) = self.logger.upgrade() else {
+                        return Poll::Ready(Some(Err(LogReadError::Error(anyhow::anyhow!("logger closed")))));
+                    };
+
+                    let mut notifier = logger.new_frame_notifier.subscribe();
                     let max_available_frame_no = *notifier.borrow();
                     // check in case value has already changed, otherwise we'll be notified later
                     if max_available_frame_no > self.max_available_frame_no {

@@ -207,6 +207,7 @@ impl Replicator {
                     if e.code() == Code::FailedPrecondition
                         && e.message() == NAMESPACE_DOESNT_EXIST =>
                 {
+                    dbg!();
                     return Err(crate::error::Error::NamespaceDoesntExist(
                         String::from_utf8(self.namespace.to_vec()).unwrap_or_default(),
                     ));

@@ -394,6 +394,7 @@ impl Namespace<PrimaryDatabase> {
             } else {
                 DEFAULT_AUTO_CHECKPOINT
             };
+
         let logger = Arc::new(ReplicationLogger::open(
             &db_path,
             config.max_log_size,
