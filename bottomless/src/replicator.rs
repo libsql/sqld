@@ -3,7 +3,7 @@ use crate::read::BatchReader;
 use crate::transaction_cache::TransactionPageCache;
 use crate::uuid_utils::decode_unix_timestamp;
 use crate::wal::WalFileReader;
-use anyhow::anyhow;
+use anyhow::{anyhow, bail};
 use arc_swap::ArcSwap;
 use async_compression::tokio::write::GzipEncoder;
 use aws_sdk_s3::config::{Credentials, Region};
@@ -15,8 +15,8 @@ use aws_sdk_s3::operation::list_objects::ListObjectsOutput;
 use aws_sdk_s3::primitives::ByteStream;
 use aws_sdk_s3::{Client, Config};
 use bytes::{Buf, Bytes, BytesMut};
-use chrono::{NaiveDateTime, TimeZone, Utc};
-use std::io::SeekFrom;
+use chrono::{DateTime, LocalResult, NaiveDateTime, TimeZone, Utc};
+use std::io::{Cursor, Read, SeekFrom, Write};
 use std::ops::Deref;
 use std::path::Path;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -52,6 +52,7 @@ pub struct Replicator {
     restore_transaction_page_swap_after: u32,
     restore_transaction_cache_fpath: Arc<str>,
     generation: Arc<ArcSwap<Uuid>>,
+    prev_generation: Option<Arc<Uuid>>,
     pub commits_in_current_generation: Arc<AtomicU32>,
     verify_crc: bool,
     pub bucket: String,
@@ -388,6 +389,7 @@ impl Replicator {
             bucket,
             page_size: Self::UNSET_PAGE_SIZE,
             generation,
+            prev_generation: None,
             commits_in_current_generation,
             next_frame_no,
             last_sent_frame_no,
@@ -644,8 +646,12 @@ impl Replicator {
             }
         };
 
-        self.store_metadata(wal_file.page_size(), wal_file.checksum())
-            .await?;
+        let meta = GenerationMetadata::new(
+            wal_file.page_size(),
+            wal_file.checksum(),
+            self.prev_generation.clone(),
+        );
+        self.store_metadata(meta).await?;
         let frame_count = wal_file.frame_count().await;
         tracing::trace!("Local WAL pages: {}", frame_count);
         self.submit_frames(frame_count);
@@ -949,14 +955,16 @@ impl Replicator {
                         return Ok(RestoreAction::ReuseGeneration(generation));
                     }
                     std::cmp::Ordering::Greater => {
-                        tracing::info!("Local change counter matches the remote one, but local WAL contains newer data, which needs to be replicated");
+                        tracing::info!("Local change counter matches the remote one, but local WAL contains newer data from generation {}, which needs to be replicated.", generation);
+                        self.prev_generation = Some(Arc::new(generation));
                         return Ok(RestoreAction::SnapshotMainDbFile);
                     }
                     std::cmp::Ordering::Less => (),
                 }
             }
             std::cmp::Ordering::Greater => {
-                tracing::info!("Local change counter is larger than its remote counterpart - a new snapshot needs to be replicated");
+                tracing::info!("Local change counter is larger than its remote counterpart - a new snapshot needs to be replicated (generation: {})", generation);
+                self.prev_generation = Some(Arc::new(generation));
                 return Ok(RestoreAction::SnapshotMainDbFile);
             }
             std::cmp::Ordering::Less => (),
@@ -1009,14 +1017,16 @@ impl Replicator {
             .ok();
 
         let mut applied_wal_frame = false;
-        if let Some((page_size, mut checksum)) = self.get_metadata(&generation).await? {
-            self.set_page_size(page_size as usize)?;
+        if let Some(meta) = self.get_metadata(&generation).await? {
+            let page_size = meta.page_size as usize;
+            self.set_page_size(page_size)?;
             let mut page_buf = {
-                let mut v = Vec::with_capacity(page_size as usize);
+                let mut v = Vec::with_capacity(page_size);
                 v.spare_capacity_mut();
-                unsafe { v.set_len(page_size as usize) };
+                unsafe { v.set_len(page_size) };
                 v
             };
+            let mut checksum = meta.init_crc;
             'restore_wal: loop {
                 let mut list_request = self.list_objects().prefix(&prefix);
                 if let Some(marker) = next_marker {
@@ -1032,7 +1042,7 @@ impl Replicator {
                 };
                 let mut pending_pages = TransactionPageCache::new(
                     self.restore_transaction_page_swap_after,
-                    page_size,
+                    page_size as u32,
                     self.restore_transaction_cache_fpath.clone(),
                 );
                 let mut last_received_frame_no = 0;
@@ -1085,6 +1095,7 @@ impl Replicator {
                     let mut frameno = first_frame_no;
                     let mut reader =
                         BatchReader::new(frameno, frame.body, self.page_size, compression_kind);
+
                     while let Some(frame) = reader.next_frame_header().await? {
                         let pgno = frame.pgno();
                         let page_size = self.page_size;
@@ -1128,8 +1139,11 @@ impl Replicator {
         tracing::info!("Finished database restoration in {:?}", elapsed);
 
         if applied_wal_frame {
+            tracing::info!("WAL file has been applied onto database file in generation {}. Requesting snapshot.", generation);
+            self.prev_generation = Some(Arc::new(generation));
             Ok::<_, anyhow::Error>(RestoreAction::SnapshotMainDbFile)
         } else {
+            tracing::info!("Reusing generation {}.", generation);
             // since WAL was not applied, we can reuse the latest generation
             Ok::<_, anyhow::Error>(RestoreAction::ReuseGeneration(generation))
         }
@@ -1147,6 +1161,7 @@ impl Replicator {
                 Some(gen) => gen,
                 None => {
                     tracing::debug!("No generation found, nothing to restore");
+                    self.prev_generation = None;
                     return Ok(RestoreAction::SnapshotMainDbFile);
                 }
             },
@@ -1244,12 +1259,33 @@ impl Replicator {
         None
     }
 
-    pub async fn store_metadata(&self, page_size: u32, crc: u64) -> Result<()> {
+    async fn store_metadata(&self, meta: GenerationMetadata) -> Result<()> {
         let key = format!("{}-{}/.meta", self.db_name, self.generation.load());
-        put_metadata_obj(&self.client, &self.bucket, key, page_size, crc).await
+        tracing::debug!(
+            "Storing metadata at '{}': page size - {}, crc - {}, previous generation: {}",
+            key,
+            meta.page_size,
+            meta.init_crc,
+            meta.prev_generation
+                .as_ref()
+                .map(|gen| gen.to_string())
+                .as_deref()
+                .unwrap_or("(none)")
+        );
+        let mut body = Vec::with_capacity(28);
+        meta.serialize(&mut body)?;
+        let _ = self
+            .client
+            .put_object()
+            .bucket(self.bucket.clone())
+            .key(key)
+            .body(ByteStream::from(body))
+            .send()
+            .await?;
+        Ok(())
     }
 
-    pub async fn get_metadata(&self, generation: &Uuid) -> Result<Option<(u32, u64)>> {
+    pub async fn get_metadata(&self, generation: &Uuid) -> Result<Option<GenerationMetadata>> {
         let key = format!("{}-{}/.meta", self.db_name, generation);
         if let Ok(obj) = self
             .client
@@ -1259,10 +1295,9 @@ impl Replicator {
             .send()
             .await
         {
-            let mut data = obj.body.collect().await?;
-            let page_size = data.get_u32();
-            let crc = data.get_u64();
-            Ok(Some((page_size, crc)))
+            let mut data = Cursor::new(obj.body.collect().await?.into_bytes());
+            let meta = GenerationMetadata::deserialize(&mut data)?;
+            Ok(Some(meta))
         } else {
             Ok(None)
         }
@@ -1452,30 +1487,59 @@ impl DeleteAll {
     }
 }
 
-async fn put_metadata_obj(
-    client: &Client,
-    bucket: &str,
-    key: String,
-    page_size: u32,
-    crc: u64,
-) -> Result<()> {
-    tracing::debug!(
-        "Storing metadata at '{}': page size - {}, crc - {}",
-        key,
-        page_size,
-        crc
-    );
-    let mut body = BytesMut::with_capacity(12);
-    body.extend_from_slice(page_size.to_be_bytes().as_slice());
-    body.extend_from_slice(crc.to_be_bytes().as_slice());
-    let _ = client
-        .put_object()
-        .bucket(bucket)
-        .key(key)
-        .body(ByteStream::from(body.freeze()))
-        .send()
-        .await?;
-    Ok(())
+/// Metadata about given generation.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct GenerationMetadata {
+    /// SQLite page size.
+    pub page_size: u32,
+    /// Initial CRC stored in a WAL file header. Used to bootstrap consecutive WAL frames checksum
+    /// verification.
+    pub init_crc: u64,
+    /// Pointer to previous generation, current one builds on top of.
+    pub prev_generation: Option<Arc<Uuid>>,
+}
+
+impl GenerationMetadata {
+    fn new(page_size: u32, init_crc: u64, prev_generation: Option<Arc<Uuid>>) -> Self {
+        Self {
+            page_size,
+            init_crc,
+            prev_generation,
+        }
+    }
+
+    fn serialize<W: Write>(&self, writer: &mut W) -> Result<()> {
+        let mut buf = [0u8; 28];
+        buf[0..4].copy_from_slice(self.page_size.to_be_bytes().as_slice());
+        buf[4..12].copy_from_slice(self.init_crc.to_be_bytes().as_slice());
+        let len = if let Some(gen) = self.prev_generation.as_deref() {
+            buf[12..28].copy_from_slice(gen.as_u128().to_be_bytes().as_slice());
+            28
+        } else {
+            12
+        };
+        writer.write_all(&buf[0..len])?;
+        Ok(())
+    }
+
+    fn deserialize<R: Read>(reader: &mut R) -> Result<Self> {
+        let mut buf = [0u8; 28];
+        let n = reader.read(&mut buf)?;
+        if !(n == 12 || n == 28) {
+            bail!(".meta object malformed: {:?}", buf);
+        }
+
+        let page_size = u32::from_be_bytes(buf[0..4].try_into().unwrap());
+        let crc = u64::from_be_bytes(buf[4..12].try_into().unwrap());
+        let prev_gen = if n == 12 {
+            None
+        } else {
+            Some(Arc::new(Uuid::from_u128(u128::from_be_bytes(
+                buf[12..28].try_into().unwrap(),
+            ))))
+        };
+        Ok(GenerationMetadata::new(page_size, crc, prev_gen))
+    }
 }
 
 pub struct Context {
@@ -1506,5 +1570,27 @@ impl std::fmt::Display for CompressionKind {
             CompressionKind::None => write!(f, "raw"),
             CompressionKind::Gzip => write!(f, "gz"),
         }
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use crate::replicator::GenerationMetadata;
+    use crate::uuid_utils::new_v7;
+    use std::io::Cursor;
+    use std::sync::Arc;
+    use uuid::{NoContext, Timestamp};
+
+    #[test]
+    fn generation_metadata_serialization() {
+        fn roundtrip(meta: GenerationMetadata) {
+            let mut buf = Vec::new();
+            meta.serialize(&mut buf).unwrap();
+            let deserialized = GenerationMetadata::deserialize(&mut Cursor::new(buf)).unwrap();
+            assert_eq!(deserialized, meta);
+        }
+        let uuid = Arc::new(new_v7(Timestamp::now(NoContext)));
+        roundtrip(GenerationMetadata::new(4096, 0xdeadbeef, Some(uuid)));
+        roundtrip(GenerationMetadata::new(4096, 0xdeadbeef, None));
     }
 }

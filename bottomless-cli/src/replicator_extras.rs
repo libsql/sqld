@@ -142,9 +142,12 @@ impl Replicator {
                         println!("\tcreated at (UTC):     {datetime}");
                         println!("\tchange counter:       {counter:?}");
                         println!("\tconsistent WAL frame: {consistent_frame}");
-                        if let Some((page_size, checksum)) = m {
-                            println!("\tpage size:            {page_size}");
-                            println!("\tWAL frame checksum:   {checksum:x}");
+                        if let Some(meta) = m {
+                            println!("\tpage size:            {}", meta.page_size);
+                            println!("\tWAL frame checksum:   {:x}", meta.init_crc);
+                            if let Some(prev_gen) = meta.prev_generation.as_deref() {
+                                println!("\tprevious generation:  {}", prev_gen);
+                            }
                         }
                         self.print_snapshot_summary(&uuid).await?;
                         println!()
@@ -249,9 +252,12 @@ impl Replicator {
         println!("\tcreated at:           {}", uuid_to_datetime(&generation));
         println!("\tchange counter:       {counter:?}");
         println!("\tconsistent WAL frame: {consistent_frame}");
-        if let Some((page_size, checksum)) = meta {
-            println!("\tpage size:            {page_size}");
-            println!("\tWAL frame checksum:   {checksum:x}");
+        if let Some(meta) = meta {
+            println!("\tpage size:            {}", meta.page_size);
+            println!("\tWAL frame checksum:   {:x}", meta.init_crc);
+            if let Some(prev_gen) = meta.prev_generation.as_deref() {
+                println!("\tprevious generation:  {}", prev_gen);
+            }
         }
         self.print_snapshot_summary(&generation).await?;
         Ok(())
