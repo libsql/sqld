@@ -90,19 +90,6 @@ async fn handle_post_block<F: MakeNamespace>(
     }
 }
 
-// async fn handle_create_namespace_with_dump<F: MakeNamespace>(
-//     State(app_state): State<Arc<AppState<F>>>,
-//     Path(namespace): Path<String>,
-//     body: BodyStream,
-// ) -> Result<(), crate::error::Error> {
-//     let dump = Box::new(body.map_err(|e| std::io::Error::new(ErrorKind::Other, e)));
-//     app_state
-//         .namespaces
-//         .create(namespace.into(), Some(dump))
-//         .await?;
-//     Ok(())
-// }
-
 async fn handle_create_namespace<F: MakeNamespace>(
     State(app_state): State<Arc<AppState<F>>>,
     Path(namespace): Path<String>,
