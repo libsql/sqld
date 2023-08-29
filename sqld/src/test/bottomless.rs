@@ -71,17 +71,7 @@ async fn backup_restore() {
         .await
         .unwrap();
 
-        let stmts: Vec<_> = (0..OPS)
-            .map(|i| {
-                format!(
-                    "INSERT INTO t(id, name) VALUES({}, '{}') ON CONFLICT (id) DO UPDATE SET name = '{}';",
-                    i % ROWS,
-                    i,
-                    i
-                )
-            })
-            .collect();
-        let _ = sql(&connection_addr, stmts).await.unwrap();
+        perform_updates(&connection_addr, ROWS, OPS, "A").await;
 
         sleep(Duration::from_secs(2)).await;
 
@@ -102,28 +92,7 @@ async fn backup_restore() {
 
         sleep(Duration::from_secs(2)).await;
 
-        let result = sql(&connection_addr, ["SELECT id, name FROM t ORDER BY id;"])
-            .await
-            .unwrap();
-        let rs = result
-            .into_iter()
-            .next()
-            .unwrap()
-            .into_result_set()
-            .unwrap();
-        assert_eq!(rs.rows.len(), ROWS, "unexpected number of rows");
-        let base = if OPS < 10 { 0 } else { OPS - 10 } as i64;
-        for (i, row) in rs.rows.iter().enumerate() {
-            let i = i as i64;
-            let id = row.cells["id"].clone();
-            let name = row.cells["name"].clone();
-            assert_eq!(
-                (id, name),
-                (Value::Integer(i), Value::Text((base + i).to_string())),
-                "unexpected values for row {}",
-                i
-            );
-        }
+        assert_updates(&connection_addr, ROWS, OPS, "A").await;
 
         db_job.abort();
         drop(cleaner);
@@ -139,17 +108,7 @@ async fn backup_restore() {
         sleep(Duration::from_secs(2)).await;
 
         // override existing entries, this will generate WAL
-        let stmts: Vec<_> = (0..OPS)
-            .map(|i| {
-                format!(
-                    "INSERT INTO t(id, name) VALUES({}, '{}-x') ON CONFLICT (id) DO UPDATE SET name = '{}-x';",
-                    i % ROWS,
-                    i,
-                    i
-                )
-            })
-            .collect();
-        let _ = sql(&connection_addr, stmts).await.unwrap();
+        perform_updates(&connection_addr, ROWS, OPS, "B").await;
 
         // wait for WAL to backup
         sleep(Duration::from_secs(2)).await;
@@ -166,28 +125,7 @@ async fn backup_restore() {
 
         sleep(Duration::from_secs(2)).await;
 
-        let result = sql(&connection_addr, ["SELECT id, name FROM t ORDER BY id;"])
-            .await
-            .unwrap();
-        let rs = result
-            .into_iter()
-            .next()
-            .unwrap()
-            .into_result_set()
-            .unwrap();
-        assert_eq!(rs.rows.len(), ROWS, "unexpected number of rows");
-        let base = if OPS < 10 { 0 } else { OPS - 10 } as i64;
-        for (i, row) in rs.rows.iter().enumerate() {
-            let i = i as i64;
-            let id = row.cells["id"].clone();
-            let name = row.cells["name"].clone();
-            assert_eq!(
-                (id, name),
-                (Value::Integer(i), Value::Text(format!("{}-x", base + i))),
-                "unexpected values for row {}",
-                i
-            );
-        }
+        assert_updates(&connection_addr, ROWS, OPS, "B").await;
 
         db_job.abort();
         drop(cleaner);
@@ -196,6 +134,9 @@ async fn backup_restore() {
     {
         // make sure that we can follow back until the generation from which snapshot could be possible
         tracing::info!("---STEP 5: recreate database from generation missing snapshot ---");
+
+        // manually remove snapshots from all generations, this will force restore across generations
+        // from the very beginning
         remove_snapshots(BUCKET).await;
 
         let cleaner = DbFileCleaner::new(PATH);
@@ -203,28 +144,7 @@ async fn backup_restore() {
 
         sleep(Duration::from_secs(2)).await;
 
-        let result = sql(&connection_addr, ["SELECT id, name FROM t ORDER BY id;"])
-            .await
-            .unwrap();
-        let rs = result
-            .into_iter()
-            .next()
-            .unwrap()
-            .into_result_set()
-            .unwrap();
-        assert_eq!(rs.rows.len(), ROWS, "unexpected number of rows");
-        let base = if OPS < 10 { 0 } else { OPS - 10 } as i64;
-        for (i, row) in rs.rows.iter().enumerate() {
-            let i = i as i64;
-            let id = row.cells["id"].clone();
-            let name = row.cells["name"].clone();
-            assert_eq!(
-                (id, name),
-                (Value::Integer(i), Value::Text(format!("{}-x", base + i))),
-                "unexpected values for row {}",
-                i
-            );
-        }
+        assert_updates(&connection_addr, ROWS, OPS, "B").await;
 
         db_job.abort();
         drop(cleaner);
@@ -350,6 +270,51 @@ async fn rollback_restore() {
 
         db_job.abort();
         drop(cleaner);
+    }
+}
+
+async fn perform_updates(connection_addr: &Url, row_count: usize, ops_count: usize, update: &str) {
+    let stmts: Vec<_> = (0..ops_count)
+        .map(|i| {
+            format!(
+                "INSERT INTO t(id, name) VALUES({}, '{}-{}') ON CONFLICT (id) DO UPDATE SET name = '{}-{}';",
+                i % row_count,
+                i,
+                update,
+                i,
+                update
+            )
+        })
+        .collect();
+    let _ = sql(&connection_addr, stmts).await.unwrap();
+}
+
+async fn assert_updates(connection_addr: &Url, row_count: usize, ops_count: usize, update: &str) {
+    let result = sql(connection_addr, ["SELECT id, name FROM t ORDER BY id;"])
+        .await
+        .unwrap();
+    let rs = result
+        .into_iter()
+        .next()
+        .unwrap()
+        .into_result_set()
+        .unwrap();
+    assert_eq!(rs.rows.len(), row_count, "unexpected number of rows");
+    let base = if ops_count < 10 { 0 } else { ops_count - 10 } as i64;
+    for (i, row) in rs.rows.iter().enumerate() {
+        let i = i as i64;
+        let id = row.cells["id"].clone();
+        let name = row.cells["name"].clone();
+        assert_eq!(
+            (&id, &name),
+            (
+                &Value::Integer(i),
+                &Value::Text(format!("{}-{}", base + i, update))
+            ),
+            "unexpected values for row {}: ({})",
+            i,
+            name
+        );
     }
 }
 
