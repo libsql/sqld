@@ -14,6 +14,7 @@ use aws_sdk_s3::primitives::ByteStream;
 use aws_sdk_s3::{Client, Config};
 use bytes::{Buf, Bytes, BytesMut};
 use chrono::{DateTime, LocalResult, NaiveDateTime, TimeZone, Utc};
+use tokio::task::JoinSet;
 use std::io::SeekFrom;
 use std::ops::Deref;
 use std::path::Path;
