@@ -134,7 +134,9 @@ async fn dump_stream_from_url(url: &Url) -> Result<DumpStream, LoadDumpError> {
             Ok(Box::new(body))
         }
         "file" => {
-            let path = url.to_file_path().map_err(|_| LoadDumpError::InvalidDumpUrl)?;
+            let path = url
+                .to_file_path()
+                .map_err(|_| LoadDumpError::InvalidDumpUrl)?;
             if !path.is_absolute() {
                 return Err(LoadDumpError::DumpFilePathNotAbsolute);
             }
