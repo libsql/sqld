@@ -115,7 +115,7 @@ async fn run() -> Result<()> {
                     .build()
             });
             let bucket = options.bucket.as_deref().unwrap_or("bottomless");
-            match detect_db(&client, bucket, namespace.clone()).await {
+            match detect_db(&client, bucket, namespace).await {
                 Some(db) => db,
                 None => {
                     println!("Could not autodetect the database. Please pass it explicitly with -d option");
