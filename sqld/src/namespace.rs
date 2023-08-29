@@ -5,6 +5,7 @@ use std::time::Duration;
 
 use anyhow::bail;
 use async_lock::{RwLock, RwLockUpgradableReadGuard};
+use bottomless::replicator::Options;
 use bytes::Bytes;
 use futures_core::Stream;
 use hyper::Uri;
@@ -78,9 +79,17 @@ impl MakeNamespace for PrimaryNamespaceMaker {
             .base_path
             .join("dbs")
             .join(std::str::from_utf8(namespace).unwrap());
-        tokio::fs::remove_dir_all(ns_path).await?;
 
-        //TODO: remove from bottomless
+        if let Some(ref options) = self.config.bottomless_replication {
+            let options = make_bottomless_options(options, &namespace);
+            let replicator = bottomless::replicator::Replicator::with_options(ns_path.join("data").to_str().unwrap(), options).await?;
+            let delete_all = replicator.delete_all(None).await?;
+
+            // perform hard deletion in the background
+            tokio::spawn(delete_all.commit());
+        }
+
+        tokio::fs::remove_dir_all(ns_path).await?;
 
         Ok(())
     }
@@ -335,6 +344,13 @@ pub struct PrimaryNamespaceConfig {
 pub type DumpStream =
     Box<dyn Stream<Item = std::io::Result<Bytes>> + Send + Sync + 'static + Unpin>;
 
+fn make_bottomless_options(options: &Options, name: &Bytes) -> Options {
+    let mut options = options.clone();
+    let db_id = format!("ns-{}", std::str::from_utf8(&name).unwrap());
+    options.db_id = Some(db_id);
+    options
+}
+
 impl Namespace<PrimaryDatabase> {
     async fn new_primary(
         config: &PrimaryNamespaceConfig,
@@ -362,11 +378,9 @@ impl Namespace<PrimaryDatabase> {
         tokio::fs::create_dir_all(&db_path).await?;
 
         let bottomless_replicator = if let Some(options) = &config.bottomless_replication {
-            let mut options = options.clone();
-            let db_id = format!("ns-{}", std::str::from_utf8(&name).unwrap());
-            options.db_id = Some(db_id);
+            let options = make_bottomless_options(options, &name);
             let (replicator, did_recover) =
-                init_bottomless_replicator(db_path.join("data"), options.clone()).await?;
+                init_bottomless_replicator(db_path.join("data"), options).await?;
 
             // There wasn't any database to recover from bottomless, and we are not allowed to
             // create a new database
