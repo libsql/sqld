@@ -172,7 +172,7 @@ impl ReplicationLog for ReplicationLogService {
             FrameStream::new(Arc::downgrade(&logger), req.next_offset, true).unwrap(),
             self.idle_shutdown_layer.clone(),
         )
-            .map(map_frame_stream_output);
+        .map(map_frame_stream_output);
 
         Ok(tonic::Response::new(Box::pin(stream)))
     }

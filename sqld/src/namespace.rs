@@ -27,8 +27,8 @@ use crate::replication::replica::Replicator;
 use crate::replication::{NamespacedSnapshotCallback, ReplicationLogger};
 use crate::stats::Stats;
 use crate::{
-    check_fresh_db, init_bottomless_replicator, run_periodic_compactions, DB_CREATE_TIMEOUT,
-    DEFAULT_AUTO_CHECKPOINT, DEFAULT_NAMESPACE_NAME, MAX_CONCURRENT_DBS, ResetOp,
+    check_fresh_db, init_bottomless_replicator, run_periodic_compactions, ResetOp,
+    DB_CREATE_TIMEOUT, DEFAULT_AUTO_CHECKPOINT, DEFAULT_NAMESPACE_NAME, MAX_CONCURRENT_DBS,
 };
 
 /// Creates a new `Namespace` for database of the `Self::Database` type.
@@ -81,8 +81,12 @@ impl MakeNamespace for PrimaryNamespaceMaker {
             .join(std::str::from_utf8(namespace).unwrap());
 
         if let Some(ref options) = self.config.bottomless_replication {
-            let options = make_bottomless_options(options, &namespace);
-            let replicator = bottomless::replicator::Replicator::with_options(ns_path.join("data").to_str().unwrap(), options).await?;
+            let options = make_bottomless_options(options, namespace);
+            let replicator = bottomless::replicator::Replicator::with_options(
+                ns_path.join("data").to_str().unwrap(),
+                options,
+            )
+            .await?;
             let delete_all = replicator.delete_all(None).await?;
 
             // perform hard deletion in the background
@@ -158,7 +162,10 @@ impl<M: MakeNamespace> NamespaceStore<M> {
         // destroy on-disk database
         self.make_namespace.destroy(&namespace).await?;
 
-        tracing::info!("destroyed namespace: {}", std::str::from_utf8(&namespace).unwrap_or_default());
+        tracing::info!(
+            "destroyed namespace: {}",
+            std::str::from_utf8(&namespace).unwrap_or_default()
+        );
 
         Ok(())
     }
@@ -178,7 +185,10 @@ impl NamespaceStore<ReplicaNamespaceMaker> {
 
         // destroy on-disk database
         self.make_namespace.destroy(&namespace).await?;
-        let ns = self.make_namespace.create(namespace.clone(), None, true).await?;
+        let ns = self
+            .make_namespace
+            .create(namespace.clone(), None, true)
+            .await?;
         lock.insert(namespace, ns);
 
         Ok(())
@@ -221,7 +231,10 @@ impl<F: MakeNamespace> NamespaceStore<F> {
             ));
         }
 
-        let ns = self.make_namespace.create(namespace.clone(), dump, true).await?;
+        let ns = self
+            .make_namespace
+            .create(namespace.clone(), dump, true)
+            .await?;
 
         let mut lock = RwLockUpgradableReadGuard::upgrade(lock).await;
         lock.insert(namespace, ns);
@@ -346,7 +359,7 @@ pub type DumpStream =
 
 fn make_bottomless_options(options: &Options, name: &Bytes) -> Options {
     let mut options = options.clone();
-    let db_id = format!("ns-{}", std::str::from_utf8(&name).unwrap());
+    let db_id = format!("ns-{}", std::str::from_utf8(name).unwrap());
     options.db_id = Some(db_id);
     options
 }

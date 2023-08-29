@@ -14,7 +14,6 @@ use aws_sdk_s3::primitives::ByteStream;
 use aws_sdk_s3::{Client, Config};
 use bytes::{Buf, Bytes, BytesMut};
 use chrono::{DateTime, LocalResult, NaiveDateTime, TimeZone, Utc};
-use tokio::task::JoinSet;
 use std::io::SeekFrom;
 use std::ops::Deref;
 use std::path::Path;
@@ -23,6 +22,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 use tokio::sync::watch::{channel, Receiver, Sender};
+use tokio::task::JoinSet;
 use tokio::time::{timeout_at, Instant};
 use uuid::{NoContext, Uuid};
 

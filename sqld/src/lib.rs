@@ -352,10 +352,10 @@ async fn start_replica(
                             std::str::from_utf8(&ns).ok()
                         );
                         namespaces.reset(ns).await?;
-                    },
+                    }
                     ResetOp::Destroy(ns) => {
                         namespaces.destroy(ns).await?;
-                    },
+                    }
                 }
             }
 
