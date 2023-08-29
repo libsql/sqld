@@ -24,7 +24,7 @@ impl FrameStream {
         current_frameno: FrameNo,
         wait_for_more: bool,
     ) -> crate::Result<Self> {
-        let Some(logger_arc) = logger.upgrade() else { todo!("logger closed") };
+        let Some(logger_arc) = logger.upgrade() else { return Err(crate::error::Error::Internal("logger closed.".into())) };
         let max_available_frame_no = *logger_arc.new_frame_notifier.subscribe().borrow();
 
         Ok(Self {
