@@ -286,7 +286,7 @@ async fn perform_updates(connection_addr: &Url, row_count: usize, ops_count: usi
             )
         })
         .collect();
-    let _ = sql(&connection_addr, stmts).await.unwrap();
+    let _ = sql(connection_addr, stmts).await.unwrap();
 }
 
 async fn assert_updates(connection_addr: &Url, row_count: usize, ops_count: usize, update: &str) {
