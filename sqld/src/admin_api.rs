@@ -3,6 +3,7 @@ use axum::extract::{Path, State};
 use axum::routing::delete;
 use axum::Json;
 use axum::routing::delete;
+use axum::Json;
 use futures::TryStreamExt;
 use serde::Deserialize;
 use std::sync::Arc;
@@ -150,8 +151,6 @@ async fn handle_delete_namespace<F: MakeNamespace>(
     app_state.namespaces.destroy(namespace.into()).await?;
     Ok(())
 }
-
-
 
 async fn handle_delete_namespace<F: MakeNamespace>(
     State(app_state): State<Arc<AppState<F>>>,
