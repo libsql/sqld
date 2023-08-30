@@ -1,7 +1,6 @@
 use anyhow::Context as _;
 use axum::extract::{Path, State};
 use axum::Json;
-use futures::future::OptionFuture;
 use futures::TryStreamExt;
 use serde::Deserialize;
 use std::sync::Arc;
@@ -95,10 +94,11 @@ async fn handle_create_namespace<F: MakeNamespace>(
     Path(namespace): Path<String>,
     Json(req): Json<CreateNamespaceReq>,
 ) -> Result<(), crate::error::Error> {
-    let maybe_dump: Option<DumpStream> =
-        OptionFuture::from(req.dump_url.as_ref().map(dump_stream_from_url))
-            .await
-            .transpose()?;
+    let maybe_dump = match req.dump_url {
+        Some(ref url) => Some(dump_stream_from_url(url).await?),
+        None => None,
+    };
+
     app_state
         .namespaces
         .create(namespace.into(), maybe_dump)
@@ -136,6 +136,6 @@ async fn dump_stream_from_url(url: &Url) -> Result<DumpStream, LoadDumpError> {
 
             Ok(Box::new(ReaderStream::new(f)))
         }
-        _ => todo!("unsupported url scheme"),
+        scheme => Err(LoadDumpError::UnsupportedUrlScheme(scheme.to_string())),
     }
 }

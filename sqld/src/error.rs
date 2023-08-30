@@ -147,6 +147,8 @@ pub enum LoadDumpError {
     InvalidDumpUrl,
     #[error("error fetching dump: {0}")]
     Fetch(#[from] hyper::Error),
+    #[error("unsupported dump url scheme `{0}`, supported schemes are: `http`, `file`")]
+    UnsupportedUrlScheme(String),
 }
 
 impl ResponseError for LoadDumpError {}
@@ -161,6 +163,7 @@ impl IntoResponse for LoadDumpError {
             | LoadDumpExistingDb
             | InvalidDumpUrl
             | DumpFileDoesntExist
+            | UnsupportedUrlScheme(_)
             | DumpFilePathNotAbsolute => self.format_err(StatusCode::BAD_REQUEST),
         }
     }
