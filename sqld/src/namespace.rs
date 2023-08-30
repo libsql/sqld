@@ -253,6 +253,7 @@ pub struct Namespace<T: Database> {
 
 impl<T: Database> Namespace<T> {
     async fn destroy(mut self) -> anyhow::Result<()> {
+        self.db.shutdown();
         self.tasks.shutdown().await;
 
         Ok(())
