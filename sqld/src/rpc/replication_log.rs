@@ -156,7 +156,11 @@ impl ReplicationLog for ReplicationLogService {
             })?;
 
         let stream = StreamGuard::new(
+<<<<<<< HEAD
             FrameStream::new(logger, req.next_offset, true, None)
+=======
+            FrameStream::new(logger, req.next_offset, true)
+>>>>>>> 3c48a36 (git rid of Arc::weak in FrameStream)
                 .map_err(|e| Status::internal(e.to_string()))?,
             self.idle_shutdown_layer.clone(),
         )
@@ -196,7 +200,11 @@ impl ReplicationLog for ReplicationLogService {
             })?;
 
         let frames = StreamGuard::new(
+<<<<<<< HEAD
             FrameStream::new(logger, req.next_offset, false, Some(MAX_FRAMES_PER_BATCH))
+=======
+            FrameStream::new(logger, req.next_offset, false)
+>>>>>>> 3c48a36 (git rid of Arc::weak in FrameStream)
                 .map_err(|e| Status::internal(e.to_string()))?,
             self.idle_shutdown_layer.clone(),
         )
