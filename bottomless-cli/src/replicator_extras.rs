@@ -139,7 +139,7 @@ impl Replicator {
                         let counter = self.get_remote_change_counter(&uuid).await?;
                         let consistent_frame = self.get_last_consistent_frame(&uuid).await?;
                         let m = self.get_metadata(&uuid).await?;
-                        let dep = self.get_dependency(&uuid).await?;
+                        let parent = self.get_dependency(&uuid).await?;
                         println!("\tcreated at (UTC):     {datetime}");
                         println!("\tchange counter:       {counter:?}");
                         println!("\tconsistent WAL frame: {consistent_frame}");
@@ -147,7 +147,7 @@ impl Replicator {
                             println!("\tpage size:            {}", page_size);
                             println!("\tWAL frame checksum:   {:x}", crc);
                         }
-                        if let Some(prev_gen) = dep {
+                        if let Some(prev_gen) = parent {
                             println!("\tprevious generation:  {}", prev_gen);
                         }
                         self.print_snapshot_summary(&uuid).await?;

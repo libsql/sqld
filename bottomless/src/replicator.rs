@@ -30,6 +30,11 @@ use tokio::task::JoinSet;
 use tokio::time::{timeout_at, Instant};
 use uuid::{NoContext, Uuid};
 
+/// Maximum number of generations that can participate in database restore procedure.
+/// This effectively means that at least one in [MAX_RESTORE_STACK_DEPTH] number of
+/// consecutive generations has to have a snapshot included.
+const MAX_RESTORE_STACK_DEPTH: usize = 100;
+
 pub type Result<T> = anyhow::Result<T>;
 
 #[derive(Debug)]
@@ -519,11 +524,14 @@ impl Replicator {
 
     // Starts a new generation for this replicator instance
     pub fn new_generation(&mut self) {
-        let curr_generation = Self::generate_generation();
-        let prev_generation = self.set_generation(curr_generation);
-        if let Some(prev_generation) = prev_generation {
-            // try to store dependency between previous and current generation
-            self.store_dependency(prev_generation, curr_generation)
+        let curr = Self::generate_generation();
+        let prev = self.set_generation(curr);
+        if let Some(prev) = prev {
+            if prev != curr {
+                // try to store dependency between previous and current generation
+                tracing::trace!("New generation {} (parent: {})", curr, prev);
+                self.store_dependency(prev, curr)
+            }
         }
     }
 
@@ -552,23 +560,32 @@ impl Replicator {
             .ok_or(anyhow!("Replicator generation was not initialized"))
     }
 
-    fn store_dependency(&self, prev_generation: Uuid, curr_generation: Uuid) {
-        let key = format!("{}-{}/.dep", self.db_name, curr_generation);
+    /// Request to store dependency between current generation and its predecessor on S3 object.
+    /// This works asynchronously on best-effort rules, as putting object to S3 introduces an
+    /// extra undesired latency and this method may be called during SQLite checkpoint.
+    fn store_dependency(&self, prev: Uuid, curr: Uuid) {
+        let key = format!("{}-{}/.dep", self.db_name, curr);
         let request =
             self.client
                 .put_object()
                 .bucket(&self.bucket)
                 .key(key)
                 .body(ByteStream::from(Bytes::copy_from_slice(
-                    prev_generation.into_bytes().as_slice(),
+                    prev.into_bytes().as_slice(),
                 )));
         tokio::spawn(async move {
             if let Err(e) = request.send().await {
                 tracing::error!(
                     "Failed to store dependency between generations {} -> {}: {}",
-                    prev_generation,
-                    curr_generation,
+                    prev,
+                    curr,
                     e
+                );
+            } else {
+                tracing::trace!(
+                    "Stored dependency between parent ({}) and child ({})",
+                    prev,
+                    curr
                 );
             }
         });
@@ -963,7 +980,7 @@ impl Replicator {
 
         let last_frame = self.get_last_consistent_frame(&generation).await?;
         tracing::debug!("Last consistent remote frame in generation {generation}: {last_frame}.");
-        if let Some(action) = self.try_skip_restore(generation, last_frame).await? {
+        if let Some(action) = self.compare_with_local(generation, last_frame).await? {
             return Ok(action);
         }
 
@@ -980,36 +997,44 @@ impl Replicator {
             .open(&self.db_path)
             .await?;
 
-        let mut restore_generations = Vec::new();
+        let mut restore_stack = Vec::new();
 
         // If the db file is not present, the database could have been empty
-        let mut current_gen = Some(generation);
-        while let Some(gen) = current_gen.take() {
+        let mut current = Some(generation);
+        while let Some(curr) = current.take() {
             // stash current generation - we'll use it to replay WAL across generations since the
             // last snapshot
-            restore_generations.push(gen);
-            let restored = self.restore_from_snapshot(&gen, &mut db).await?;
+            restore_stack.push(curr);
+            let restored = self.restore_from_snapshot(&curr, &mut db).await?;
             if restored {
                 break;
             } else {
-                tracing::debug!("No snapshot found on the generation {}", gen);
+                if restore_stack.len() > MAX_RESTORE_STACK_DEPTH {
+                    bail!("Restoration failed: maximum number of generations to restore from was reached.");
+                }
+                tracing::debug!("No snapshot found on the generation {}", curr);
                 // there was no snapshot to restore from, it means that we either:
                 // 1. Have only WAL to restore from - case when we're at the initial generation
                 //    of the database.
                 // 2. Snapshot never existed - in that case try to reach for parent generation
                 //    of the current one and read snapshot from there.
-                current_gen = self.get_dependency(&generation).await?;
-                if let Some(prev) = &current_gen {
-                    tracing::debug!("Rolling restore back from generation {} to {}", gen, prev);
+                current = self.get_dependency(&curr).await?;
+                if let Some(prev) = &current {
+                    tracing::debug!("Rolling restore back from generation {} to {}", curr, prev);
                 }
             }
         }
 
+        tracing::trace!(
+            "Restoring database from {} generations",
+            restore_stack.len()
+        );
+
         let mut applied_wal_frame = false;
-        while let Some(gen) = restore_generations.pop() {
+        while let Some(gen) = restore_stack.pop() {
             if let Some((page_size, checksum)) = self.get_metadata(&gen).await? {
                 self.set_page_size(page_size as usize)?;
-                let last_frame = if restore_generations.is_empty() {
+                let last_frame = if restore_stack.is_empty() {
                     // we're at the last generation to restore from, it may still being written to
                     // so we constraint the restore to a frame checked at the beginning of the
                     // restore procedure
@@ -1047,7 +1072,7 @@ impl Replicator {
 
     /// Compares S3 generation backup state against current local database file to determine
     /// if we are up to date (returned restore action) or should we perform restoration.
-    async fn try_skip_restore(
+    async fn compare_with_local(
         &mut self,
         generation: Uuid,
         last_consistent_frame: u32,
@@ -1070,6 +1095,10 @@ impl Replicator {
         tracing::debug!("Counters: l={:?}, r={:?}", local_counter, remote_counter);
 
         let wal_pages = self.get_local_wal_page_count().await;
+        // We impersonate as a given generation, since we're comparing against local backup at that
+        // generation. This is used later in [Self::new_generation] to create a dependency between
+        // this generation and a new one.
+        self.generation.store(Some(Arc::new(generation)));
         match local_counter.cmp(&remote_counter) {
             std::cmp::Ordering::Equal => {
                 tracing::debug!(
@@ -1087,7 +1116,6 @@ impl Replicator {
                     }
                     std::cmp::Ordering::Greater => {
                         tracing::info!("Local change counter matches the remote one, but local WAL contains newer data from generation {}, which needs to be replicated.", generation);
-                        self.generation.store(Some(Arc::new(generation)));
                         Ok(Some(RestoreAction::SnapshotMainDbFile))
                     }
                     std::cmp::Ordering::Less => Ok(None),
@@ -1095,7 +1123,6 @@ impl Replicator {
             }
             std::cmp::Ordering::Greater => {
                 tracing::info!("Local change counter is larger than its remote counterpart - a new snapshot needs to be replicated (generation: {})", generation);
-                self.generation.store(Some(Arc::new(generation)));
                 Ok(Some(RestoreAction::SnapshotMainDbFile))
             }
             std::cmp::Ordering::Less => Ok(None),
