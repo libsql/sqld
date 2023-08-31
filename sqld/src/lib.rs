@@ -352,7 +352,6 @@ async fn start_replica(
                             "received reset signal for: {:?}",
                             std::str::from_utf8(&ns).ok()
                         );
-                        // restore option doesn't matter for replicas
                         namespaces.reset(ns, RestoreOption::Latest).await?;
                     }
                     ResetOp::Destroy(ns) => {

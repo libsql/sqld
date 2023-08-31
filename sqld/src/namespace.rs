@@ -172,9 +172,7 @@ impl<M: MakeNamespace> NamespaceStore<M> {
 
         Ok(())
     }
-}
 
-impl NamespaceStore<ReplicaNamespaceMaker> {
     pub async fn reset(
         &self,
         namespace: Bytes,
