@@ -12,8 +12,7 @@ use tokio_util::io::ReaderStream;
 use url::Url;
 
 use crate::connection::config::{DatabaseConfig, DatabaseConfigStore};
-use crate::error::LoadDumpError;
-use crate::namespace::{DumpStream, MakeNamespace, NamespaceStore};
+use crate::namespace::{MakeNamespace, NamespaceStore, RestoreOption};
 
 struct AppState<F: MakeNamespace> {
     db_config_store: Arc<DatabaseConfigStore>,
@@ -105,7 +104,7 @@ async fn handle_create_namespace<F: MakeNamespace>(
 
     app_state
         .namespaces
-        .create(namespace.into(), maybe_dump)
+        .create(namespace.into(), RestoreOption::Dump(dump))
         .await?;
     Ok(())
 }
@@ -148,7 +147,10 @@ async fn handle_delete_namespace<F: MakeNamespace>(
     State(app_state): State<Arc<AppState<F>>>,
     Path(namespace): Path<String>,
 ) -> crate::Result<()> {
-    app_state.namespaces.destroy(namespace.into()).await?;
+    app_state
+        .namespaces
+        .create(namespace.into(), RestoreOption::Latest)
+        .await?;
     Ok(())
 }
 
