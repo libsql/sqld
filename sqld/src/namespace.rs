@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::collections::hash_map::Entry;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -50,6 +51,7 @@ pub trait MakeNamespace: Sync + Send + 'static {
     /// When `prune_all` is false, remove only files from local disk.
     /// When `prune_all` is true remove local database files as well as remote backup.
     async fn destroy(&self, namespace: &Bytes, prune_all: bool) -> crate::Result<()>;
+    async fn fork(&self, from: &Namespace<Self::Database>, to: Bytes) -> crate::Result<Namespace<Self::Database>>;
 }
 
 /// Creates new primary `Namespace`
@@ -103,6 +105,10 @@ impl MakeNamespace for PrimaryNamespaceMaker {
 
         Ok(())
     }
+
+    async fn fork(&self, from: &Namespace<Self::Database>, _to: Bytes) -> crate::Result<Namespace<Self::Database>> {
+        todo!()
+    }
 }
 
 /// Creates new replica `Namespace`
@@ -143,6 +149,10 @@ impl MakeNamespace for ReplicaNamespaceMaker {
             .join(std::str::from_utf8(namespace).unwrap());
         tokio::fs::remove_dir_all(ns_path).await?;
         Ok(())
+    }
+
+    async fn fork(&self, _from: &Namespace<Self::Database>, _to: Bytes) -> crate::Result<Namespace<Self::Database>> {
+        todo!("cannot fork from replica");
     }
 }
 
@@ -213,8 +223,26 @@ impl<F: MakeNamespace> NamespaceStore<F> {
         }
     }
 
-    pub async fn fork(&self, _from: Bytes, _to: Bytes) -> crate::Result<()> {
-        todo!()
+    pub async fn fork(&self, from: Bytes, to: Bytes) -> crate::Result<()> {
+        let mut lock = self.inner.write().await;
+        if lock.contains_key(&to) {
+            return Err(crate::error::Error::NamespaceAlreadyExist(String::from_utf8(to.to_vec()).unwrap_or_default()))
+        }
+
+        // check that the source namespace exists
+        let from_ns = match lock.entry(from.clone()) {
+            Entry::Occupied(e) => e.into_mut(),
+            Entry::Vacant(e) => {
+                // we just want to load the namespace into memory, so we refuse creation.
+                let ns = self.factory.create(from.clone(), None, false).await?;
+                e.insert(ns)
+            },
+        };
+
+        let forked = self.factory.fork(from_ns, to.clone()).await?;
+        lock.insert(to.clone(), forked);
+
+        Ok(())
     }
 
     pub async fn with<Fun, R>(&self, namespace: Bytes, f: Fun) -> crate::Result<R>
