@@ -15,15 +15,15 @@ use crate::connection::config::{DatabaseConfig, DatabaseConfigStore};
 use crate::error::LoadDumpError;
 use crate::namespace::{DumpStream, MakeNamespace, NamespaceStore, RestoreOption};
 
-struct AppState<F: MakeNamespace> {
+struct AppState<M: MakeNamespace> {
     db_config_store: Arc<DatabaseConfigStore>,
-    namespaces: Arc<NamespaceStore<F>>,
+    namespaces: Arc<NamespaceStore<M>>,
 }
 
-pub async fn run_admin_api<F: MakeNamespace>(
+pub async fn run_admin_api<M: MakeNamespace>(
     addr: SocketAddr,
     db_config_store: Arc<DatabaseConfigStore>,
-    namespaces: Arc<NamespaceStore<F>>,
+    namespaces: Arc<NamespaceStore<M>>,
 ) -> anyhow::Result<()> {
     use axum::routing::{get, post};
     let router = axum::Router::new()
@@ -39,6 +39,7 @@ pub async fn run_admin_api<F: MakeNamespace>(
             post(handle_restore_namespace),
         )
         .route("/v1/namespaces/:namespace", delete(handle_delete_namespace))
+        .route("/v1/namespaces/:from/fork/:to", post(handle_fork_namespace))
         .with_state(Arc::new(AppState {
             db_config_store,
             namespaces,
@@ -60,8 +61,8 @@ async fn handle_get_index() -> &'static str {
     "Welcome to the sqld admin API"
 }
 
-async fn handle_get_config<F: MakeNamespace>(
-    State(app_state): State<Arc<AppState<F>>>,
+async fn handle_get_config<M: MakeNamespace>(
+    State(app_state): State<Arc<AppState<M>>>,
 ) -> Json<Arc<DatabaseConfig>> {
     Json(app_state.db_config_store.get())
 }
@@ -79,8 +80,8 @@ struct CreateNamespaceReq {
     dump_url: Option<Url>,
 }
 
-async fn handle_post_block<F: MakeNamespace>(
-    State(app_state): State<Arc<AppState<F>>>,
+async fn handle_post_block<M: MakeNamespace>(
+    State(app_state): State<Arc<AppState<M>>>,
     Json(req): Json<BlockReq>,
 ) -> (axum::http::StatusCode, &'static str) {
     let mut config = (*app_state.db_config_store.get()).clone();
@@ -97,8 +98,8 @@ async fn handle_post_block<F: MakeNamespace>(
     }
 }
 
-async fn handle_create_namespace<F: MakeNamespace>(
-    State(app_state): State<Arc<AppState<F>>>,
+async fn handle_create_namespace<M: MakeNamespace>(
+    State(app_state): State<Arc<AppState<M>>>,
     Path(namespace): Path<String>,
     Json(req): Json<CreateNamespaceReq>,
 ) -> crate::Result<()> {
@@ -109,6 +110,13 @@ async fn handle_create_namespace<F: MakeNamespace>(
 
     app_state.namespaces.create(namespace.into(), dump).await?;
     Ok(())
+}
+
+async fn handle_fork_namespace<M: MakeNamespace>(
+    State(_app_state): State<Arc<AppState<M>>>,
+    Path((_from, _to)): Path<(String, String)>,
+) -> crate::Result<()> {
+    todo!()
 }
 
 async fn dump_stream_from_url(url: &Url) -> Result<DumpStream, LoadDumpError> {
