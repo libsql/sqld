@@ -213,6 +213,10 @@ impl<F: MakeNamespace> NamespaceStore<F> {
         }
     }
 
+    pub async fn fork(&self, _from: Bytes, _to: Bytes) -> crate::Result<()> {
+        todo!()
+    }
+
     pub async fn with<Fun, R>(&self, namespace: Bytes, f: Fun) -> crate::Result<R>
     where
         Fun: FnOnce(&Namespace<F::Database>) -> R,

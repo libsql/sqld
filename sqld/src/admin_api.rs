@@ -113,10 +113,11 @@ async fn handle_create_namespace<M: MakeNamespace>(
 }
 
 async fn handle_fork_namespace<M: MakeNamespace>(
-    State(_app_state): State<Arc<AppState<M>>>,
-    Path((_from, _to)): Path<(String, String)>,
+    State(app_state): State<Arc<AppState<M>>>,
+    Path((from, to)): Path<(String, String)>,
 ) -> crate::Result<()> {
-    todo!()
+    app_state.namespaces.fork(from.into(), to.into()).await?;
+    Ok(())
 }
 
 async fn dump_stream_from_url(url: &Url) -> Result<DumpStream, LoadDumpError> {
