@@ -1,5 +1,5 @@
-use std::collections::HashMap;
 use std::collections::hash_map::Entry;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -34,6 +34,12 @@ use crate::{
     DB_CREATE_TIMEOUT, DEFAULT_AUTO_CHECKPOINT, DEFAULT_NAMESPACE_NAME, MAX_CONCURRENT_DBS,
 };
 
+pub use fork::ForkError;
+
+use self::fork::ForkTask;
+
+mod fork;
+
 /// Creates a new `Namespace` for database of the `Self::Database` type.
 #[async_trait::async_trait]
 pub trait MakeNamespace: Sync + Send + 'static {
@@ -51,7 +57,11 @@ pub trait MakeNamespace: Sync + Send + 'static {
     /// When `prune_all` is false, remove only files from local disk.
     /// When `prune_all` is true remove local database files as well as remote backup.
     async fn destroy(&self, namespace: &Bytes, prune_all: bool) -> crate::Result<()>;
-    async fn fork(&self, from: &Namespace<Self::Database>, to: Bytes) -> crate::Result<Namespace<Self::Database>>;
+    async fn fork(
+        &self,
+        from: &Namespace<Self::Database>,
+        to: Bytes,
+    ) -> crate::Result<Namespace<Self::Database>>;
 }
 
 /// Creates new primary `Namespace`
@@ -106,8 +116,19 @@ impl MakeNamespace for PrimaryNamespaceMaker {
         Ok(())
     }
 
-    async fn fork(&self, from: &Namespace<Self::Database>, _to: Bytes) -> crate::Result<Namespace<Self::Database>> {
-        todo!()
+    async fn fork(
+        &self,
+        from: &Namespace<Self::Database>,
+        to: Bytes,
+    ) -> crate::Result<Namespace<Self::Database>> {
+        let fork_task = ForkTask {
+            base_path: self.config.base_path.clone(),
+            dest_namespace: to,
+            logger: from.db.logger.clone(),
+            make_namespace: self,
+        };
+        let ns = fork_task.fork().await?;
+        Ok(ns)
     }
 }
 
@@ -151,7 +172,11 @@ impl MakeNamespace for ReplicaNamespaceMaker {
         Ok(())
     }
 
-    async fn fork(&self, _from: &Namespace<Self::Database>, _to: Bytes) -> crate::Result<Namespace<Self::Database>> {
+    async fn fork(
+        &self,
+        _from: &Namespace<Self::Database>,
+        _to: Bytes,
+    ) -> crate::Result<Namespace<Self::Database>> {
         todo!("cannot fork from replica");
     }
 }
@@ -226,7 +251,9 @@ impl<F: MakeNamespace> NamespaceStore<F> {
     pub async fn fork(&self, from: Bytes, to: Bytes) -> crate::Result<()> {
         let mut lock = self.inner.write().await;
         if lock.contains_key(&to) {
-            return Err(crate::error::Error::NamespaceAlreadyExist(String::from_utf8(to.to_vec()).unwrap_or_default()))
+            return Err(crate::error::Error::NamespaceAlreadyExist(
+                String::from_utf8(to.to_vec()).unwrap_or_default(),
+            ));
         }
 
         // check that the source namespace exists
@@ -236,7 +263,7 @@ impl<F: MakeNamespace> NamespaceStore<F> {
                 // we just want to load the namespace into memory, so we refuse creation.
                 let ns = self.factory.create(from.clone(), None, false).await?;
                 e.insert(ns)
-            },
+            }
         };
 
         let forked = self.factory.fork(from_ns, to.clone()).await?;
@@ -467,6 +494,8 @@ impl Namespace<PrimaryDatabase> {
                 ));
             }
 
+            dbg!(is_dirty);
+            dbg!(did_recover);
             is_dirty |= did_recover;
             Some(Arc::new(std::sync::Mutex::new(replicator)))
         } else {
