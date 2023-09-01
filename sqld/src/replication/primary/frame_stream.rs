@@ -55,7 +55,7 @@ impl FrameStream {
         }
         if let Some(max_frames) = self.max_frames {
             if self.produced_frames == max_frames {
-                tracing::trace!("Max number of frames reached ({max_frames}), closing stream");
+                tracing::debug!("Max number of frames reached ({max_frames}), closing stream");
                 self.state = FrameStreamState::Closed;
                 return;
             }
