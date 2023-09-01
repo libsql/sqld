@@ -494,8 +494,6 @@ impl Namespace<PrimaryDatabase> {
                 ));
             }
 
-            dbg!(is_dirty);
-            dbg!(did_recover);
             is_dirty |= did_recover;
             Some(Arc::new(std::sync::Mutex::new(replicator)))
         } else {

@@ -3,8 +3,8 @@ use hyper::StatusCode;
 use tonic::metadata::errors::InvalidMetadataValueBytes;
 
 use crate::{
-    auth::AuthError, query_result_builder::QueryResultBuilderError,
-    replication::replica::error::ReplicationError, namespace::ForkError,
+    auth::AuthError, namespace::ForkError, query_result_builder::QueryResultBuilderError,
+    replication::replica::error::ReplicationError,
 };
 
 #[allow(clippy::enum_variant_names)]
@@ -184,7 +184,6 @@ impl IntoResponse for LoadDumpError {
         }
     }
 }
-
 
 impl ResponseError for ForkError {}
 

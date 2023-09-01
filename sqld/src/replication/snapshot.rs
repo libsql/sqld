@@ -135,7 +135,7 @@ impl SnapshotFile {
             match self.file.read_exact_at(&mut buf, read_offset as _) {
                 Ok(_) => match Frame::try_from_bytes(buf.freeze()) {
                     Ok(frame) => Some(Ok(frame)),
-                    Err(e) => Some(Err(e.into())),
+                    Err(e) => Some(Err(e)),
                 },
                 Err(e) => Some(Err(e.into())),
             }

@@ -90,7 +90,10 @@ impl ForkTask<'_> {
                     }
                     Err(LogReadError::SnapshotRequired) => {
                         let snapshot = loop {
-                            if let Some(snap) = logger.get_snapshot_file(next_frame_no).map_err(ForkError::Internal)? {
+                            if let Some(snap) = logger
+                                .get_snapshot_file(next_frame_no)
+                                .map_err(ForkError::Internal)?
+                            {
                                 break snap;
                             }
 
