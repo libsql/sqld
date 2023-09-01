@@ -189,6 +189,12 @@ impl ResponseError for ForkError {}
 
 impl IntoResponse for ForkError {
     fn into_response(self) -> axum::response::Response {
-        self.format_err(StatusCode::INTERNAL_SERVER_ERROR)
+        match self {
+            ForkError::Internal(_)
+            | ForkError::Io(_)
+            | ForkError::LogRead(_)
+            | ForkError::CreateNamespace(_) => self.format_err(StatusCode::INTERNAL_SERVER_ERROR),
+            ForkError::ForkReplica => self.format_err(StatusCode::BAD_REQUEST),
+        }
     }
 }

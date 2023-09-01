@@ -29,6 +29,8 @@ pub enum ForkError {
     LogRead(anyhow::Error),
     #[error("an error occured creating the namespace: {0}")]
     CreateNamespace(Box<crate::error::Error>),
+    #[error("cannot fork a replica, try again with the primary.")]
+    ForkReplica,
 }
 
 impl From<tokio::task::JoinError> for ForkError {
