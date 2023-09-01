@@ -177,7 +177,7 @@ impl MakeNamespace for ReplicaNamespaceMaker {
         _from: &Namespace<Self::Database>,
         _to: Bytes,
     ) -> crate::Result<Namespace<Self::Database>> {
-        return Err(ForkError::ForkReplica.into())
+        return Err(ForkError::ForkReplica.into());
     }
 }
 
