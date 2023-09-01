@@ -4,7 +4,7 @@ use tonic::metadata::errors::InvalidMetadataValueBytes;
 
 use crate::{
     auth::AuthError, query_result_builder::QueryResultBuilderError,
-    replication::replica::error::ReplicationError,
+    replication::replica::error::ReplicationError, namespace::ForkError,
 };
 
 #[allow(clippy::enum_variant_names)]
@@ -77,6 +77,8 @@ pub enum Error {
     LoadDumpExistingDb,
     #[error("cannot restore database when conflicting params were provided")]
     ConflictingRestoreParameters,
+    #[error("failed to fork database: {0}")]
+    Fork(#[from] ForkError),
 }
 
 trait ResponseError: std::error::Error {
@@ -126,6 +128,7 @@ impl IntoResponse for Error {
             ReplicaRestoreError => self.format_err(StatusCode::BAD_REQUEST),
             LoadDumpExistingDb => self.format_err(StatusCode::BAD_REQUEST),
             ConflictingRestoreParameters => self.format_err(StatusCode::BAD_REQUEST),
+            Fork(e) => e.into_response(),
         }
     }
 }
@@ -179,5 +182,14 @@ impl IntoResponse for LoadDumpError {
             | UnsupportedUrlScheme(_)
             | DumpFilePathNotAbsolute => self.format_err(StatusCode::BAD_REQUEST),
         }
+    }
+}
+
+
+impl ResponseError for ForkError {}
+
+impl IntoResponse for ForkError {
+    fn into_response(self) -> axum::response::Response {
+        self.format_err(StatusCode::INTERNAL_SERVER_ERROR)
     }
 }

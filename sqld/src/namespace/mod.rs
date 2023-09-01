@@ -261,12 +261,12 @@ impl<F: MakeNamespace> NamespaceStore<F> {
             Entry::Occupied(e) => e.into_mut(),
             Entry::Vacant(e) => {
                 // we just want to load the namespace into memory, so we refuse creation.
-                let ns = self.factory.create(from.clone(), None, false).await?;
+                let ns = self.make_namespace.create(from.clone(), RestoreOption::Latest, false).await?;
                 e.insert(ns)
             }
         };
 
-        let forked = self.factory.fork(from_ns, to.clone()).await?;
+        let forked = self.make_namespace.fork(from_ns, to.clone()).await?;
         lock.insert(to.clone(), forked);
 
         Ok(())

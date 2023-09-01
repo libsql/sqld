@@ -31,6 +31,10 @@ pub async fn run_admin_api<M: MakeNamespace>(
         .route("/v1/config", get(handle_get_config))
         .route("/v1/block", post(handle_post_block))
         .route(
+            "/v1/namespaces/:namespace/fork/:to",
+            post(handle_fork_namespace),
+        )
+        .route(
             "/v1/namespaces/:namespace/create",
             post(handle_create_namespace),
         )
@@ -39,7 +43,6 @@ pub async fn run_admin_api<M: MakeNamespace>(
             post(handle_restore_namespace),
         )
         .route("/v1/namespaces/:namespace", delete(handle_delete_namespace))
-        .route("/v1/namespaces/:from/fork/:to", post(handle_fork_namespace))
         .with_state(Arc::new(AppState {
             db_config_store,
             namespaces,

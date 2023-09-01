@@ -12,7 +12,7 @@ use crate::replication::frame::Frame;
 use crate::replication::primary::frame_stream::FrameStream;
 use crate::replication::{LogReadError, ReplicationLogger};
 
-use super::MakeNamespace;
+use super::{MakeNamespace, RestoreOption};
 
 // FIXME: get this const from somewhere else (crate wide)
 const PAGE_SIZE: usize = 4096;
@@ -80,7 +80,8 @@ impl ForkTask<'_> {
         let end_frame_no = *logger.new_frame_notifier.borrow();
         let mut next_frame_no = 0;
         while next_frame_no < end_frame_no {
-            let mut streamer = FrameStream::new(logger.clone(), next_frame_no, false);
+            let mut streamer = FrameStream::new(logger.clone(), next_frame_no, false, None)
+                .map_err(|e| ForkError::LogRead(e.into()))?;
             while let Some(res) = streamer.next().await {
                 match res {
                     Ok(frame) => {
@@ -119,7 +120,7 @@ impl ForkTask<'_> {
         tokio::fs::rename(temp_dir.path(), dest_path).await?;
 
         self.make_namespace
-            .create(self.dest_namespace.clone(), None, false)
+            .create(self.dest_namespace.clone(), RestoreOption::Latest, false)
             .await
             .map_err(|e| ForkError::CreateNamespace(Box::new(e)))
     }
