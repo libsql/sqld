@@ -1,5 +1,5 @@
 use crate::backup::WalCopier;
-use crate::read::BatchReader;
+use crate::read::{upload_s3_multipart, BatchReader};
 use crate::transaction_cache::TransactionPageCache;
 use crate::uuid_utils::decode_unix_timestamp;
 use crate::wal::WalFileReader;
@@ -623,8 +623,11 @@ impl Replicator {
             return Ok(false);
         }
         tracing::debug!("Snapshotting {}", self.db_path);
+
         let start = Instant::now();
-        let change_counter = match self.use_compression {
+
+        let mut reader = tokio::fs::File::open(&self.db_path).await?;
+        match self.use_compression {
             CompressionKind::None => {
                 self.client
                     .put_object()
@@ -633,23 +636,17 @@ impl Replicator {
                     .body(ByteStream::from_path(&self.db_path).await?)
                     .send()
                     .await?;
-                let mut reader = tokio::fs::File::open(&self.db_path).await?;
-                Self::read_change_counter(&mut reader).await?
             }
             CompressionKind::Gzip => {
-                // TODO: find a way to compress ByteStream on the fly instead of creating
-                // an intermediary file.
-                let (compressed_db_path, change_counter) = self.compress_main_db_file().await?;
+                let buf_reader = tokio::io::BufReader::new(reader.try_clone().await?);
+                let gzip_reader = async_compression::tokio::bufread::GzipEncoder::new(buf_reader);
+
                 let key = format!("{}-{}/db.gz", self.db_name, self.generation);
-                self.client
-                    .put_object()
-                    .bucket(&self.bucket)
-                    .key(key)
-                    .body(ByteStream::from_path(compressed_db_path).await?)
-                    .send()
-                    .await?;
-                let _ = tokio::fs::remove_file(compressed_db_path).await;
-                change_counter
+
+                // Since it's not possible to know the exact size of a gzip stream and the
+                // PutObject operation requires the Content-Length header to be set, we need to
+                // send the content in chunks of known size.
+                upload_s3_multipart(&self.client, &key, &self.bucket, gzip_reader).await?;
             }
         };
 
@@ -659,6 +656,7 @@ impl Replicator {
          ** incremented on each transaction in WAL mode."
          ** Instead, we need to consult WAL checksums.
          */
+        let change_counter = Self::read_change_counter(&mut reader).await?;
         let change_counter_key = format!("{}-{}/.changecounter", self.db_name, self.generation);
         self.client
             .put_object()
