@@ -2,8 +2,6 @@ use anyhow::Context as _;
 use axum::extract::{Path, State};
 use axum::routing::delete;
 use axum::Json;
-use axum::routing::delete;
-use axum::Json;
 use chrono::NaiveDateTime;
 use futures::TryStreamExt;
 use serde::Deserialize;
@@ -14,7 +12,8 @@ use url::Url;
 use uuid::Uuid;
 
 use crate::connection::config::{DatabaseConfig, DatabaseConfigStore};
-use crate::namespace::{MakeNamespace, NamespaceStore, RestoreOption};
+use crate::error::LoadDumpError;
+use crate::namespace::{DumpStream, MakeNamespace, NamespaceStore, RestoreOption};
 
 struct AppState<F: MakeNamespace> {
     db_config_store: Arc<DatabaseConfigStore>,
@@ -103,15 +102,12 @@ async fn handle_create_namespace<F: MakeNamespace>(
     Path(namespace): Path<String>,
     Json(req): Json<CreateNamespaceReq>,
 ) -> crate::Result<()> {
-    let maybe_dump = match req.dump_url {
-        Some(ref url) => Some(dump_stream_from_url(url).await?),
-        None => None,
+    let dump = match req.dump_url {
+        Some(ref url) => RestoreOption::Dump(dump_stream_from_url(url).await?),
+        None => RestoreOption::Latest,
     };
 
-    app_state
-        .namespaces
-        .create(namespace.into(), RestoreOption::Dump(dump))
-        .await?;
+    app_state.namespaces.create(namespace.into(), dump).await?;
     Ok(())
 }
 
@@ -153,17 +149,6 @@ async fn handle_delete_namespace<F: MakeNamespace>(
     State(app_state): State<Arc<AppState<F>>>,
     Path(namespace): Path<String>,
 ) -> crate::Result<()> {
-    app_state
-        .namespaces
-        .create(namespace.into(), RestoreOption::Latest)
-        .await?;
-    Ok(())
-}
-
-async fn handle_delete_namespace<F: MakeNamespace>(
-    State(app_state): State<Arc<AppState<F>>>,
-    Path(namespace): Path<String>,
-) -> crate::Result<()> {
     app_state.namespaces.destroy(namespace.into()).await?;
     Ok(())
 }
@@ -183,11 +168,7 @@ async fn handle_restore_namespace<F: MakeNamespace>(
         (None, None) => RestoreOption::Latest,
         (Some(generation), None) => RestoreOption::Generation(generation),
         (None, Some(timestamp)) => RestoreOption::PointInTime(timestamp),
-        (Some(_), Some(_)) => {
-            return Err(crate::Error::Anyhow(anyhow!(
-                "Cannot restore when both generation and point-in-time query params are specified"
-            )))
-        }
+        (Some(_), Some(_)) => return Err(crate::Error::ConflictingRestoreParameters),
     };
     app_state
         .namespaces

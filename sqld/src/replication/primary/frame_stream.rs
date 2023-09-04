@@ -16,13 +16,10 @@ pub struct FrameStream {
     logger: Arc<ReplicationLogger>,
     state: FrameStreamState,
     wait_for_more: bool,
-<<<<<<< HEAD
     // number of frames produced in this stream
     produced_frames: usize,
     // max number of frames to produce before ending the stream
     max_frames: Option<usize>,
-=======
->>>>>>> 3c48a36 (git rid of Arc::weak in FrameStream)
     /// a future that resolves when the logger was closed.
     logger_closed_fut: BoxFuture<'static, ()>,
 }
@@ -46,11 +43,8 @@ impl FrameStream {
             logger,
             state: FrameStreamState::Init,
             wait_for_more,
-<<<<<<< HEAD
             produced_frames: 0,
             max_frames,
-=======
->>>>>>> 3c48a36 (git rid of Arc::weak in FrameStream)
             logger_closed_fut,
         })
     }
