@@ -15,7 +15,7 @@ use aws_sdk_s3::operation::list_objects::ListObjectsOutput;
 use aws_sdk_s3::primitives::ByteStream;
 use aws_sdk_s3::{Client, Config};
 use bytes::{Buf, Bytes};
-use chrono::{DateTime, LocalResult, NaiveDateTime, TimeZone, Utc};
+use chrono::{NaiveDateTime, TimeZone, Utc};
 use std::io::SeekFrom;
 use std::ops::Deref;
 use std::path::Path;
@@ -1163,7 +1163,7 @@ impl Replicator {
         page_size: usize,
         last_consistent_frame: Option<u32>,
         mut checksum: u64,
-        utc_time: Option<DateTime<Utc>>,
+        utc_time: Option<NaiveDateTime>,
         db: &mut File,
     ) -> Result<bool> {
         let prefix = format!("{}-{}/", self.db_name, generation);
