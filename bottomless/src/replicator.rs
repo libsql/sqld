@@ -7,6 +7,7 @@ use anyhow::{anyhow, bail};
 use async_compression::tokio::write::GzipEncoder;
 use aws_sdk_s3::config::{Credentials, Region};
 use arc_swap::ArcSwapOption;
+use async_compression::tokio::write::GzipEncoder;
 use aws_sdk_s3::error::SdkError;
 use aws_sdk_s3::operation::get_object::builders::GetObjectFluentBuilder;
 use aws_sdk_s3::operation::get_object::GetObjectError;
@@ -50,8 +51,8 @@ pub struct Replicator {
     /// Always: [last_committed_frame_no] <= [last_sent_frame_no].
     last_committed_frame_no: Receiver<Result<u32>>,
     flush_trigger: Sender<()>,
-    snapshot_waiter: Receiver<Result<Option<Arc<Uuid>>>>,
-    snapshot_notifier: Arc<Sender<Result<Option<Arc<Uuid>>>>>,
+    snapshot_waiter: Receiver<Result<Option<Uuid>>>,
+    snapshot_notifier: Arc<Sender<Result<Option<Uuid>>>>,
 
     pub page_size: usize,
     restore_transaction_page_swap_after: u32,
@@ -414,7 +415,7 @@ impl Replicator {
         self.last_sent_frame_no.load(Ordering::Acquire)
     }
 
-    pub async fn wait_until_snapshotted(&mut self, generation: Arc<Uuid>) -> Result<()> {
+    pub async fn wait_until_snapshotted(&mut self, generation: Uuid) -> Result<()> {
         let res = self
             .snapshot_waiter
             .wait_for(|result| match result {
@@ -523,7 +524,7 @@ impl Replicator {
     }
 
     // Starts a new generation for this replicator instance
-    pub fn new_generation(&mut self) {
+    pub fn new_generation(&mut self) -> Option<Uuid> {
         let curr = Self::generate_generation();
         let prev = self.set_generation(curr);
         if let Some(prev) = prev {
@@ -533,6 +534,7 @@ impl Replicator {
                 self.store_dependency(prev, curr)
             }
         }
+        prev
     }
 
     // Sets a generation for this replicator instance. This function
@@ -749,7 +751,7 @@ impl Replicator {
     // counterpart.
     pub async fn snapshot_main_db_file(
         &mut self,
-        prev_generation: Option<Arc<Uuid>>,
+        prev_generation: Option<Uuid>,
     ) -> Result<Option<JoinHandle<()>>> {
         if !self.main_db_exists_and_not_empty().await {
             tracing::debug!("Not snapshotting, the main db file does not exist or is empty");
@@ -767,10 +769,9 @@ impl Replicator {
         let client = self.client.clone();
         let mut db_file = File::open(&self.db_path).await?;
         let change_counter = Self::read_change_counter(&mut db_file).await?;
-        let gen = self.generation.load_full();
         let snapshot_req = client.put_object().bucket(self.bucket.clone()).key(format!(
             "{}-{}/db.{}",
-            self.db_name, gen, self.use_compression
+            self.db_name, generation, self.use_compression
         ));
 
         /* FIXME: we can't rely on the change counter in WAL mode:
@@ -795,14 +796,22 @@ impl Replicator {
             let body = match Self::maybe_compress_main_db_file(db_file, compression).await {
                 Ok(file) => file,
                 Err(e) => {
-                    tracing::error!("Failed to compress db file (generation {}): {}", gen, e);
+                    tracing::error!(
+                        "Failed to compress db file (generation {}): {}",
+                        generation,
+                        e
+                    );
                     let _ = snapshot_notifier.send(Err(e));
                     return;
                 }
             };
             let mut result = snapshot_req.body(body).send().await;
             if let Err(e) = result {
-                tracing::error!("Failed to upload snapshot for generation {}: {:?}", gen, e);
+                tracing::error!(
+                    "Failed to upload snapshot for generation {}: {:?}",
+                    generation,
+                    e
+                );
                 let _ = snapshot_notifier.send(Err(e.into()));
                 return;
             }
@@ -810,13 +819,13 @@ impl Replicator {
             if let Err(e) = result {
                 tracing::error!(
                     "Failed to upload change counter for generation {}: {:?}",
-                    gen,
+                    generation,
                     e
                 );
                 let _ = snapshot_notifier.send(Err(e.into()));
                 return;
             }
-            let _ = snapshot_notifier.send(Ok(Some(gen)));
+            let _ = snapshot_notifier.send(Ok(Some(generation)));
             let elapsed = Instant::now() - start;
             tracing::debug!("Snapshot upload finished (took {:?})", elapsed);
             let _ = tokio::fs::remove_file(format!("db.{}", compression)).await;
@@ -1058,7 +1067,8 @@ impl Replicator {
         }
 
         db.shutdown().await?;
-        tracing::info!("Finished database restoration");
+        let elapsed = Instant::now() - start_ts;
+        tracing::info!("Finished database restoration in {:?}", elapsed);
 
         if applied_wal_frame {
             tracing::info!("WAL file has been applied onto database file in generation {}. Requesting snapshot.", generation);

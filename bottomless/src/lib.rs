@@ -360,10 +360,7 @@ pub extern "C" fn xCheckpoint(
 
     let prev = ctx.replicator.new_generation();
     tracing::debug!("Snapshotting after checkpoint");
-    let result = block_on!(
-        ctx.runtime,
-        ctx.replicator.snapshot_main_db_file(Some(prev))
-    );
+    let result = block_on!(ctx.runtime, ctx.replicator.snapshot_main_db_file(prev));
     if let Err(e) = result {
         tracing::error!(
             "Failed to snapshot the main db file during checkpoint: {}",
