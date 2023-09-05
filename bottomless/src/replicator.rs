@@ -258,7 +258,7 @@ impl Replicator {
     }
 
     pub async fn with_options<S: Into<String>>(db_path: S, options: Options) -> Result<Self> {
-        let config = options.client_config().await;
+        let config = options.client_config().await?;
         let client = Client::from_conf(config);
         let bucket = options.bucket_name.clone();
         let generation = Arc::new(ArcSwap::new(Arc::new(Self::generate_generation())));
