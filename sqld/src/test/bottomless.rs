@@ -3,6 +3,7 @@ use anyhow::Result;
 use aws_sdk_s3::config::{Credentials, Region};
 use aws_sdk_s3::types::{Delete, ObjectIdentifier};
 use aws_sdk_s3::Client;
+use itertools::Itertools;
 use libsql_client::{Connection, QueryResult, Statement, Value};
 use std::net::ToSocketAddrs;
 use std::path::PathBuf;
@@ -345,10 +346,7 @@ async fn s3_config() -> aws_sdk_s3::config::Config {
 }
 
 async fn s3_client() -> Result<Client> {
-    let loader = s3_config()
-    let conf = aws_sdk_s3::config::Builder::from(&loader.load().await)
-        .force_path_style(true)
-        .build();
+    let conf = s3_config().await;
     let client = Client::from_conf(conf);
     Ok(client)
 }
