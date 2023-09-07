@@ -217,6 +217,7 @@ where
             replication_service,
             config.disable_default_namespace,
             config.disable_namespaces,
+            config.db_path.clone(),
         ));
         join_set.spawn(async move {
             hrana_http_srv.run_expire().await;

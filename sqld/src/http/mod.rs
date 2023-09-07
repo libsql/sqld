@@ -5,7 +5,10 @@ mod result_builder;
 pub mod stats;
 mod types;
 
+use std::future::Future;
+use std::io::Write;
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::Context;
@@ -18,18 +21,23 @@ use axum::Router;
 use axum_extra::middleware::option_layer;
 use base64::prelude::BASE64_STANDARD_NO_PAD;
 use base64::Engine;
+use futures::stream::Fuse;
+use futures::StreamExt;
 use hyper::server::conn::AddrIncoming;
-use hyper::{header, Body, Request, Response, StatusCode};
+use hyper::{header, Body, HeaderMap, Request, Response, StatusCode};
+use pin_project_lite::pin_project;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use serde_json::Number;
 use tokio::sync::{mpsc, oneshot};
+use tokio_stream::wrappers::ReceiverStream;
 use tonic::transport::Server;
 use tower_http::trace::DefaultOnResponse;
 use tower_http::{compression::CompressionLayer, cors};
 use tracing::{Level, Span};
 
 use crate::auth::{Auth, Authenticated};
+use crate::connection::dump::exporter::export_dump;
 use crate::connection::Connection;
 use crate::database::Database;
 use crate::error::Error;
@@ -46,7 +54,7 @@ use crate::stats::Stats;
 use crate::utils::services::idle_shutdown::IdleShutdownLayer;
 use crate::version;
 
-use self::db_factory::MakeConnectionExtractor;
+use self::db_factory::{namespace_from_headers, MakeConnectionExtractor};
 use self::result_builder::JsonHttpPayloadBuilder;
 use self::types::QueryObject;
 
@@ -181,6 +189,103 @@ async fn handle_fallback() -> impl IntoResponse {
     (StatusCode::NOT_FOUND).into_response()
 }
 
+struct SenderWriter(mpsc::Sender<bytes::Bytes>);
+
+impl Write for SenderWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let len = buf.len();
+        self.0
+            .blocking_send(bytes::Bytes::copy_from_slice(buf))
+            .map(|_| len)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+pin_project! {
+    struct DumpStream<S> {
+        join_handle: Option<tokio::task::JoinHandle<Result<(), Error>>>,
+        #[pin]
+        stream: Fuse<S>,
+    }
+}
+
+impl<S> futures::Stream for DumpStream<S>
+where
+    S: futures::Stream,
+{
+    type Item = Result<S::Item, Error>;
+
+    fn poll_next(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Self::Item>> {
+        let this = self.project();
+
+        match futures::ready!(this.stream.poll_next(cx)) {
+            Some(item) => std::task::Poll::Ready(Some(Ok(item))),
+            None => {
+                if let Some(mut join_handle) = this.join_handle.take() {
+                    match std::pin::Pin::new(&mut join_handle).poll(cx) {
+                        std::task::Poll::Pending => {
+                            *this.join_handle = Some(join_handle);
+                            return std::task::Poll::Pending;
+                        }
+                        std::task::Poll::Ready(Ok(Err(err))) => {
+                            return std::task::Poll::Ready(Some(Err(err)))
+                        }
+                        std::task::Poll::Ready(Err(err)) => {
+                            return std::task::Poll::Ready(Some(Err(anyhow::anyhow!(err)
+                                .context("Dump task crashed")
+                                .into())))
+                        }
+                        _ => {}
+                    }
+                }
+                std::task::Poll::Ready(None)
+            }
+        }
+    }
+}
+
+async fn handle_dump<F: MakeNamespace>(
+    AxumState(state): AxumState<AppState<F>>,
+    headers: HeaderMap,
+) -> Result<axum::body::StreamBody<impl futures::Stream<Item = Result<bytes::Bytes, Error>>>, Error>
+{
+    let namespace = namespace_from_headers(
+        &headers,
+        state.disable_default_namespace,
+        state.disable_namespaces,
+    )?;
+
+    let db_path = state
+        .db_path
+        .join("dbs")
+        .join(std::str::from_utf8(namespace.as_ref()).expect("namespace to be a utf-8 string"))
+        .join("data");
+
+    let connection = rusqlite::Connection::open(db_path)?;
+
+    let (tx, rx) = mpsc::channel(64);
+
+    let join_handle = tokio::task::spawn_blocking(move || {
+        export_dump(connection, SenderWriter(tx)).map_err(|e| e.into())
+    });
+
+    let stream = ReceiverStream::new(rx);
+    let stream = DumpStream {
+        stream: stream.fuse(),
+        join_handle: Some(join_handle),
+    };
+    let stream = axum::body::StreamBody::new(stream);
+
+    Ok(stream)
+}
+
 /// Router wide state that each request has access too via
 /// axum's `State` extractor.
 pub(crate) struct AppState<F: MakeNamespace> {
@@ -192,6 +297,7 @@ pub(crate) struct AppState<F: MakeNamespace> {
     stats: Stats,
     disable_default_namespace: bool,
     disable_namespaces: bool,
+    db_path: PathBuf,
 }
 
 impl<F: MakeNamespace> Clone for AppState<F> {
@@ -205,6 +311,7 @@ impl<F: MakeNamespace> Clone for AppState<F> {
             stats: self.stats.clone(),
             disable_default_namespace: self.disable_default_namespace,
             disable_namespaces: self.disable_namespaces,
+            db_path: self.db_path.clone(),
         }
     }
 }
@@ -224,6 +331,7 @@ pub async fn run_http<M, S, P>(
     replication_service: S,
     disable_default_namespace: bool,
     disable_namespaces: bool,
+    db_path: PathBuf,
 ) -> anyhow::Result<()>
 where
     M: MakeNamespace,
@@ -239,6 +347,7 @@ where
         namespaces,
         disable_default_namespace,
         disable_namespaces,
+        db_path,
     };
 
     tracing::info!("listening for HTTP requests on {addr}");
@@ -272,6 +381,7 @@ where
         .route("/version", get(handle_version))
         .route("/console", get(show_console))
         .route("/health", get(handle_health))
+        .route("/dump", get(handle_dump))
         .route("/v1/stats", get(stats::handle_stats))
         .route("/v1", get(hrana_over_http_1::handle_index))
         .route("/v1/execute", post(hrana_over_http_1::handle_execute))
