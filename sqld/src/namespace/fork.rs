@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use bytes::Bytes;
-use tokio::io::{AsyncSeekExt, AsyncWriteExt};
+use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 use tokio_stream::StreamExt;
 
 use crate::database::PrimaryDatabase;
@@ -124,8 +124,9 @@ impl ForkTask<'_> {
             .join(std::str::from_utf8(&self.dest_namespace).unwrap());
         tokio::fs::rename(temp_dir.path(), dest_path).await?;
 
+        tokio::io::stdin().read_i8().await.unwrap();
         self.make_namespace
-            .create(self.dest_namespace.clone(), RestoreOption::Latest, false)
+            .create(self.dest_namespace.clone(), RestoreOption::Latest, true)
             .await
             .map_err(|e| ForkError::CreateNamespace(Box::new(e)))
     }

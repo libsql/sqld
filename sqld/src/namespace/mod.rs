@@ -261,7 +261,10 @@ impl<F: MakeNamespace> NamespaceStore<F> {
             Entry::Occupied(e) => e.into_mut(),
             Entry::Vacant(e) => {
                 // we just want to load the namespace into memory, so we refuse creation.
-                let ns = self.make_namespace.create(from.clone(), RestoreOption::Latest, false).await?;
+                let ns = self
+                    .make_namespace
+                    .create(from.clone(), RestoreOption::Latest, false)
+                    .await?;
                 e.insert(ns)
             }
         };
@@ -468,7 +471,7 @@ impl Namespace<PrimaryDatabase> {
 
         // The database folder doesn't exist, bottomless replication is disabled (no db to recover)
         // and we're not allowed to create a new database, return an error.
-        if !allow_creation && config.bottomless_replication.is_none() && !db_path.exists() {
+        if !allow_creation && config.bottomless_replication.is_none() && !db_path.try_exists()? {
             return Err(crate::error::Error::NamespaceDoesntExist(
                 String::from_utf8(name.to_vec()).unwrap_or_default(),
             ));
@@ -484,7 +487,7 @@ impl Namespace<PrimaryDatabase> {
 
             // There wasn't any database to recover from bottomless, and we are not allowed to
             // create a new database
-            if !did_recover && !allow_creation {
+            if !did_recover && !allow_creation && !db_path.try_exists()? {
                 // clean stale directory
                 // FIXME: this is not atomic, we could be left with a stale directory. Maybe do
                 // setup in a temp directory and then atomically rename it?
