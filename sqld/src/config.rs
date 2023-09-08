@@ -19,7 +19,7 @@ pub struct RpcClientConfig<C = HttpConnector> {
 
 impl<C: Connector> RpcClientConfig<C> {
     pub(crate) async fn configure(self) -> anyhow::Result<(Channel, tonic::transport::Uri)> {
-        let uri = tonic::transport::Uri::from_maybe_shared(self.remote_url.clone())?;
+        let uri = tonic::transport::Uri::from_maybe_shared(self.remote_url)?;
         let mut builder = Channel::builder(uri.clone());
         if let Some(ref tls_config) = self.tls_config {
             let cert_pem = std::fs::read_to_string(&tls_config.cert)?;
@@ -157,4 +157,10 @@ impl DbConfig {
 
         Ok(valid_extensions.into())
     }
+}
+
+pub struct HeartbeatConfig {
+    pub heartbeat_url: String,
+    pub heartbeat_period: Duration,
+    pub heartbeat_auth: Option<String>,
 }

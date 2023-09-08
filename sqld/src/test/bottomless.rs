@@ -107,9 +107,7 @@ async fn backup_restore() {
             "---STEP 1: create a local database, fill it with data, wait for WAL backup---"
         );
         let cleaner = DbFileCleaner::new(PATH);
-        dbg!();
         let db_job = start_db(1, make_server().await);
-        dbg!();
 
         sleep(Duration::from_secs(2)).await;
 
@@ -137,9 +135,7 @@ async fn backup_restore() {
             "---STEP 2: recreate the database from WAL - create a snapshot at the end---"
         );
         let cleaner = DbFileCleaner::new(PATH);
-        dbg!();
         let db_job = start_db(2, make_server().await);
-        dbg!();
 
         sleep(Duration::from_secs(2)).await;
 
@@ -154,9 +150,7 @@ async fn backup_restore() {
     {
         tracing::info!("---STEP 3: recreate database from snapshot alone---");
         let cleaner = DbFileCleaner::new(PATH);
-        dbg!();
         let db_job = start_db(3, make_server().await);
-        dbg!();
 
         sleep(Duration::from_secs(2)).await;
 
@@ -174,9 +168,7 @@ async fn backup_restore() {
     {
         tracing::info!("---STEP 4: recreate the database from snapshot + WAL---");
         let cleaner = DbFileCleaner::new(PATH);
-        dbg!();
         let db_job = start_db(4, make_server().await);
-        dbg!();
 
         sleep(Duration::from_secs(2)).await;
 
@@ -195,9 +187,7 @@ async fn backup_restore() {
         remove_snapshots(BUCKET).await;
 
         let cleaner = DbFileCleaner::new(PATH);
-        dbg!();
         let db_job = start_db(4, make_server().await);
-        dbg!();
 
         sleep(Duration::from_secs(2)).await;
 

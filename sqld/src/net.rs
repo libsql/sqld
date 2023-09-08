@@ -44,12 +44,6 @@ pub struct AddrIncoming {
     listener: tokio::net::TcpListener,
 }
 
-impl Drop for AddrIncoming {
-    fn drop(&mut self) {
-        dbg!();
-    }
-}
-
 impl AddrIncoming {
     pub fn new(listener: tokio::net::TcpListener) -> Self {
         Self { listener }

@@ -17,11 +17,12 @@ use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::Layer;
 
 use sqld::config::{
-    AdminApiConfig, DbConfig, RpcClientConfig, RpcServerConfig, TlsConfig, UserApiConfig,
+    AdminApiConfig, DbConfig, HeartbeatConfig, RpcClientConfig, RpcServerConfig, TlsConfig,
+    UserApiConfig,
 };
 use sqld::net::AddrIncoming;
+use sqld::Server;
 use sqld::{connection::dump::exporter::export_dump, version::Version};
-use sqld::{HeartbeatConfig, Server};
 
 #[global_allocator]
 static GLOBAL: MiMalloc = MiMalloc;

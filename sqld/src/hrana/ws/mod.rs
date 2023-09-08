@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use enclose::enclose;
-use futures::pin_mut;
+use tokio::pin;
 use tokio::sync::{mpsc, oneshot};
 use tonic::transport::server::Connected;
 
@@ -107,7 +107,7 @@ pub async fn listen<A>(acceptor: A, accept_tx: mpsc::Sender<Accept>)
 where
     A: crate::net::Accept,
 {
-    pin_mut!(acceptor);
+    pin!(acceptor);
 
     while let Some(maybe_conn) = poll_fn(|cx| acceptor.as_mut().poll_accept(cx)).await {
         match maybe_conn {

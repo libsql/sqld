@@ -8,7 +8,9 @@ use std::time::Duration;
 
 use anyhow::Context as AnyhowContext;
 use bytes::Bytes;
-use config::{AdminApiConfig, DbConfig, RpcClientConfig, RpcServerConfig, UserApiConfig};
+use config::{
+    AdminApiConfig, DbConfig, HeartbeatConfig, RpcClientConfig, RpcServerConfig, UserApiConfig,
+};
 use futures::never::Never;
 use http::UserApi;
 use hyper::client::HttpConnector;
@@ -89,13 +91,7 @@ pub struct Server<C = HttpConnector, A = AddrIncoming> {
     pub shutdown: Arc<Notify>,
 }
 
-pub struct HeartbeatConfig {
-    pub heartbeat_url: String,
-    pub heartbeat_period: Duration,
-    pub heartbeat_auth: Option<String>,
-}
-
-struct Services<'a, M: MakeNamespace, A, P, S> {
+struct Services<M: MakeNamespace, A, P, S> {
     namespaces: NamespaceStore<M>,
     idle_shutdown_kicker: Option<IdleShutdownKicker>,
     stats: Stats,
@@ -108,17 +104,16 @@ struct Services<'a, M: MakeNamespace, A, P, S> {
     disable_default_namespace: bool,
     db_config: DbConfig,
     auth: Arc<Auth>,
-    join_set: &'a mut JoinSet<anyhow::Result<()>>,
 }
 
-impl<M, A, P, S> Services<'_, M, A, P, S>
+impl<M, A, P, S> Services<M, A, P, S>
 where
     M: MakeNamespace,
     A: crate::net::Accept,
     P: Proxy,
     S: ReplicationLog,
 {
-    fn configure(self) {
+    fn configure(self, join_set: &mut JoinSet<anyhow::Result<()>>) {
         let user_http = UserApi {
             http_acceptor: self.user_api_config.http_acceptor,
             hrana_ws_acceptor: self.user_api_config.hrana_ws_acceptor,
@@ -133,13 +128,12 @@ where
             max_response_size: self.db_config.max_response_size,
             enable_console: self.user_api_config.enable_http_console,
             self_url: self.user_api_config.self_url,
-            join_set: self.join_set,
         };
 
-        user_http.configure();
+        user_http.configure(join_set);
 
         if let Some(AdminApiConfig { acceptor }) = self.admin_api_config {
-            self.join_set.spawn(admin_api::run_admin_api(
+            join_set.spawn(admin_api::run_admin_api(
                 acceptor,
                 self.db_config_store,
                 self.namespaces,
@@ -408,10 +402,9 @@ where
                     disable_default_namespace: self.disable_default_namespace,
                     db_config: self.db_config,
                     auth,
-                    join_set: &mut join_set,
                 };
 
-                services.configure();
+                services.configure(&mut join_set);
             }
             None => {
                 let primary = Primary {
@@ -443,10 +436,9 @@ where
                     disable_default_namespace: self.disable_default_namespace,
                     db_config: self.db_config,
                     auth,
-                    join_set: &mut join_set,
                 };
 
-                services.configure();
+                services.configure(&mut join_set);
             }
         }
 

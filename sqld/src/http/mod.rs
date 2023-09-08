@@ -34,6 +34,7 @@ use crate::error::Error;
 use crate::hrana;
 use crate::http::types::HttpQuery;
 use crate::namespace::{MakeNamespace, NamespaceStore};
+use crate::net::Accept;
 use crate::query::{self, Query};
 use crate::query_analysis::{predict_final_state, State, Statement};
 use crate::query_result_builder::QueryResultBuilder;
@@ -207,7 +208,7 @@ impl<F: MakeNamespace> Clone for AppState<F> {
     }
 }
 
-pub struct UserApi<'a, M: MakeNamespace, A, P, S> {
+pub struct UserApi<M: MakeNamespace, A, P, S> {
     pub auth: Arc<Auth>,
     pub http_acceptor: Option<A>,
     pub hrana_ws_acceptor: Option<A>,
@@ -221,22 +222,21 @@ pub struct UserApi<'a, M: MakeNamespace, A, P, S> {
     pub max_response_size: u64,
     pub enable_console: bool,
     pub self_url: Option<String>,
-    pub join_set: &'a mut JoinSet<anyhow::Result<()>>,
 }
 
-impl<M, A, P, S> UserApi<'_, M, A, P, S>
+impl<M, A, P, S> UserApi<M, A, P, S>
 where
     M: MakeNamespace,
-    A: crate::net::Accept,
+    A: Accept,
     P: Proxy,
     S: ReplicationLog,
 {
-    pub fn configure(self) {
+    pub fn configure(self, join_set: &mut JoinSet<anyhow::Result<()>>) {
         let (hrana_accept_tx, hrana_accept_rx) = mpsc::channel(8);
         let (hrana_upgrade_tx, hrana_upgrade_rx) = mpsc::channel(8);
         let hrana_http_srv = Arc::new(hrana::http::Server::new(self.self_url.clone()));
 
-        self.join_set.spawn({
+        join_set.spawn({
             let namespaces = self.namespaces.clone();
             let auth = self.auth.clone();
             let idle_kicker = self
@@ -262,7 +262,7 @@ where
             }
         });
 
-        self.join_set.spawn({
+        join_set.spawn({
             let server = hrana_http_srv.clone();
             async move {
                 server.run_expire().await;
@@ -271,7 +271,7 @@ where
         });
 
         if let Some(acceptor) = self.hrana_ws_acceptor {
-            self.join_set.spawn(async move {
+            join_set.spawn(async move {
                 hrana::ws::listen(acceptor, hrana_accept_tx).await;
                 Ok(())
             });
@@ -408,7 +408,7 @@ where
             let router = router.fallback(handle_fallback);
             let h2c = crate::h2c::H2cMaker::new(router);
 
-            self.join_set.spawn(async move {
+            join_set.spawn(async move {
                 hyper::server::Server::builder(acceptor)
                     .serve(h2c)
                     .await
