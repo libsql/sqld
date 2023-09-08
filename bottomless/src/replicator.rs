@@ -962,7 +962,8 @@ impl Replicator {
         Some((first_frame_no, last_frame_no, timestamp, compression_kind))
     }
 
-    // Restores the database state from given remote generation
+    /// Restores the database state from given remote generation
+    /// On success, returns the RestoreAction, and whether the database was recovered from backup.
     async fn restore_from(
         &mut self,
         generation: Uuid,
@@ -1299,7 +1300,8 @@ impl Replicator {
         Ok(())
     }
 
-    // Restores the database state from newest remote generation
+    /// Restores the database state from newest remote generation
+    /// On success, returns the RestoreAction, and whether the database was recovered from backup.
     pub async fn restore(
         &mut self,
         generation: Option<Uuid>,
