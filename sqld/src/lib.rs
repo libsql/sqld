@@ -42,6 +42,10 @@ use crate::net::Accept;
 use crate::net::AddrIncoming;
 use crate::stats::Stats;
 
+use sha256::try_digest;
+
+use crate::connection::{Connection, MakeConnection};
+use crate::namespace::RestoreOption;
 pub use sqld_libsql_bindings as libsql;
 
 pub mod config;
@@ -191,9 +195,16 @@ async fn run_storage_monitor(db_path: Arc<Path>, stats: Stats) -> anyhow::Result
     Ok(())
 }
 
-async fn run_checkpoint_cron(db_path: Arc<Path>, period: Duration) -> anyhow::Result<()> {
+async fn run_periodic_checkpoint<C>(
+    connection_maker: Arc<C>,
+    period: Duration,
+) -> anyhow::Result<()>
+where
+    C: MakeConnection,
+{
+    use tokio::time::{interval, sleep, Instant, MissedTickBehavior};
+
     const RETRY_INTERVAL: Duration = Duration::from_secs(60);
-    let data_path = db_path.join("data");
     tracing::info!("setting checkpoint interval to {:?}", period);
     let mut interval = interval(period);
     interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
@@ -208,37 +219,27 @@ async fn run_checkpoint_cron(db_path: Arc<Path>, period: Duration) -> anyhow::Re
         } else {
             interval.tick().await;
         }
-        let data_path = data_path.clone();
-        retry = tokio::task::spawn_blocking(move || match rusqlite::Connection::open(&data_path) {
-            Ok(conn) => unsafe {
+        retry = match connection_maker.create().await {
+            Ok(conn) => {
+                tracing::trace!("database checkpoint");
                 let start = Instant::now();
-                let mut num_checkpointed: std::ffi::c_int = 0;
-                let rc = rusqlite::ffi::sqlite3_wal_checkpoint_v2(
-                    conn.handle(),
-                    std::ptr::null(),
-                    libsql::ffi::SQLITE_CHECKPOINT_TRUNCATE,
-                    &mut num_checkpointed as *mut _,
-                    std::ptr::null_mut(),
-                );
-                if rc == 0 {
-                    if num_checkpointed == -1 {
-                        return Some(Duration::default());
-                    } else {
+                match conn.checkpoint().await {
+                    Ok(_) => {
                         let elapsed = Instant::now() - start;
-                        tracing::info!("database checkpoint (took: {:?})", elapsed);
+                        tracing::info!("database checkpoint finished (took: {:?})", elapsed);
+                        None
                     }
-                    None
-                } else {
-                    tracing::warn!("failed to execute checkpoint - error code: {}", rc);
-                    Some(RETRY_INTERVAL)
+                    Err(err) => {
+                        tracing::warn!("failed to execute checkpoint: {}", err);
+                        Some(RETRY_INTERVAL)
+                    }
                 }
-            },
+            }
             Err(err) => {
-                tracing::warn!("couldn't connect to '{:?}': {}", data_path, err);
+                tracing::warn!("couldn't connect: {}", err);
                 Some(RETRY_INTERVAL)
             }
-        })
-        .await?;
+        }
     }
 }
 
@@ -364,12 +365,6 @@ where
         self.init_sqlite_globals();
         let db_is_dirty = init_sentinel_file(&self.path)?;
         let idle_shutdown_kicker = self.setup_shutdown();
-
-        if let Some(interval) = self.db_config.checkpoint_interval {
-            if self.db_config.bottomless_replication.is_some() {
-                join_set.spawn(run_checkpoint_cron(self.path.clone(), interval));
-            }
-        }
 
         let db_config_store = Arc::new(
             DatabaseConfigStore::load(&self.path).context("Could not load database config")?,

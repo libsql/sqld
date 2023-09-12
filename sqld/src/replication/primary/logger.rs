@@ -20,7 +20,8 @@ use crate::libsql::ffi::SQLITE_IOERR_WRITE;
 use crate::libsql::ffi::{
     sqlite3,
     types::{XWalCheckpointFn, XWalFrameFn, XWalSavePointUndoFn, XWalUndoFn},
-    PageHdrIter, PgHdr, Wal, SQLITE_CHECKPOINT_TRUNCATE, SQLITE_IOERR, SQLITE_OK,
+    PageHdrIter, PgHdr, Wal, SQLITE_CHECKPOINT_FULL, SQLITE_CHECKPOINT_PASSIVE,
+    SQLITE_CHECKPOINT_RESTART, SQLITE_CHECKPOINT_TRUNCATE, SQLITE_IOERR, SQLITE_OK,
 };
 use crate::libsql::wal_hook::WalHook;
 use crate::replication::frame::{Frame, FrameHeader};
@@ -193,7 +194,17 @@ unsafe impl WalHook for ReplicationLoggerHook {
              ** checkpoint attempts weaker than TRUNCATE are ignored.
              */
             if emode < SQLITE_CHECKPOINT_TRUNCATE {
-                tracing::trace!("Ignoring a checkpoint request weaker than TRUNCATE");
+                let kind = match emode {
+                    SQLITE_CHECKPOINT_TRUNCATE => "TRUNCATE",
+                    SQLITE_CHECKPOINT_RESTART => "RESTART",
+                    SQLITE_CHECKPOINT_FULL => "FULL",
+                    SQLITE_CHECKPOINT_PASSIVE => "PASSIVE",
+                    _ => "(unknown)",
+                };
+                tracing::trace!(
+                    "Ignoring a checkpoint request weaker than TRUNCATE: {}",
+                    kind
+                );
                 // Return an error to signal to sqlite that the WAL was not checkpointed, and it is
                 // therefore not safe to delete it.
                 return SQLITE_BUSY;
