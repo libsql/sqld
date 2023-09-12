@@ -30,22 +30,17 @@ use rpc::replication_log_proxy::ReplicationLogProxyService;
 use rpc::run_rpc_server;
 use tokio::sync::Notify;
 use tokio::task::JoinSet;
-use tokio::time::{interval, sleep, Instant, MissedTickBehavior};
 use utils::services::idle_shutdown::IdleShutdownKicker;
 
 use crate::auth::Auth;
 use crate::connection::config::DatabaseConfigStore;
 use crate::connection::libsql::open_db;
+use crate::connection::{Connection, MakeConnection};
 use crate::error::Error;
 use crate::migration::maybe_migrate;
 use crate::net::Accept;
 use crate::net::AddrIncoming;
 use crate::stats::Stats;
-
-use sha256::try_digest;
-
-use crate::connection::{Connection, MakeConnection};
-use crate::namespace::RestoreOption;
 pub use sqld_libsql_bindings as libsql;
 
 pub mod config;

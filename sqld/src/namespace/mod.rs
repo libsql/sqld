@@ -31,8 +31,7 @@ use crate::replication::replica::Replicator;
 use crate::replication::{NamespacedSnapshotCallback, ReplicationLogger};
 use crate::stats::Stats;
 use crate::{
-    check_fresh_db, init_bottomless_replicator, run_periodic_checkpoint, run_periodic_compactions,
-    ResetOp, DB_CREATE_TIMEOUT, DEFAULT_AUTO_CHECKPOINT, DEFAULT_NAMESPACE_NAME,
+    run_periodic_checkpoint, DB_CREATE_TIMEOUT, DEFAULT_AUTO_CHECKPOINT, DEFAULT_NAMESPACE_NAME,
     MAX_CONCURRENT_DBS,
 };
 
