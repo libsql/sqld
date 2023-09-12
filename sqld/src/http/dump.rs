@@ -79,7 +79,7 @@ pub(super) async fn handle_dump<F: MakeNamespace>(
     )?;
 
     let db_path = state
-        .db_path
+        .path
         .join("dbs")
         .join(std::str::from_utf8(namespace.as_ref()).expect("namespace to be a utf-8 string"))
         .join("data");

@@ -5,8 +5,8 @@ use axum::Json;
 use chrono::NaiveDateTime;
 use futures::TryStreamExt;
 use serde::Deserialize;
+use std::io::ErrorKind;
 use std::sync::Arc;
-use std::{io::ErrorKind, net::SocketAddr};
 use tokio_util::io::ReaderStream;
 use url::Url;
 use uuid::Uuid;
@@ -15,21 +15,29 @@ use crate::connection::config::{DatabaseConfig, DatabaseConfigStore};
 use crate::error::LoadDumpError;
 use crate::namespace::{DumpStream, MakeNamespace, NamespaceStore, RestoreOption};
 
-struct AppState<F: MakeNamespace> {
+struct AppState<M: MakeNamespace> {
     db_config_store: Arc<DatabaseConfigStore>,
-    namespaces: Arc<NamespaceStore<F>>,
+    namespaces: NamespaceStore<M>,
 }
 
-pub async fn run_admin_api<F: MakeNamespace>(
-    addr: SocketAddr,
+pub async fn run_admin_api<M, A>(
+    acceptor: A,
     db_config_store: Arc<DatabaseConfigStore>,
-    namespaces: Arc<NamespaceStore<F>>,
-) -> anyhow::Result<()> {
+    namespaces: NamespaceStore<M>,
+) -> anyhow::Result<()>
+where
+    A: crate::net::Accept,
+    M: MakeNamespace,
+{
     use axum::routing::{get, post};
     let router = axum::Router::new()
         .route("/", get(handle_get_index))
         .route("/v1/config", get(handle_get_config))
         .route("/v1/block", post(handle_post_block))
+        .route(
+            "/v1/namespaces/:namespace/fork/:to",
+            post(handle_fork_namespace),
+        )
         .route(
             "/v1/namespaces/:namespace/create",
             post(handle_create_namespace),
@@ -44,15 +52,10 @@ pub async fn run_admin_api<F: MakeNamespace>(
             namespaces,
         }));
 
-    let server = hyper::Server::try_bind(&addr)
-        .context("Could not bind admin HTTP API server")?
-        .serve(router.into_make_service());
-
-    tracing::info!(
-        "Listening for admin HTTP API requests on {}",
-        server.local_addr()
-    );
-    server.await?;
+    hyper::server::Server::builder(acceptor)
+        .serve(router.into_make_service())
+        .await
+        .context("Could not bind admin HTTP API server")?;
     Ok(())
 }
 
@@ -60,8 +63,8 @@ async fn handle_get_index() -> &'static str {
     "Welcome to the sqld admin API"
 }
 
-async fn handle_get_config<F: MakeNamespace>(
-    State(app_state): State<Arc<AppState<F>>>,
+async fn handle_get_config<M: MakeNamespace>(
+    State(app_state): State<Arc<AppState<M>>>,
 ) -> Json<Arc<DatabaseConfig>> {
     Json(app_state.db_config_store.get())
 }
@@ -79,8 +82,8 @@ struct CreateNamespaceReq {
     dump_url: Option<Url>,
 }
 
-async fn handle_post_block<F: MakeNamespace>(
-    State(app_state): State<Arc<AppState<F>>>,
+async fn handle_post_block<M: MakeNamespace>(
+    State(app_state): State<Arc<AppState<M>>>,
     Json(req): Json<BlockReq>,
 ) -> (axum::http::StatusCode, &'static str) {
     let mut config = (*app_state.db_config_store.get()).clone();
@@ -97,8 +100,8 @@ async fn handle_post_block<F: MakeNamespace>(
     }
 }
 
-async fn handle_create_namespace<F: MakeNamespace>(
-    State(app_state): State<Arc<AppState<F>>>,
+async fn handle_create_namespace<M: MakeNamespace>(
+    State(app_state): State<Arc<AppState<M>>>,
     Path(namespace): Path<String>,
     Json(req): Json<CreateNamespaceReq>,
 ) -> crate::Result<()> {
@@ -108,6 +111,14 @@ async fn handle_create_namespace<F: MakeNamespace>(
     };
 
     app_state.namespaces.create(namespace.into(), dump).await?;
+    Ok(())
+}
+
+async fn handle_fork_namespace<M: MakeNamespace>(
+    State(app_state): State<Arc<AppState<M>>>,
+    Path((from, to)): Path<(String, String)>,
+) -> crate::Result<()> {
+    app_state.namespaces.fork(from.into(), to.into()).await?;
     Ok(())
 }
 
