@@ -404,7 +404,7 @@ where
                     disable_default_namespace: self.disable_default_namespace,
                     db_config: self.db_config,
                     auth,
-                    path: self.path.clone().into(),
+                    path: self.path.clone(),
                 };
 
                 services.configure(&mut join_set);
@@ -439,7 +439,7 @@ where
                     disable_default_namespace: self.disable_default_namespace,
                     db_config: self.db_config,
                     auth,
-                    path: self.path.clone().into(),
+                    path: self.path.clone(),
                 };
 
                 services.configure(&mut join_set);
