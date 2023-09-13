@@ -4,7 +4,7 @@ use axum::routing::delete;
 use axum::Json;
 use chrono::NaiveDateTime;
 use futures::TryStreamExt;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::io::ErrorKind;
 use std::sync::Arc;
 use tokio_util::io::ReaderStream;
@@ -14,6 +14,7 @@ use uuid::Uuid;
 use crate::connection::config::{DatabaseConfig, DatabaseConfigStore};
 use crate::error::LoadDumpError;
 use crate::namespace::{DumpStream, MakeNamespace, NamespaceStore, RestoreOption};
+use crate::replication::FrameNo;
 
 struct AppState<M: MakeNamespace> {
     db_config_store: Arc<DatabaseConfigStore>,
@@ -46,6 +47,8 @@ where
             "/v1/namespaces/:namespace/restore",
             post(handle_restore_namespace),
         )
+        .route("/v1/namespaces/:namespace",
+            get(handle_namespace_info))
         .route("/v1/namespaces/:namespace", delete(handle_delete_namespace))
         .with_state(Arc::new(AppState {
             db_config_store,
@@ -170,8 +173,8 @@ struct RestoreReq {
     timestamp: Option<NaiveDateTime>,
 }
 
-async fn handle_restore_namespace<F: MakeNamespace>(
-    State(app_state): State<Arc<AppState<F>>>,
+async fn handle_restore_namespace<M: MakeNamespace>(
+    State(app_state): State<Arc<AppState<M>>>,
     Path(namespace): Path<String>,
     Json(req): Json<RestoreReq>,
 ) -> crate::Result<()> {
@@ -186,4 +189,17 @@ async fn handle_restore_namespace<F: MakeNamespace>(
         .reset(namespace.into(), restore_option)
         .await?;
     Ok(())
+}
+
+#[derive(Debug, Serialize)]
+struct NamespaceInfoResp {
+    current_frame_no: FrameNo,
+}
+
+async fn handle_namespace_info<M: MakeNamespace>(
+    State(app_state): State<Arc<AppState<M>>>,
+    Path(namespace): Path<String>,
+) -> crate::Result<Json<NamespaceInfoResp>> {
+    let info = app_state.namespaces.info(namespace.into()).await?;
+    todo!();
 }

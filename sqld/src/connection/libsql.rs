@@ -24,7 +24,7 @@ use super::{MakeConnection, Program, Step, TXN_TIMEOUT};
 /// Internal message used to communicate between the database thread and the `LibSqlDb` handle.
 type ExecCallback = Box<dyn FnOnce(Result<&mut Connection>) -> anyhow::Result<()> + Send + 'static>;
 
-pub struct LibSqlDbFactory<W: WalHook + 'static> {
+pub struct MakeLibsqlConnection<W: WalHook + 'static> {
     db_path: PathBuf,
     hook: &'static WalMethodsHook<W>,
     ctx_builder: Box<dyn Fn() -> W::Context + Sync + Send + 'static>,
@@ -39,7 +39,7 @@ pub struct LibSqlDbFactory<W: WalHook + 'static> {
     _db: Option<LibSqlConnection>,
 }
 
-impl<W: WalHook + 'static> LibSqlDbFactory<W>
+impl<W: WalHook + 'static> MakeLibsqlConnection<W>
 where
     W: WalHook + 'static + Sync + Send,
     W::Context: Send + 'static,
@@ -126,7 +126,7 @@ where
 }
 
 #[async_trait::async_trait]
-impl<W> MakeConnection for LibSqlDbFactory<W>
+impl<W> MakeConnection for MakeLibsqlConnection<W>
 where
     W: WalHook + 'static + Sync + Send,
     W::Context: Send + 'static,

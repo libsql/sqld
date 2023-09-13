@@ -2,6 +2,7 @@ use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::AtomicU64;
 use std::time::Duration;
 
 use anyhow::{bail, Context as _};
@@ -15,13 +16,14 @@ use futures_core::Stream;
 use hyper::Uri;
 use rusqlite::ErrorCode;
 use tokio::io::AsyncBufReadExt;
+use tokio::sync::watch;
 use tokio::task::{block_in_place, JoinSet};
 use tokio_util::io::StreamReader;
 use tonic::transport::Channel;
 use uuid::Uuid;
 
 use crate::connection::config::DatabaseConfigStore;
-use crate::connection::libsql::{open_db, LibSqlDbFactory};
+use crate::connection::libsql::{open_db, MakeLibsqlConnection};
 use crate::connection::write_proxy::MakeWriteProxyConnection;
 use crate::connection::MakeConnection;
 use crate::database::{Database, PrimaryDatabase, ReplicaDatabase};
@@ -400,6 +402,14 @@ impl<M: MakeNamespace> NamespaceStore<M> {
 
         Ok(())
     }
+
+    pub(crate) async fn info(&self, into: Bytes) -> crate::Result<NamespaceInfo> {
+        todo!()
+    }
+}
+
+pub struct NamespaceInfo {
+
 }
 
 /// A namspace isolates the resources pertaining to a database of type T
@@ -408,6 +418,7 @@ pub struct Namespace<T: Database> {
     pub db: T,
     /// The set of tasks associated with this namespace
     tasks: JoinSet<anyhow::Result<()>>,
+    current_frame_no: watch::Receiver<FrameNo>,
 }
 
 impl<T: Database> Namespace<T> {
@@ -474,7 +485,7 @@ impl Namespace<ReplicaDatabase> {
             config.uri.clone(),
             config.stats.clone(),
             config.config_store.clone(),
-            applied_frame_no_receiver,
+            applied_frame_no_receiver.clone(),
             config.max_response_size,
             config.max_total_response_size,
             name.clone(),
@@ -485,11 +496,13 @@ impl Namespace<ReplicaDatabase> {
             config.max_total_response_size,
         );
 
+
         Ok(Self {
             tasks: join_set,
             db: ReplicaDatabase {
                 connection_maker: Arc::new(connection_maker),
             },
+            current_frame_no: applied_frame_no_receiver,
         })
     }
 }
@@ -593,13 +606,15 @@ impl Namespace<PrimaryDatabase> {
             }),
         )?);
 
+        let current_frame_no = logger.new_frame_notifier.subscribe();
+
         let ctx_builder = {
             let logger = logger.clone();
             let bottomless_replicator = bottomless_replicator.clone();
             move || ReplicationLoggerHookCtx::new(logger.clone(), bottomless_replicator.clone())
         };
 
-        let connection_maker: Arc<_> = LibSqlDbFactory::new(
+        let connection_maker: Arc<_> = MakeLibsqlConnection::new(
             db_path.clone(),
             &REPLICATION_METHODS,
             ctx_builder.clone(),
@@ -646,6 +661,7 @@ impl Namespace<PrimaryDatabase> {
                 logger,
                 connection_maker,
             },
+            current_frame_no,
         })
     }
 }
