@@ -2053,6 +2053,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "hyper-rustls"
+version = "0.24.1"
+source = "git+https://github.com/MarinPostma/hyper-rustls.git?branch=generic-tls-acceptor#4a6220a6b73c6b76c8bf02004b688f370be9e82b"
+dependencies = [
+ "futures-util",
+ "http",
+ "hyper",
+ "log",
+ "rustls 0.21.7",
+ "rustls-native-certs",
+ "tokio",
+ "tokio-rustls 0.24.1",
+]
+
+[[package]]
 name = "hyper-timeout"
 version = "0.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3314,7 +3329,7 @@ dependencies = [
  "http",
  "http-body",
  "hyper",
- "hyper-rustls 0.24.1",
+ "hyper-rustls 0.24.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "hyper-tls",
  "ipnet",
  "js-sys",
@@ -3775,6 +3790,7 @@ dependencies = [
  "futures-core",
  "hmac",
  "hyper",
+ "hyper-rustls 0.24.1 (git+https://github.com/MarinPostma/hyper-rustls.git?branch=generic-tls-acceptor)",
  "hyper-tungstenite",
  "insta",
  "itertools",
@@ -3795,6 +3811,8 @@ dependencies = [
  "regex",
  "reqwest",
  "rusqlite",
+ "rustls 0.21.7",
+ "rustls-pemfile",
  "semver",
  "serde",
  "serde_json",
