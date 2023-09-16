@@ -632,6 +632,7 @@ impl Namespace<PrimaryDatabase> {
             config.max_response_size,
             config.max_total_response_size,
             auto_checkpoint,
+            logger.new_frame_notifier.subscribe(),
         )
         .await?
         .throttled(

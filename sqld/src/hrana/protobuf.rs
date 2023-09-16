@@ -130,6 +130,9 @@ impl prost::Message for CursorEntry {
             CursorEntry::StepError(entry) => message::encode(3, entry, buf),
             CursorEntry::Row { row } => message::encode(4, row, buf),
             CursorEntry::Error { error } => message::encode(5, error, buf),
+            CursorEntry::ReplicationIndex { replication_index } => {
+                message::encode(6, replication_index, buf)
+            }
         }
     }
 
@@ -141,6 +144,9 @@ impl prost::Message for CursorEntry {
             CursorEntry::StepError(entry) => message::encoded_len(3, entry),
             CursorEntry::Row { row } => message::encoded_len(4, row),
             CursorEntry::Error { error } => message::encoded_len(5, error),
+            CursorEntry::ReplicationIndex { replication_index } => {
+                message::encoded_len(6, replication_index)
+            }
         }
     }
 

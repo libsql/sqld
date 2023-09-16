@@ -301,6 +301,7 @@ impl ReplicationLoggerHookCtx {
 
     fn commit(&self) -> anyhow::Result<()> {
         let new_frame_no = self.logger.commit()?;
+        tracing::trace!("new frame commited {}", new_frame_no);
         self.logger.new_frame_notifier.send_replace(new_frame_no);
         Ok(())
     }

@@ -115,6 +115,7 @@ impl Stream for FrameStream {
                     self.current_frame_no += 1;
                     self.produced_frames += 1;
                     self.transition_state_next_frame();
+                    tracing::trace!("sending frame_no {}", frame.header().frame_no);
                     Poll::Ready(Some(Ok(frame)))
                 }
 

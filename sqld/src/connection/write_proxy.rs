@@ -155,7 +155,7 @@ fn execute_results_to_builder<B: QueryResultBuilder>(
         }
     }
 
-    builder.finish()?;
+    builder.finish(execute_result.current_frame_no)?;
 
     Ok(builder)
 }
@@ -180,6 +180,7 @@ impl WriteProxyConnection {
             stats.clone(),
             config_store,
             builder_config,
+            applied_frame_no_receiver.clone(),
         )
         .await?;
 
