@@ -51,7 +51,7 @@ pub struct StmtResult {
     #[prost(sint64, optional, tag = "4")]
     pub last_insert_rowid: Option<i64>,
     #[prost(uint64, tag = "5")]
-    pub last_frame_no: u64,
+    pub replication_index: u64,
 }
 
 #[derive(Serialize, prost::Message)]

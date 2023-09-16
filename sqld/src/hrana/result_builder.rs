@@ -240,7 +240,7 @@ impl QueryResultBuilder for SingleStatementBuilder {
                 rows: std::mem::take(&mut self.rows),
                 affected_row_count: std::mem::take(&mut self.affected_row_count),
                 last_insert_rowid: std::mem::take(&mut self.last_insert_rowid),
-                last_frame_no: self.last_frame_no.unwrap(),
+                replication_index: self.last_frame_no.unwrap(),
             }),
         }
     }
