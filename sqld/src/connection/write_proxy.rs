@@ -39,7 +39,7 @@ pub struct MakeWriteProxyConnection {
     extensions: Arc<[PathBuf]>,
     stats: Arc<Stats>,
     config_store: Arc<DatabaseConfigStore>,
-    applied_frame_no_receiver: watch::Receiver<FrameNo>,
+    applied_frame_no_receiver: watch::Receiver<Option<FrameNo>>,
     max_response_size: u64,
     max_total_response_size: u64,
     namespace: Bytes,
@@ -54,7 +54,7 @@ impl MakeWriteProxyConnection {
         uri: tonic::transport::Uri,
         stats: Arc<Stats>,
         config_store: Arc<DatabaseConfigStore>,
-        applied_frame_no_receiver: watch::Receiver<FrameNo>,
+        applied_frame_no_receiver: watch::Receiver<Option<FrameNo>>,
         max_response_size: u64,
         max_total_response_size: u64,
         namespace: Bytes,
@@ -106,9 +106,9 @@ pub struct WriteProxyConnection {
     /// FrameNo of the last write performed by this connection on the primary.
     /// any subsequent read on this connection must wait for the replicator to catch up with this
     /// frame_no
-    last_write_frame_no: PMutex<FrameNo>,
+    last_write_frame_no: PMutex<Option<FrameNo>>,
     /// Notifier from the repliator of the currently applied frameno
-    applied_frame_no_receiver: watch::Receiver<FrameNo>,
+    applied_frame_no_receiver: watch::Receiver<Option<FrameNo>>,
     builder_config: QueryBuilderConfig,
     stats: Arc<Stats>,
     /// bytes representing the namespace name
@@ -168,42 +168,10 @@ impl WriteProxyConnection {
         extensions: Arc<[PathBuf]>,
         stats: Arc<Stats>,
         config_store: Arc<DatabaseConfigStore>,
-        applied_frame_no_receiver: watch::Receiver<FrameNo>,
+        applied_frame_no_receiver: watch::Receiver<Option<FrameNo>>,
         builder_config: QueryBuilderConfig,
         namespace: Bytes,
     ) -> Result<Self> {
-        let last_applied_frame = *applied_frame_no_receiver.borrow();
-
-        // TODO: should the client expect to handle FrameNo::MAX?
-        let last_frame_no = if last_applied_frame == FrameNo::MAX {
-            last_applied_frame
-        } else {
-            // The primary returns what the next frame number should be,
-            // while the replicator gives you the last frame that was applied,
-            // so this plus one is necessary
-            last_applied_frame + 1
-        };
-
-        let (last_frame_no_tx, last_frame_no_rx) = watch::channel(last_frame_no);
-
-        // TODO: Is there a better way to do this?
-        tokio::spawn({
-            let mut receiver = applied_frame_no_receiver.clone();
-            async move {
-                loop {
-                    if receiver.changed().await.is_err() {
-                        break;
-                    }
-
-                    if last_frame_no_tx
-                        .send(*receiver.borrow_and_update() + 1)
-                        .is_err()
-                    {
-                        break;
-                    }
-                }
-            }
-        });
 
         let read_conn = LibSqlConnection::new(
             db_path,
@@ -213,7 +181,7 @@ impl WriteProxyConnection {
             stats.clone(),
             config_store,
             builder_config,
-            last_frame_no_rx,
+            applied_frame_no_receiver.clone(),
         )
         .await?;
 
@@ -222,7 +190,7 @@ impl WriteProxyConnection {
             write_proxy,
             state: Mutex::new(State::Init),
             client_id: Uuid::new_v4(),
-            last_write_frame_no: PMutex::new(FrameNo::MAX),
+            last_write_frame_no: PMutex::new(None),
             applied_frame_no_receiver,
             builder_config,
             stats,
@@ -257,7 +225,9 @@ impl WriteProxyConnection {
                 let current_frame_no = execute_result.current_frame_no;
                 let builder =
                     execute_results_to_builder(execute_result, builder, &self.builder_config)?;
-                self.update_last_write_frame_no(current_frame_no);
+                if let Some(current_frame_no) = current_frame_no {
+                    self.update_last_write_frame_no(current_frame_no);
+                }
 
                 Ok((builder, *state))
             }
@@ -272,31 +242,28 @@ impl WriteProxyConnection {
 
     fn update_last_write_frame_no(&self, new_frame_no: FrameNo) {
         let mut last_frame_no = self.last_write_frame_no.lock();
-        if *last_frame_no == FrameNo::MAX || new_frame_no > *last_frame_no {
-            *last_frame_no = new_frame_no
+        if last_frame_no.is_none() || new_frame_no > last_frame_no.unwrap() {
+            *last_frame_no = Some(new_frame_no);
         }
     }
 
     /// wait for the replicator to have caught up with our current write frame_no
     async fn wait_replication_sync(&self) -> Result<()> {
-        let current_frame_no = *self.last_write_frame_no.lock();
+        let current_fno = *self.last_write_frame_no.lock();
+        match current_fno {
+            Some(current_frame_no) => {
+                let mut receiver = self.applied_frame_no_receiver.clone();
+                receiver.wait_for(|last_applied| {
+                    match last_applied {
+                        Some(x) => *x >= current_frame_no,
+                        None => true,
+                    }
+                }).await.map_err(|_| Error::ReplicatorExited)?;
 
-        if current_frame_no == FrameNo::MAX {
-            return Ok(());
+                Ok(())
+            },
+            None => Ok(()),
         }
-
-        let mut receiver = self.applied_frame_no_receiver.clone();
-        let mut last_applied = *receiver.borrow_and_update();
-
-        while last_applied < current_frame_no {
-            receiver
-                .changed()
-                .await
-                .map_err(|_| Error::ReplicatorExited)?;
-            last_applied = *receiver.borrow_and_update();
-        }
-
-        Ok(())
     }
 }
 

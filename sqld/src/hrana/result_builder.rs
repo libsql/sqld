@@ -225,14 +225,12 @@ impl QueryResultBuilder for SingleStatementBuilder {
         Ok(())
     }
 
-    fn finish(&mut self, last_frame_no: FrameNo) -> Result<(), QueryResultBuilderError> {
-        self.last_frame_no = Some(last_frame_no);
+    fn finish(&mut self, last_frame_no: Option<FrameNo>) -> Result<(), QueryResultBuilderError> {
+        self.last_frame_no = last_frame_no;
         Ok(())
     }
 
     fn into_ret(mut self) -> Self::Ret {
-        assert!(self.last_frame_no.is_some());
-
         match std::mem::take(&mut self.err) {
             Some(err) => Err(err),
             None => Ok(proto::StmtResult {
@@ -346,7 +344,7 @@ impl QueryResultBuilder for HranaBatchProtoBuilder {
         Ok(())
     }
 
-    fn finish(&mut self, _last_frame_no: FrameNo) -> Result<(), QueryResultBuilderError> {
+    fn finish(&mut self, _last_frame_no: Option<FrameNo>) -> Result<(), QueryResultBuilderError> {
         Ok(())
     }
 

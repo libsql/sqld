@@ -240,7 +240,7 @@ impl QueryResultBuilder for CursorResultBuilder {
         Ok(())
     }
 
-    fn finish(&mut self, last_frame_no: FrameNo) -> Result<(), QueryResultBuilderError> {
+    fn finish(&mut self, last_frame_no: Option<FrameNo>) -> Result<(), QueryResultBuilderError> {
         self.emit_entry(Ok(SizedEntry {
             entry: proto::CursorEntry::ReplicationIndex {
                 replication_index: last_frame_no,

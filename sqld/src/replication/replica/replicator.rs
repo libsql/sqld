@@ -39,7 +39,7 @@ pub struct Replicator {
     /// bytes representing the namespace name
     namespace: Bytes,
     meta: Arc<Mutex<Option<WalIndexMeta>>>,
-    pub current_frame_no_notifier: watch::Receiver<FrameNo>,
+    pub current_frame_no_notifier: watch::Receiver<Option<FrameNo>>,
     frames_sender: mpsc::Sender<Frames>,
     /// hard reset channel: send the namespace there, to reset it
     reset: ResetCb,
@@ -55,7 +55,7 @@ impl Replicator {
         reset: ResetCb,
     ) -> anyhow::Result<Self> {
         let client = Client::with_origin(channel, uri);
-        let (applied_frame_notifier, current_frame_no_notifier) = watch::channel(FrameNo::MAX);
+        let (applied_frame_notifier, current_frame_no_notifier) = watch::channel(None);
         let (frames_sender, receiver) = tokio::sync::mpsc::channel(1);
 
         let mut this = Self {
@@ -100,7 +100,7 @@ impl Replicator {
                 assert_eq!(meta.pre_commit_frame_no, fno);
                 meta.post_commit_frame_no = fno;
                 meta_file.write_all_at(bytes_of(meta), 0)?;
-                let _ = notifier.send(fno);
+                let _ = notifier.send(Some(fno));
 
                 Ok(())
             }
@@ -290,7 +290,6 @@ impl Replicator {
     }
 
     fn current_frame_no(&mut self) -> Option<FrameNo> {
-        let current = *self.current_frame_no_notifier.borrow_and_update();
-        (current != FrameNo::MAX).then_some(current)
+        *self.current_frame_no_notifier.borrow_and_update()
     }
 }

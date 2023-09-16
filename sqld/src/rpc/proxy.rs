@@ -429,7 +429,7 @@ impl QueryResultBuilder for ExecuteResultBuilder {
         Ok(())
     }
 
-    fn finish(&mut self, _last_frame_no: FrameNo) -> Result<(), QueryResultBuilderError> {
+    fn finish(&mut self, _last_frame_no: Option<FrameNo>) -> Result<(), QueryResultBuilderError> {
         Ok(())
     }
 

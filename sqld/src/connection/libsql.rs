@@ -35,7 +35,7 @@ pub struct LibSqlDbFactory<W: WalHook + 'static> {
     max_response_size: u64,
     max_total_response_size: u64,
     auto_checkpoint: u32,
-    current_frame_no_receiver: watch::Receiver<FrameNo>,
+    current_frame_no_receiver: watch::Receiver<Option<FrameNo>>,
     /// In wal mode, closing the last database takes time, and causes other databases creation to
     /// return sqlite busy. To mitigate that, we hold on to one connection
     _db: Option<LibSqlConnection>,
@@ -57,7 +57,7 @@ where
         max_response_size: u64,
         max_total_response_size: u64,
         auto_checkpoint: u32,
-        current_frame_no_receiver: watch::Receiver<FrameNo>,
+        current_frame_no_receiver: watch::Receiver<Option<FrameNo>>,
     ) -> Result<Self>
     where
         F: Fn() -> W::Context + Sync + Send + 'static,
@@ -176,7 +176,7 @@ impl LibSqlConnection {
         stats: Arc<Stats>,
         config_store: Arc<DatabaseConfigStore>,
         builder_config: QueryBuilderConfig,
-        current_frame_no_receiver: watch::Receiver<FrameNo>,
+        current_frame_no_receiver: watch::Receiver<Option<FrameNo>>,
     ) -> crate::Result<Self>
     where
         W: WalHook,
@@ -252,7 +252,7 @@ struct Connection<'a> {
     stats: Arc<Stats>,
     config_store: Arc<DatabaseConfigStore>,
     builder_config: QueryBuilderConfig,
-    current_frame_no_receiver: watch::Receiver<FrameNo>,
+    current_frame_no_receiver: watch::Receiver<Option<FrameNo>>,
 }
 
 impl<'a> Connection<'a> {
@@ -264,7 +264,7 @@ impl<'a> Connection<'a> {
         stats: Arc<Stats>,
         config_store: Arc<DatabaseConfigStore>,
         builder_config: QueryBuilderConfig,
-        current_frame_no_receiver: watch::Receiver<FrameNo>,
+        current_frame_no_receiver: watch::Receiver<Option<FrameNo>>,
     ) -> Result<Self> {
         let this = Self {
             conn: open_db(
@@ -625,7 +625,7 @@ mod test {
             stats: Arc::new(Stats::default()),
             config_store: Arc::new(DatabaseConfigStore::new_test()),
             builder_config: QueryBuilderConfig::default(),
-            current_frame_no_receiver: watch::channel(0).1,
+            current_frame_no_receiver: watch::channel(None).1,
         };
 
         let stmts = std::iter::once("create table test (x)")

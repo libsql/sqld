@@ -132,7 +132,7 @@ pub enum CursorEntry {
         error: Error,
     },
     ReplicationIndex {
-        replication_index: u64,
+        replication_index: Option<u64>,
     },
 }
 
