@@ -172,6 +172,39 @@ impl WriteProxyConnection {
         builder_config: QueryBuilderConfig,
         namespace: Bytes,
     ) -> Result<Self> {
+        let last_applied_frame = *applied_frame_no_receiver.borrow();
+
+        // TODO: should the client expect to handle FrameNo::MAX?
+        let last_frame_no = if last_applied_frame == FrameNo::MAX {
+            last_applied_frame
+        } else {
+            // The primary returns what the next frame number should be,
+            // while the replicator gives you the last frame that was applied,
+            // so this plus one is necessary
+            last_applied_frame + 1
+        };
+
+        let (last_frame_no_tx, last_frame_no_rx) = watch::channel(last_frame_no);
+
+        // TODO: Is there a better way to do this?
+        tokio::spawn({
+            let mut receiver = applied_frame_no_receiver.clone();
+            async move {
+                loop {
+                    if receiver.changed().await.is_err() {
+                        break;
+                    }
+
+                    if last_frame_no_tx
+                        .send(*receiver.borrow_and_update() + 1)
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+            }
+        });
+
         let read_conn = LibSqlConnection::new(
             db_path,
             extensions,
@@ -180,7 +213,7 @@ impl WriteProxyConnection {
             stats.clone(),
             config_store,
             builder_config,
-            applied_frame_no_receiver.clone(),
+            last_frame_no_rx,
         )
         .await?;
 
