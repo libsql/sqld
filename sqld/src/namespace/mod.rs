@@ -23,6 +23,7 @@ use tokio_util::io::StreamReader;
 use tonic::transport::Channel;
 use uuid::Uuid;
 
+use crate::auth::Authenticated;
 use crate::connection::config::DatabaseConfigStore;
 use crate::connection::libsql::{open_db, LibSqlDbFactory};
 use crate::connection::write_proxy::MakeWriteProxyConnection;
@@ -47,6 +48,12 @@ pub type ResetCb = Box<dyn Fn(ResetOp) -> BoxFuture<'static, crate::Result<()>> 
 
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub struct NamespaceName(Bytes);
+
+impl fmt::Debug for NamespaceName {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{self}")
+    }
+}
 
 impl Default for NamespaceName {
     fn default() -> Self {
@@ -378,6 +385,22 @@ impl<M: MakeNamespace> NamespaceStore<M> {
         lock.insert(to.clone(), forked);
 
         Ok(())
+    }
+
+    pub async fn with_authenticated<Fun, R>(
+        &self,
+        namespace: NamespaceName,
+        auth: Authenticated,
+        f: Fun,
+    ) -> crate::Result<R>
+    where
+        Fun: FnOnce(&Namespace<M::Database>) -> R,
+    {
+        if !auth.is_namespace_authorized(&namespace) {
+            return Err(Error::NamespaceDoesntExist(namespace.to_string()));
+        }
+
+        self.with(namespace, f).await
     }
 
     pub async fn with<Fun, R>(&self, namespace: NamespaceName, f: Fun) -> crate::Result<R>
