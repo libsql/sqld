@@ -581,7 +581,7 @@ impl LogFile {
 
         // nothing to compact
         if self.header().frame_count == 0 {
-            return Ok(())
+            return Ok(());
         }
 
         tracing::info!("performing log compaction");

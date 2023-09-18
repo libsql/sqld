@@ -11,22 +11,17 @@ use tokio_util::io::ReaderStream;
 use url::Url;
 use uuid::Uuid;
 
-use crate::connection::config::{DatabaseConfig, DatabaseConfigStore};
+use crate::connection::config::DatabaseConfig;
 use crate::error::LoadDumpError;
-use crate::namespace::{DumpStream, MakeNamespace, NamespaceStore, RestoreOption};
+use crate::namespace::{DumpStream, MakeNamespace, NamespaceName, NamespaceStore, RestoreOption};
 
 pub mod stats;
 
 struct AppState<M: MakeNamespace> {
-    db_config_store: Arc<DatabaseConfigStore>,
     namespaces: NamespaceStore<M>,
 }
 
-pub async fn run<M, A>(
-    acceptor: A,
-    db_config_store: Arc<DatabaseConfigStore>,
-    namespaces: NamespaceStore<M>,
-) -> anyhow::Result<()>
+pub async fn run<M, A>(acceptor: A, namespaces: NamespaceStore<M>) -> anyhow::Result<()>
 where
     A: crate::net::Accept,
     M: MakeNamespace,
@@ -34,8 +29,10 @@ where
     use axum::routing::{get, post};
     let router = axum::Router::new()
         .route("/", get(handle_get_index))
-        .route("/v1/config", get(handle_get_config))
-        .route("/v1/block", post(handle_post_block))
+        .route(
+            "/v1/namespaces/:namespace/config",
+            get(handle_get_config).post(handle_post_config),
+        )
         .route(
             "/v1/namespaces/:namespace/fork/:to",
             post(handle_fork_namespace),
@@ -50,10 +47,7 @@ where
         )
         .route("/v1/namespaces/:namespace", delete(handle_delete_namespace))
         .route("/v1/namespaces/:namespace/stats", get(stats::handle_stats))
-        .with_state(Arc::new(AppState {
-            db_config_store,
-            namespaces,
-        }));
+        .with_state(Arc::new(AppState { namespaces }));
 
     hyper::server::Server::builder(acceptor)
         .serve(router.into_make_service())
@@ -68,8 +62,13 @@ async fn handle_get_index() -> &'static str {
 
 async fn handle_get_config<M: MakeNamespace>(
     State(app_state): State<Arc<AppState<M>>>,
-) -> Json<Arc<DatabaseConfig>> {
-    Json(app_state.db_config_store.get())
+    Path(namespace): Path<String>,
+) -> crate::Result<Json<Arc<DatabaseConfig>>> {
+    let store = app_state
+        .namespaces
+        .config_store(NamespaceName::from_string(namespace)?)
+        .await?;
+    Ok(Json(store.get()))
 }
 
 #[derive(Debug, Deserialize)]
@@ -85,22 +84,23 @@ struct CreateNamespaceReq {
     dump_url: Option<Url>,
 }
 
-async fn handle_post_block<M: MakeNamespace>(
+async fn handle_post_config<M: MakeNamespace>(
     State(app_state): State<Arc<AppState<M>>>,
+    Path(namespace): Path<String>,
     Json(req): Json<BlockReq>,
-) -> (axum::http::StatusCode, &'static str) {
-    let mut config = (*app_state.db_config_store.get()).clone();
+) -> crate::Result<()> {
+    let store = app_state
+        .namespaces
+        .config_store(NamespaceName::from_string(namespace)?)
+        .await?;
+    let mut config = (*store.get()).clone();
     config.block_reads = req.block_reads;
     config.block_writes = req.block_writes;
     config.block_reason = req.block_reason;
 
-    match app_state.db_config_store.store(config) {
-        Ok(()) => (axum::http::StatusCode::OK, "OK"),
-        Err(err) => {
-            tracing::warn!("Could not store database config: {err}");
-            (axum::http::StatusCode::INTERNAL_SERVER_ERROR, "Failed")
-        }
-    }
+    store.store(config)?;
+
+    Ok(())
 }
 
 async fn handle_create_namespace<M: MakeNamespace>(
@@ -113,7 +113,10 @@ async fn handle_create_namespace<M: MakeNamespace>(
         None => RestoreOption::Latest,
     };
 
-    app_state.namespaces.create(namespace.into(), dump).await?;
+    app_state
+        .namespaces
+        .create(NamespaceName::from_string(namespace)?, dump)
+        .await?;
     Ok(())
 }
 
@@ -121,7 +124,9 @@ async fn handle_fork_namespace<M: MakeNamespace>(
     State(app_state): State<Arc<AppState<M>>>,
     Path((from, to)): Path<(String, String)>,
 ) -> crate::Result<()> {
-    app_state.namespaces.fork(from.into(), to.into()).await?;
+    let from = NamespaceName::from_string(from)?;
+    let to = NamespaceName::from_string(to)?;
+    app_state.namespaces.fork(from, to).await?;
     Ok(())
 }
 
@@ -163,7 +168,10 @@ async fn handle_delete_namespace<F: MakeNamespace>(
     State(app_state): State<Arc<AppState<F>>>,
     Path(namespace): Path<String>,
 ) -> crate::Result<()> {
-    app_state.namespaces.destroy(namespace.into()).await?;
+    app_state
+        .namespaces
+        .destroy(NamespaceName::from_string(namespace)?)
+        .await?;
     Ok(())
 }
 
@@ -186,7 +194,7 @@ async fn handle_restore_namespace<F: MakeNamespace>(
     };
     app_state
         .namespaces
-        .reset(namespace.into(), restore_option)
+        .reset(NamespaceName::from_string(namespace)?, restore_option)
         .await?;
     Ok(())
 }
