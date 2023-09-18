@@ -10,7 +10,6 @@ use bottomless::replicator::Options;
 use bytes::Bytes;
 use chrono::NaiveDateTime;
 use enclose::enclose;
-use futures_core::future::BoxFuture;
 use futures_core::Stream;
 use hyper::Uri;
 use rusqlite::ErrorCode;
@@ -41,7 +40,7 @@ pub use fork::ForkError;
 use self::fork::ForkTask;
 
 mod fork;
-pub type ResetCb = Box<dyn Fn(ResetOp) -> BoxFuture<'static, crate::Result<()>> + Send + Sync>;
+pub type ResetCb = Box<dyn Fn(ResetOp) + Send + Sync + 'static>;
 
 pub enum ResetOp {
     Reset(Bytes),
@@ -285,21 +284,30 @@ impl<M: MakeNamespace> NamespaceStore<M> {
         let this = self.clone();
         Box::new(move |op| {
             let this = this.clone();
-            Box::pin(async move {
+            tokio::spawn(async move {
                 match op {
                     ResetOp::Reset(ns) => {
-                        tracing::warn!(
+                        tracing::info!(
                             "received reset signal for: {:?}",
                             std::str::from_utf8(&ns).ok()
                         );
-                        this.reset(ns, RestoreOption::Latest).await?;
+                        if let Err(e) = this.reset(ns.clone(), RestoreOption::Latest).await {
+                            tracing::error!(
+                                "error reseting namesace `{}`: {e}",
+                                std::str::from_utf8(&ns).unwrap()
+                            );
+                        }
                     }
                     ResetOp::Destroy(ns) => {
-                        this.destroy(ns).await?;
+                        if let Err(e) = this.destroy(ns.clone()).await {
+                            tracing::error!(
+                                "error destroying namesace `{}`: {e}",
+                                std::str::from_utf8(&ns).unwrap()
+                            );
+                        }
                     }
                 }
-                Ok(())
-            })
+            });
         })
     }
 

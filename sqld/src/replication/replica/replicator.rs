@@ -162,12 +162,7 @@ impl Replicator {
             _ => return error.into(),
         }
 
-        if let Err(e) = (self.reset)(ResetOp::Reset(self.namespace.clone())).await {
-            tracing::error!(
-                "failed to reset namespace {}: {e}",
-                std::str::from_utf8(&self.namespace).unwrap_or_default()
-            );
-        }
+        (self.reset)(ResetOp::Reset(self.namespace.clone()));
 
         error.into()
     }
@@ -208,7 +203,7 @@ impl Replicator {
                         "namespace `{}` doesn't exist, cleaning...",
                         std::str::from_utf8(&self.namespace).unwrap_or_default()
                     );
-                    (self.reset)(ResetOp::Destroy(self.namespace.clone())).await?;
+                    (self.reset)(ResetOp::Destroy(self.namespace.clone()));
                     return Err(crate::error::Error::NamespaceDoesntExist(
                         String::from_utf8(self.namespace.to_vec()).unwrap_or_default(),
                     ));
