@@ -5,7 +5,6 @@ members = [
     "bottomless-cli",
     "sqld",
     "sqld-libsql-bindings",
-    "testing/end-to-end",
 ]
 
 [workspace.dependencies]
