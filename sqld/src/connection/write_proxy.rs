@@ -171,7 +171,6 @@ impl WriteProxyConnection {
         builder_config: QueryBuilderConfig,
         namespace: NamespaceName,
     ) -> Result<Self> {
-
         let read_conn = LibSqlConnection::new(
             db_path,
             extensions,
@@ -252,15 +251,16 @@ impl WriteProxyConnection {
         match current_fno {
             Some(current_frame_no) => {
                 let mut receiver = self.applied_frame_no_receiver.clone();
-                receiver.wait_for(|last_applied| {
-                    match last_applied {
+                receiver
+                    .wait_for(|last_applied| match last_applied {
                         Some(x) => *x >= current_frame_no,
                         None => true,
-                    }
-                }).await.map_err(|_| Error::ReplicatorExited)?;
+                    })
+                    .await
+                    .map_err(|_| Error::ReplicatorExited)?;
 
                 Ok(())
-            },
+            }
             None => Ok(()),
         }
     }

@@ -776,7 +776,10 @@ pub mod test {
             self.transition(FinishRows)
         }
 
-        fn finish(&mut self, _last_frame_no: Option<FrameNo>) -> Result<(), QueryResultBuilderError> {
+        fn finish(
+            &mut self,
+            _last_frame_no: Option<FrameNo>,
+        ) -> Result<(), QueryResultBuilderError> {
             self.maybe_inject_error()?;
             self.transition(Finish)
         }

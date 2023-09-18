@@ -135,7 +135,7 @@ impl prost::Message for CursorEntry {
             CursorEntry::ReplicationIndex { replication_index } => {
                 if let Some(replication_index) = replication_index {
                     message::encode(6, replication_index, buf)
-                } 
+                }
             }
         }
     }
