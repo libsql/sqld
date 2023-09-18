@@ -74,7 +74,7 @@ pub struct FetchedResults {
     pub next_marker: Option<String>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Eq, PartialEq)]
 pub enum RestoreAction {
     SnapshotMainDbFile,
     ReuseGeneration(Uuid),
@@ -395,6 +395,63 @@ impl Replicator {
             }
         } else {
             Ok(false)
+        }
+    }
+
+    /// Restores current database state to the last stable generation and immediately snapshots it
+    /// if possible.
+    ///
+    /// Returns generation id at which the snapshot has been made (only if snapshot was performed).
+    pub async fn restore_and_snapshot(&mut self) -> Result<Option<Uuid>> {
+        if let Some(latest) = self.latest_generation_before(None).await {
+            // we're not interested in strictly the latest generation (as it may still be receiving
+            // new data) but the last one finished, which should be its parent. This parent serves
+            // as an start point for the latest gen that we want to snapshot.
+            let parent = self.get_dependency(&latest).await?;
+            if let Some(gen) = parent {
+                tracing::info!("{} found generation {} to snapshot.", self.db_name, gen);
+                if self.snapshot_exists(&gen).await? {
+                    tracing::info!(
+                        "{} already has snapshot for generation {}. Skipping.",
+                        self.db_name,
+                        gen
+                    );
+                    return Ok(None);
+                }
+                let (action, restored) = self.restore(Some(gen), None).await?;
+                if restored && RestoreAction::SnapshotMainDbFile == action {
+                    // impersonate as the latest generation and upload the snapshot
+                    self.set_generation(latest);
+                    if let Some(handle) = self.snapshot_main_db_file(None).await? {
+                        handle.await?;
+                        return Ok(Some(latest));
+                    }
+                }
+            }
+        }
+        tracing::info!(
+            "{} found no finished generations to snapshot.",
+            self.db_name
+        );
+        Ok(None)
+    }
+
+    pub async fn snapshot_exists(&self, generation: &Uuid) -> Result<bool> {
+        let key = format!(
+            "{}-{}/db.{}",
+            self.db_name, generation, self.use_compression
+        );
+        let resp = self
+            .client
+            .head_object()
+            .bucket(&self.bucket)
+            .key(key)
+            .send()
+            .await;
+        match resp {
+            Ok(_) => Ok(true),
+            Err(SdkError::ServiceError(err)) if err.err().is_not_found() => Ok(false),
+            Err(e) => Err(e.into()),
         }
     }
 

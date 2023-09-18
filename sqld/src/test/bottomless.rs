@@ -2,16 +2,19 @@ use anyhow::Result;
 use aws_sdk_s3::config::{Credentials, Region};
 use aws_sdk_s3::types::{Delete, ObjectIdentifier};
 use aws_sdk_s3::Client;
+use bottomless::replicator::Replicator;
+use chrono::{DateTime, SecondsFormat, Utc};
 use futures_core::Future;
 use itertools::Itertools;
 use libsql_client::{Connection, QueryResult, Statement, Value};
+use serde_json::json;
 use std::net::{SocketAddr, ToSocketAddrs};
 use std::path::PathBuf;
 use tokio::time::sleep;
 use tokio::time::Duration;
 use url::Url;
 
-use crate::config::{DbConfig, UserApiConfig};
+use crate::config::{AdminApiConfig, DbConfig, UserApiConfig};
 use crate::net::AddrIncoming;
 use crate::Server;
 
@@ -35,6 +38,7 @@ fn start_db(step: u32, server: Server) -> impl Future<Output = ()> {
 async fn configure_server(
     options: &bottomless::replicator::Options,
     addr: SocketAddr,
+    admin_addr: Option<SocketAddr>,
     path: impl Into<PathBuf>,
 ) -> Server {
     let http_acceptor = AddrIncoming::new(tokio::net::TcpListener::bind(addr).await.unwrap());
@@ -51,7 +55,13 @@ async fn configure_server(
             snapshot_exec: None,
             checkpoint_interval: None,
         },
-        admin_api_config: None,
+        admin_api_config: if let Some(addr) = admin_addr {
+            Some(AdminApiConfig {
+                acceptor: AddrIncoming::new(tokio::net::TcpListener::bind(addr).await.unwrap()),
+            })
+        } else {
+            None
+        },
         disable_namespaces: true,
         user_api_config: UserApiConfig {
             hrana_ws_acceptor: None,
@@ -72,13 +82,14 @@ async fn configure_server(
     }
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn backup_restore() {
     let _ = env_logger::builder().is_test(true).try_init();
     const DB_ID: &str = "testbackuprestore";
     const BUCKET: &str = "testbackuprestore";
     const PATH: &str = "backup_restore.sqld";
     const PORT: u16 = 15001;
+    const ADMIN_PORT: u16 = 15701;
     const OPS: usize = 2000;
     const ROWS: usize = 10;
 
@@ -101,10 +112,16 @@ async fn backup_restore() {
         .unwrap()
         .next()
         .unwrap();
+    let admin_addr = format!("0.0.0.0:{}", ADMIN_PORT)
+        .to_socket_addrs()
+        .unwrap()
+        .next()
+        .unwrap();
 
-    let make_server = || async { configure_server(&options, listener_addr, PATH).await };
+    let make_server =
+        || async { configure_server(&options, listener_addr, Some(admin_addr), PATH).await };
 
-    {
+    let recover_time = {
         tracing::info!(
             "---STEP 1: create a local database, fill it with data, wait for WAL backup---"
         );
@@ -126,7 +143,10 @@ async fn backup_restore() {
 
         db_job.await;
         drop(cleaner);
-    }
+        let time = Utc::now(); // remember this timestamp for point-in-time recovery
+        tracing::info!("restoration point: {}", time.to_rfc3339());
+        time
+    };
 
     // make sure that db file doesn't exist, and that the bucket contains backup
     assert!(!std::path::Path::new(PATH).exists());
@@ -198,6 +218,48 @@ async fn backup_restore() {
         db_job.await;
         drop(cleaner);
     }
+
+    {
+        // check if we can create snapshots manually
+        tracing::info!("---STEP 6: make snapshot explicitly ---");
+
+        // manually remove snapshots from all generations, this will force restore across generations
+        // from the very beginning
+        remove_snapshots(BUCKET).await;
+        let cleaner = DbFileCleaner::new(PATH);
+
+        {
+            // simulate program running aside which will periodically snapshot most recent generation
+            let mut options = options.clone();
+            options.db_id = Some("ns-:default".into());
+            let db_path = PATH.to_string() + "/dbs/default/data";
+            tokio::fs::create_dir_all(&db_path).await.unwrap();
+            let mut replicator = Replicator::with_options(db_path, options).await.unwrap();
+            let generation = replicator.restore_and_snapshot().await.unwrap().unwrap();
+            let exists = replicator.snapshot_exists(&generation).await.unwrap();
+            assert!(exists, "snapshot for generation {} must exist", generation);
+        }
+
+        drop(cleaner);
+    }
+
+    {
+        tracing::info!("---STEP 7: point in time recovery ({}) ---", recover_time);
+        let cleaner = DbFileCleaner::new(PATH);
+        let db_job = start_db(4, make_server().await);
+
+        sleep(Duration::from_secs(2)).await;
+
+        let admin_api = Url::parse(&format!("http://localhost:{}", ADMIN_PORT)).unwrap();
+        request_restore(&admin_api, recover_time).await.unwrap();
+
+        sleep(Duration::from_secs(2)).await;
+
+        assert_updates(&connection_addr, ROWS, OPS, "A").await;
+
+        db_job.await;
+        drop(cleaner);
+    }
 }
 
 #[tokio::test]
@@ -241,7 +303,7 @@ async fn rollback_restore() {
         restore_transaction_page_swap_after: 1, // in this test swap should happen at least once
         ..bottomless::replicator::Options::from_env().unwrap()
     };
-    let make_server = || async { configure_server(&options, listener_addr, PATH).await };
+    let make_server = || async { configure_server(&options, listener_addr, None, PATH).await };
 
     {
         tracing::info!("---STEP 1: create db, write row, rollback---");
@@ -363,6 +425,19 @@ async fn assert_updates(connection_addr: &Url, row_count: usize, ops_count: usiz
             name
         );
     }
+}
+
+async fn request_restore(url: &Url, timestamp: DateTime<Utc>) -> Result<()> {
+    let mut timestamp: String = timestamp.to_rfc3339_opts(SecondsFormat::Secs, true);
+    timestamp.pop();
+    // NaiveDateTime accepted format is `2018-01-26T18:30:09` (without Z)
+    let json = json!({"timestamp": timestamp});
+    let endpoint = url.join("/v1/namespaces/default/restore")?;
+    tracing::info!("calling {} - {}", endpoint, json);
+    let client = reqwest::Client::new();
+    let resp = client.post(endpoint.clone()).json(&json).send().await?;
+    assert_eq!(resp.status().as_u16(), 200);
+    Ok(())
 }
 
 async fn sql<I, S>(url: &Url, stmts: I) -> Result<Vec<QueryResult>>
