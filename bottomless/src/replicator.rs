@@ -52,6 +52,7 @@ pub struct Replicator {
     flush_trigger: Sender<()>,
     snapshot_waiter: Receiver<Result<Option<Uuid>>>,
     snapshot_notifier: Arc<Sender<Result<Option<Uuid>>>>,
+    snapshot_interval: Option<Duration>,
 
     pub page_size: usize,
     restore_transaction_page_swap_after: u32,
@@ -113,6 +114,7 @@ pub struct Options {
     /// When recovering a transaction, when its page cache needs to be swapped onto local file,
     /// this field contains a path for a file to be used.
     pub restore_transaction_cache_fpath: String,
+    pub snapshot_interval: Option<Duration>,
 }
 
 impl Options {
@@ -191,6 +193,11 @@ impl Options {
                 other
             ),
         };
+        let snapshot_interval_secs = if let Ok(secs) = env_var("LIBSQL_BOTTOMLESS_SNAPSHOT_INTERVAL") {
+            Some(Duration::from_secs(secs.parse::<u64>()?))
+        } else {
+            None
+        };
         Ok(Options {
             db_id,
             create_bucket_if_not_exists: true,
@@ -206,6 +213,7 @@ impl Options {
             region,
             restore_transaction_cache_fpath,
             bucket_name,
+            snapshot_interval
         })
     }
 }
@@ -357,6 +365,7 @@ impl Replicator {
             use_compression: options.use_compression,
             max_frames_per_batch: options.max_frames_per_batch,
             s3_upload_max_parallelism: options.s3_upload_max_parallelism,
+            snapshot_interval: options.snapshot_interval,
             _join_set,
         })
     }
@@ -395,63 +404,6 @@ impl Replicator {
             }
         } else {
             Ok(false)
-        }
-    }
-
-    /// Restores current database state to the last stable generation and immediately snapshots it
-    /// if possible.
-    ///
-    /// Returns generation id at which the snapshot has been made (only if snapshot was performed).
-    pub async fn restore_and_snapshot(&mut self) -> Result<Option<Uuid>> {
-        if let Some(latest) = self.latest_generation_before(None).await {
-            // we're not interested in strictly the latest generation (as it may still be receiving
-            // new data) but the last one finished, which should be its parent. This parent serves
-            // as an start point for the latest gen that we want to snapshot.
-            let parent = self.get_dependency(&latest).await?;
-            if let Some(gen) = parent {
-                tracing::info!("{} found generation {} to snapshot.", self.db_name, gen);
-                if self.snapshot_exists(&gen).await? {
-                    tracing::info!(
-                        "{} already has snapshot for generation {}. Skipping.",
-                        self.db_name,
-                        gen
-                    );
-                    return Ok(None);
-                }
-                let (action, restored) = self.restore(Some(gen), None).await?;
-                if restored && RestoreAction::SnapshotMainDbFile == action {
-                    // impersonate as the latest generation and upload the snapshot
-                    self.set_generation(latest);
-                    if let Some(handle) = self.snapshot_main_db_file(None).await? {
-                        handle.await?;
-                        return Ok(Some(latest));
-                    }
-                }
-            }
-        }
-        tracing::info!(
-            "{} found no finished generations to snapshot.",
-            self.db_name
-        );
-        Ok(None)
-    }
-
-    pub async fn snapshot_exists(&self, generation: &Uuid) -> Result<bool> {
-        let key = format!(
-            "{}-{}/db.{}",
-            self.db_name, generation, self.use_compression
-        );
-        let resp = self
-            .client
-            .head_object()
-            .bucket(&self.bucket)
-            .key(key)
-            .send()
-            .await;
-        match resp {
-            Ok(_) => Ok(true),
-            Err(SdkError::ServiceError(err)) if err.err().is_not_found() => Ok(false),
-            Err(e) => Err(e.into()),
         }
     }
 
@@ -753,8 +705,8 @@ impl Replicator {
         Ok(())
     }
 
-    // Check if the local database file exists and contains data
-    async fn main_db_exists_and_not_empty(&self) -> bool {
+    /// Check if the local database file exists and contains data.
+    async fn db_file_has_data(&self) -> bool {
         let file = match File::open(&self.db_path).await {
             Ok(file) => file,
             Err(_) => return false,
@@ -765,26 +717,66 @@ impl Replicator {
         }
     }
 
+    /// Returns info, which generation had the most recent snapshot.
+    async fn get_last_snapshot(&self) -> Option<Uuid> {
+        let path = format!("{}/.snaplock", self.db_path);
+        let mut f = File::open(path).await.ok()?;
+        let mut buf = [0u8; 16];
+        f.read_exact(&mut buf).await.ok()?;
+        Some(Uuid::from_bytes(buf))
+    }
+
+    async fn save_last_snapshot<P: AsRef<Path>>(db_path: P, generation: &Uuid) -> Result<()> {
+        let mut f = OpenOptions::new()
+            .truncate(true)
+            .write(true)
+            .create(true)
+            .open(format!("{}/.snaplock", db_path))
+            .await?;
+        f.write_all(generation.as_ref()).await?;
+        Ok(())
+    }
+
     pub fn skip_snapshot_for_current_generation(&self) {
         let generation = self.generation.load().as_deref().cloned();
         let _ = self.snapshot_notifier.send(Ok(generation));
     }
 
-    // Sends the main database file to S3 - if -wal file is present, it's replicated
-    // too - it means that the local file was detected to be newer than its remote
-    // counterpart.
-    pub async fn snapshot_main_db_file(&mut self) -> Result<Option<JoinHandle<()>>> {
-        if !self.main_db_exists_and_not_empty().await {
-            let generation = self.generation()?;
-            tracing::debug!(
-                "Not snapshotting {}, the main db file does not exist or is empty",
-                generation
-            );
-            let _ = self.snapshot_notifier.send(Ok(Some(generation)));
+    /// Tries to create a snapshot of a main database file - if it exists and is actual - and
+    /// uploads it to S3.
+    ///
+    /// If snapshot process was started, an awaiter will be returned - it can be used to wait for
+    /// snapshot completion.
+    pub async fn try_snapshot(
+        &mut self,
+        prev_generation: Option<Uuid>,
+    ) -> Result<Option<JoinHandle<()>>> {
+        if !self.db_file_has_data().await {
+            tracing::debug!("Not snapshotting, the main db file does not exist or is empty");
+            let _ = self.snapshot_notifier.send(Ok(prev_generation));
             return Ok(None);
         }
         let generation = self.generation()?;
+        if let Some(snapshot_interval) = self.snapshot_interval {
+            if let Some(snapshot_gen) = self.get_last_snapshot().await {
+                if let Some(snapshot_time) = Self::generation_to_timestamp(&snapshot_gen) {
+                    let next_snapshot_date =
+                        snapshot_time.to_unix().0 + snapshot_interval.as_secs();
+                    if snapshot_gen == generation
+                        || next_snapshot_date < Utc::now().naive_utc().timestamp() as u64
+                    {
+                        tracing::trace!(
+                            "Snapshot already done or scheduled to later date. Skipping."
+                        );
+                        let _ = self.snapshot_notifier.send(Ok(prev_generation));
+                        return Ok(None);
+                    }
+                }
+            }
+        }
+        tracing::debug!("Snapshotting generation {}", generation);
         let start_ts = Instant::now();
+
         let client = self.client.clone();
         let mut db_file = File::open(&self.db_path).await?;
         let change_counter = Self::read_change_counter(&mut db_file).await?;
@@ -844,6 +836,13 @@ impl Replicator {
                 );
                 let _ = snapshot_notifier.send(Err(e.into()));
                 return;
+            }
+            if let Err(e) = Self::save_last_snapshot(&generation).await {
+                tracing::error!(
+                    "failed to save the latest known snapshot {}: {}",
+                    generation,
+                    e
+                );
             }
             let _ = snapshot_notifier.send(Ok(Some(generation)));
             let elapsed = Instant::now() - start;
@@ -1057,6 +1056,7 @@ impl Replicator {
             restore_stack.push(curr);
             let restored = self.restore_from_snapshot(&curr, &mut db).await?;
             if restored {
+                Self::save_last_snapshot(&curr).await?;
                 break;
             } else {
                 if restore_stack.len() > MAX_RESTORE_STACK_DEPTH {

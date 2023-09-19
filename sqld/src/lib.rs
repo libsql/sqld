@@ -40,6 +40,13 @@ use tokio::time::Duration;
 use url::Url;
 use utils::services::idle_shutdown::IdleShutdownKicker;
 
+use crate::auth::Auth;
+use crate::error::Error;
+use crate::migration::maybe_migrate;
+use crate::net::Accept;
+use crate::net::AddrIncoming;
+use crate::stats::Stats;
+
 pub mod config;
 pub mod connection;
 pub mod net;
@@ -154,54 +161,6 @@ where
 
         if let Some(AdminApiConfig { acceptor }) = self.admin_api_config {
             join_set.spawn(http::admin::run(acceptor, self.namespaces));
-        }
-    }
-}
-
-async fn run_periodic_checkpoint<C>(
-    connection_maker: Arc<C>,
-    period: Duration,
-) -> anyhow::Result<()>
-where
-    C: MakeConnection,
-{
-    use tokio::time::{interval, sleep, Instant, MissedTickBehavior};
-
-    const RETRY_INTERVAL: Duration = Duration::from_secs(60);
-    tracing::info!("setting checkpoint interval to {:?}", period);
-    let mut interval = interval(period);
-    interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
-    let mut retry: Option<Duration> = None;
-    loop {
-        if let Some(retry) = retry.take() {
-            if retry.is_zero() {
-                tracing::warn!("database was not set in WAL journal mode");
-                return Ok(());
-            }
-            sleep(retry).await;
-        } else {
-            interval.tick().await;
-        }
-        retry = match connection_maker.create().await {
-            Ok(conn) => {
-                tracing::trace!("database checkpoint");
-                let start = Instant::now();
-                match conn.checkpoint().await {
-                    Ok(_) => {
-                        let elapsed = Instant::now() - start;
-                        tracing::info!("database checkpoint finished (took: {:?})", elapsed);
-                        None
-                    }
-                    Err(err) => {
-                        tracing::warn!("failed to execute checkpoint: {}", err);
-                        Some(RETRY_INTERVAL)
-                    }
-                }
-            }
-            Err(err) => {
-                tracing::warn!("couldn't connect: {}", err);
-                Some(RETRY_INTERVAL)
-            }
         }
     }
 }
@@ -460,7 +419,6 @@ where
             stats_sender: self.stats_sender.clone(),
             max_response_size: self.db_config.max_response_size,
             max_total_response_size: self.db_config.max_total_response_size,
-            checkpoint_interval: self.db_config.checkpoint_interval,
             disable_namespace: self.disable_namespaces,
             auto_checkpoint: self.db_config.auto_checkpoint,
         };

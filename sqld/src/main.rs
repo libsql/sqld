@@ -177,13 +177,8 @@ struct Cli {
     #[clap(long, env = "SQLD_SNAPSHOT_EXEC")]
     snapshot_exec: Option<String>,
 
-    /// Interval in seconds, in which WAL checkpoint is being called.
-    /// By default, the interval is 1 hour.
-    #[clap(long, env = "SQLD_CHECKPOINT_INTERVAL_S")]
-    checkpoint_interval_s: Option<u64>,
-
-    /// Interval in seconds, in which WAL checkpoint is being called.
-    /// By default, the interval is 1 hour.
+    /// SQLite autocheckpoint WAL-file setting.
+    /// By default equal to SQLite default: 1000 pages (~4MiB).
     #[clap(long, env = "SQLD_AUTO_CHECKPOINT", default_value = "1000")]
     auto_checkpoint: u32,
 
@@ -300,7 +295,6 @@ fn make_db_config(config: &Cli) -> anyhow::Result<DbConfig> {
         max_response_size: config.max_response_size.as_u64(),
         max_total_response_size: config.max_total_response_size.as_u64(),
         snapshot_exec: config.snapshot_exec.clone(),
-        checkpoint_interval: config.checkpoint_interval_s.map(Duration::from_secs),
         auto_checkpoint: config.auto_checkpoint,
     })
 }

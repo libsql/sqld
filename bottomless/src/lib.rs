@@ -369,17 +369,13 @@ pub extern "C" fn xCheckpoint(
 
     let _prev = ctx.replicator.new_generation();
     tracing::debug!("Snapshotting after checkpoint");
-    match block_on!(ctx.runtime, ctx.replicator.snapshot_main_db_file()) {
-        Ok(_handle) => {
-            tracing::trace!("got snapshot handle");
-        }
-        Err(e) => {
-            tracing::error!(
-                "Failed to snapshot the main db file during checkpoint: {}",
-                e
-            );
-            return ffi::SQLITE_IOERR_WRITE;
-        }
+    let result = block_on!(ctx.runtime, ctx.replicator.try_snapshot(prev));
+    if let Err(e) = result {
+        tracing::error!(
+            "Failed to snapshot the main db file during checkpoint: {}",
+            e
+        );
+        return ffi::SQLITE_IOERR_WRITE;
     }
     tracing::debug!("Checkpoint completed in {:?}", Instant::now() - start);
 
@@ -430,7 +426,7 @@ async fn try_restore(replicator: &mut replicator::Replicator) -> i32 {
     match replicator.restore(None, None).await {
         Ok((replicator::RestoreAction::SnapshotMainDbFile, _)) => {
             replicator.new_generation();
-            match replicator.snapshot_main_db_file().await {
+            match replicator.try_snapshot(None).await {
                 Ok(Some(h)) => {
                     if let Err(e) = h.await {
                         tracing::error!("Failed to join snapshot main db file task: {}", e);

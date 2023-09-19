@@ -262,9 +262,9 @@ unsafe impl WalHook for ReplicationLoggerHook {
             let runtime = tokio::runtime::Handle::current();
             if let Some(replicator) = ctx.bottomless_replicator.as_mut() {
                 let mut replicator = replicator.lock().unwrap();
-                let _prev = replicator.new_generation();
+                let prev = replicator.new_generation();
                 if let Err(e) =
-                    runtime.block_on(async move { replicator.snapshot_main_db_file().await })
+                    runtime.block_on(async move { replicator.try_snapshot(prev).await })
                 {
                     tracing::error!("Failed to snapshot the main db file during checkpoint: {e}");
                     return SQLITE_IOERR_WRITE;

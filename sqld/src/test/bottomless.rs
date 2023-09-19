@@ -2,7 +2,6 @@ use anyhow::Result;
 use aws_sdk_s3::config::{Credentials, Region};
 use aws_sdk_s3::types::{Delete, ObjectIdentifier};
 use aws_sdk_s3::Client;
-use bottomless::replicator::Replicator;
 use chrono::{DateTime, SecondsFormat, Utc};
 use futures_core::Future;
 use itertools::Itertools;
@@ -53,7 +52,6 @@ async fn configure_server(
             max_response_size: 10000000 * 4096,
             max_total_response_size: 10000000 * 4096,
             snapshot_exec: None,
-            checkpoint_interval: None,
             auto_checkpoint: 1000,
         },
         admin_api_config: if let Some(addr) = admin_addr {
@@ -221,31 +219,7 @@ async fn backup_restore() {
     }
 
     {
-        // check if we can create snapshots manually
-        tracing::info!("---STEP 6: make snapshot explicitly ---");
-
-        // manually remove snapshots from all generations, this will force restore across generations
-        // from the very beginning
-        remove_snapshots(BUCKET).await;
-        let cleaner = DbFileCleaner::new(PATH);
-
-        {
-            // simulate program running aside which will periodically snapshot most recent generation
-            let mut options = options.clone();
-            options.db_id = Some("ns-:default".into());
-            let db_path = PATH.to_string() + "/dbs/default/data";
-            tokio::fs::create_dir_all(&db_path).await.unwrap();
-            let mut replicator = Replicator::with_options(db_path, options).await.unwrap();
-            let generation = replicator.restore_and_snapshot().await.unwrap().unwrap();
-            let exists = replicator.snapshot_exists(&generation).await.unwrap();
-            assert!(exists, "snapshot for generation {} must exist", generation);
-        }
-
-        drop(cleaner);
-    }
-
-    {
-        tracing::info!("---STEP 7: point in time recovery ({}) ---", recover_time);
+        tracing::info!("---STEP 6: point in time recovery ({}) ---", recover_time);
         let cleaner = DbFileCleaner::new(PATH);
         let db_job = start_db(4, make_server().await);
 
