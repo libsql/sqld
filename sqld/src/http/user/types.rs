@@ -10,6 +10,7 @@ use crate::query;
 #[derive(Debug, Deserialize, Serialize)]
 pub struct HttpQuery {
     pub statements: Vec<QueryObject>,
+    pub replication_index: Option<u64>,
 }
 
 #[derive(Debug, Serialize)]
