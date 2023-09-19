@@ -1,18 +1,17 @@
-use std::collections::hash_map::Entry;
-use std::collections::HashMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Weak};
 use std::time::Duration;
 
 use anyhow::{bail, Context as _};
-use async_lock::{RwLock, RwLockUpgradableReadGuard};
+use async_lock::RwLock;
 use bottomless::replicator::Options;
 use bytes::Bytes;
 use chrono::NaiveDateTime;
 use enclose::enclose;
+use futures::TryFutureExt;
 use futures_core::future::BoxFuture;
-use futures_core::Stream;
+use futures_core::{Stream, Future};
 use hyper::Uri;
 use rusqlite::ErrorCode;
 use sqld_libsql_bindings::wal_hook::TRANSPARENT_METHODS;
@@ -22,6 +21,7 @@ use tokio::task::{block_in_place, JoinSet};
 use tokio_util::io::StreamReader;
 use tonic::transport::Channel;
 use uuid::Uuid;
+use moka::future::Cache;
 
 use crate::connection::config::DatabaseConfigStore;
 use crate::connection::libsql::{open_db, LibSqlDbFactory};
@@ -249,8 +249,11 @@ impl<M: MakeNamespace> Clone for NamespaceStore<M> {
     }
 }
 
+type NamespaceEntry<T> = Arc<RwLock<Option<Namespace<T>>>>;
+
 struct NamespaceStoreInner<M: MakeNamespace> {
-    store: RwLock<HashMap<NamespaceName, Namespace<M::Database>>>,
+    // store: RwLock<HashMap<NamespaceName, Namespace<M::Database>>>,
+    store: Cache<NamespaceName, NamespaceEntry<M::Database>>,
     /// The namespace factory, to create new namespaces.
     make_namespace: M,
     allow_lazy_creation: bool,
@@ -258,9 +261,22 @@ struct NamespaceStoreInner<M: MakeNamespace> {
 
 impl<M: MakeNamespace> NamespaceStore<M> {
     pub fn new(make_namespace: M, allow_lazy_creation: bool) -> Self {
+        let store = Cache::<NamespaceName, NamespaceEntry<M::Database>>::builder()
+            .async_eviction_listener(|name, ns, _| Box::pin(async move {
+                tracing::info!("namespace `{name}` deallocated");
+                // shutdown namespace
+                if let Some(ns) = ns.write().await.take() {
+                    if let Err(e) = ns.destroy().await {
+                        tracing::error!("error deallocating `{name}`: {e}")
+                    }
+                }
+            }))
+        // TODO(marin): configurable capacity
+        .max_capacity(25)
+        .build();
         Self {
             inner: Arc::new(NamespaceStoreInner {
-                store: Default::default(),
+                store,
                 make_namespace,
                 allow_lazy_creation,
             }),
@@ -268,14 +284,15 @@ impl<M: MakeNamespace> NamespaceStore<M> {
     }
 
     pub async fn destroy(&self, namespace: NamespaceName) -> crate::Result<()> {
-        let mut lock = self.inner.store.write().await;
-        if let Some(ns) = lock.remove(&namespace) {
+        if let Some(ns) = self.inner.store.remove(&namespace).await {
             // FIXME: when destroying, we are waiting for all the tasks associated with the
             // allocation to finnish, which create a lot of contention on the lock. Need to use a
             // conccurent hashmap to deal with this issue.
 
             // deallocate in-memory resources
-            ns.destroy().await?;
+            if let Some(ns) = ns.write().await.take() {
+                ns.destroy().await?;
+            }
         }
 
         // destroy on-disk database and backups
@@ -294,8 +311,14 @@ impl<M: MakeNamespace> NamespaceStore<M> {
         namespace: NamespaceName,
         restore_option: RestoreOption,
     ) -> anyhow::Result<()> {
-        let mut lock = self.inner.store.write().await;
-        if let Some(ns) = lock.remove(&namespace) {
+        // The process for reseting is as follow:
+        // - get a lock on the namespace entry, if the entry exists, then it's a lock on the entry,
+        // if it doesn't exist, insert an empty entry and take a lock on it
+        // - destroy the old namespace
+        // - create a new namespace and insert it in the held lock
+        let entry = self.inner.store.get_with(namespace.clone(), async { Default::default() }).await;
+        let mut lock = entry.write().await;
+        if let Some(ns) = lock.take() {
             // FIXME: when destroying, we are waiting for all the tasks associated with the
             // allocation to finnish, which create a lot of contention on the lock. Need to use a
             // conccurent hashmap to deal with this issue.
@@ -319,7 +342,8 @@ impl<M: MakeNamespace> NamespaceStore<M> {
                 self.make_reset_cb(),
             )
             .await?;
-        lock.insert(namespace, ns);
+
+        lock.replace(ns);
 
         Ok(())
     }
@@ -344,66 +368,92 @@ impl<M: MakeNamespace> NamespaceStore<M> {
     }
 
     pub async fn fork(&self, from: NamespaceName, to: NamespaceName) -> crate::Result<()> {
-        let mut lock = self.inner.store.write().await;
-        if lock.contains_key(&to) {
-            return Err(crate::error::Error::NamespaceAlreadyExist(
-                to.as_str().to_string(),
-            ));
+        let to_entry = self.inner.store.get_with(to.clone(), async { Default::default() }).await;
+        let mut to_lock = to_entry.write().await;
+        if to_lock.is_some() {
+            return Err(crate::error::Error::NamespaceAlreadyExist(to.to_string()));
         }
 
         // check that the source namespace exists
-        let from_ns = match lock.entry(from.clone()) {
-            Entry::Occupied(e) => e.into_mut(),
-            Entry::Vacant(e) => {
-                // we just want to load the namespace into memory, so we refuse creation.
-                let ns = self
-                    .inner
-                    .make_namespace
-                    .create(
-                        from.clone(),
-                        RestoreOption::Latest,
-                        false,
-                        self.make_reset_cb(),
-                    )
-                    .await?;
-                e.insert(ns)
-            }
+        let from_entry = self.inner.store.try_get_with(from.clone(), async {
+            let ns = self
+                .inner
+                .make_namespace
+                .create(
+                    from.clone(),
+                    RestoreOption::Latest,
+                    false,
+                    self.make_reset_cb(),
+                )
+                .await?;
+            tracing::info!("loaded namespace: `{to}`");
+            Ok::<_, crate::error::Error>(Arc::new(RwLock::new(Some(ns))))
+        }).await
+        // find how to deal with Arc<Error>
+        .unwrap();
+
+        let from_lock = from_entry.read().await;
+        let Some(from_ns) = &*from_lock else {
+            return Err(crate::error::Error::NamespaceDoesntExist(to.to_string()));
         };
 
-        let forked = self
+        let to_ns = self
             .inner
             .make_namespace
             .fork(from_ns, to.clone(), self.make_reset_cb())
             .await?;
-        lock.insert(to.clone(), forked);
+
+        to_lock.replace(to_ns);
 
         Ok(())
     }
 
     pub async fn with<Fun, R>(&self, namespace: NamespaceName, f: Fun) -> crate::Result<R>
     where
-        Fun: FnOnce(&Namespace<M::Database>) -> R,
+        Fun: FnOnce(&Namespace<M::Database>) -> R + 'static,
     {
-        let lock = self.inner.store.upgradable_read().await;
-        if let Some(ns) = lock.get(&namespace) {
-            Ok(f(ns))
-        } else {
-            let mut lock = RwLockUpgradableReadGuard::upgrade(lock).await;
-            let ns = self
-                .inner
-                .make_namespace
-                .create(
-                    namespace.clone(),
-                    RestoreOption::Latest,
-                    self.inner.allow_lazy_creation,
-                    self.make_reset_cb(),
-                )
-                .await?;
-            let ret = f(&ns);
-            tracing::info!("loaded namespace: `{namespace}`");
-            lock.insert(namespace, ns);
-            Ok(ret)
-        }
+        let init = {
+            let namespace = namespace.clone();
+            async move {
+                let ns = self
+                    .inner
+                    .make_namespace
+                    .create(
+                        namespace.clone(),
+                        RestoreOption::Latest,
+                        self.inner.allow_lazy_creation,
+                        self.make_reset_cb(),
+                    )
+                    .await?;
+                tracing::info!("loaded namespace: `{namespace}`");
+
+                Ok(Some(ns))
+            } 
+        };
+
+        let f = { 
+            let name = namespace.clone();
+            move |ns: NamespaceEntry<M::Database>| async move {
+                let lock = ns.read().await;
+                match &*lock {
+                    Some(ns) => Ok(f(ns)),
+                    // the namespace was taken out of the entry
+                    None => Err(Error::NamespaceDoesntExist(name.to_string())),
+                } 
+            }
+        };
+
+        self.with_lock_or_init(namespace, f, init).await?
+    }
+
+    async fn with_lock_or_init<Fun, R, Init, Fut>(&self, namespace: NamespaceName, f: Fun, init: Init) -> crate::Result<R>
+    where
+        Fun: FnOnce(NamespaceEntry<M::Database>) -> Fut,
+        Fut: Future<Output = R>,
+        Init: Future<Output = crate::Result<Option<Namespace<M::Database>>>>,
+    {
+        let ns = self.inner.store.try_get_with(namespace.clone(), init.map_ok(|ns| Arc::new(RwLock::new(ns)))).await?;
+        Ok(f(ns).await)
     }
 
     pub async fn create(
@@ -411,29 +461,61 @@ impl<M: MakeNamespace> NamespaceStore<M> {
         namespace: NamespaceName,
         restore_option: RestoreOption,
     ) -> crate::Result<()> {
-        let lock = self.inner.store.upgradable_read().await;
-        if lock.contains_key(&namespace) {
-            return Err(crate::error::Error::NamespaceAlreadyExist(
-                namespace.as_str().to_owned(),
-            ));
-        }
+        let name = namespace.clone();
+        let init = async {
+            let ns = self
+                .inner
+                .make_namespace
+                .create(
+                    name.clone(),
+                    RestoreOption::Latest,
+                    false,
+                    self.make_reset_cb(),
+                )
+                .await;
+            match ns {
+                // the namespace already exist, load it, and let the `f` function fail
+                Ok(ns) => { 
+                    tracing::info!("loaded namespace: `{name}`");
+                    Ok(Some(ns))
+                },
+                // return an empty slot to put the new namespace in
+                Err(Error::NamespaceDoesntExist(_)) => Ok(None),
+                Err(e) => Err(e),
+            }
+        };
 
-        let ns = self
-            .inner
-            .make_namespace
-            .create(
-                namespace.clone(),
-                restore_option,
-                true,
-                self.make_reset_cb(),
-            )
-            .await?;
+        let f = {
+            let name = namespace.clone();
+            move |ns: NamespaceEntry<M::Database>| {
+                let ns = ns.clone();
+                let name = name.clone();
+                async move {
+                    let mut lock = ns.write().await;
+                    if lock.is_some() {
+                        return Err(Error::NamespaceAlreadyExist(name.to_string()));
+                    }
+                    let ns = self
+                        .inner
+                        .make_namespace
+                        .create(
+                            name.clone(),
+                            restore_option,
+                            true,
+                            self.make_reset_cb(),
+                        )
+                        .await?;
 
-        let mut lock = RwLockUpgradableReadGuard::upgrade(lock).await;
-        tracing::info!("loaded namespace: `{namespace}`");
-        lock.insert(namespace, ns);
+                    tracing::info!("loaded namespace: `{name}`");
 
-        Ok(())
+                    lock.replace(ns);
+
+                    Ok(())
+                }
+            }
+        };
+
+        self.with_lock_or_init(namespace, f, init).await?
     }
 
     pub(crate) async fn stats(&self, namespace: NamespaceName) -> crate::Result<Arc<Stats>> {

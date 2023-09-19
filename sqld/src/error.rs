@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use axum::response::IntoResponse;
 use hyper::StatusCode;
 use tonic::metadata::errors::InvalidMetadataValueBytes;
@@ -79,6 +81,9 @@ pub enum Error {
     ConflictingRestoreParameters,
     #[error("failed to fork database: {0}")]
     Fork(#[from] ForkError),
+    // This is for errors returned by moka
+    #[error(transparent)]
+    Ref(#[from] Arc<Self>),
 }
 
 trait ResponseError: std::error::Error {
@@ -92,6 +97,12 @@ trait ResponseError: std::error::Error {
 impl ResponseError for Error {}
 
 impl IntoResponse for Error {
+    fn into_response(self) -> axum::response::Response {
+        (&self).into_response()
+    }
+}
+
+impl IntoResponse for &Error {
     fn into_response(self) -> axum::response::Response {
         use Error::*;
 
@@ -129,6 +140,7 @@ impl IntoResponse for Error {
             LoadDumpExistingDb => self.format_err(StatusCode::BAD_REQUEST),
             ConflictingRestoreParameters => self.format_err(StatusCode::BAD_REQUEST),
             Fork(e) => e.into_response(),
+            Ref(this) => this.as_ref().into_response(),
         }
     }
 }
@@ -169,7 +181,7 @@ pub enum LoadDumpError {
 
 impl ResponseError for LoadDumpError {}
 
-impl IntoResponse for LoadDumpError {
+impl IntoResponse for &LoadDumpError {
     fn into_response(self) -> axum::response::Response {
         use LoadDumpError::*;
 
@@ -187,7 +199,7 @@ impl IntoResponse for LoadDumpError {
 
 impl ResponseError for ForkError {}
 
-impl IntoResponse for ForkError {
+impl IntoResponse for &ForkError {
     fn into_response(self) -> axum::response::Response {
         match self {
             ForkError::Internal(_)

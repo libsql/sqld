@@ -25,7 +25,6 @@ use crate::rpc::proxy::rpc::{DisconnectMessage, ExecuteResults};
 use crate::rpc::NAMESPACE_METADATA_KEY;
 use crate::stats::Stats;
 use crate::{Result, DEFAULT_AUTO_CHECKPOINT};
-
 use super::config::DatabaseConfigStore;
 use super::libsql::LibSqlConnection;
 use super::program::DescribeResult;
