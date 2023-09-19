@@ -1000,7 +1000,8 @@ fn checkpoint_db(data_path: &Path) -> anyhow::Result<()> {
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::DEFAULT_AUTO_CHECKPOINT;
+
+    const DEFAULT_AUTO_CHECKPOINT: u32 = 1000;
 
     #[test]
     fn write_and_read_from_frame_log() {

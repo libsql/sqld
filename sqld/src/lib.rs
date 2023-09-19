@@ -66,7 +66,6 @@ mod utils;
 
 const MAX_CONCURRENT_DBS: usize = 128;
 const DB_CREATE_TIMEOUT: Duration = Duration::from_secs(1);
-const DEFAULT_AUTO_CHECKPOINT: u32 = 1000;
 
 pub(crate) static BLOCKING_RT: Lazy<Runtime> = Lazy::new(|| {
     tokio::runtime::Builder::new_multi_thread()
@@ -463,6 +462,7 @@ where
             max_total_response_size: self.db_config.max_total_response_size,
             checkpoint_interval: self.db_config.checkpoint_interval,
             disable_namespace: self.disable_namespaces,
+            auto_checkpoint: self.db_config.auto_checkpoint,
         };
         let factory = PrimaryNamespaceMaker::new(conf);
         let namespaces = NamespaceStore::new(factory, false);

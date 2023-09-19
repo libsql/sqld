@@ -24,7 +24,7 @@ use crate::rpc::proxy::rpc::query_result::RowResult;
 use crate::rpc::proxy::rpc::{DisconnectMessage, ExecuteResults};
 use crate::rpc::NAMESPACE_METADATA_KEY;
 use crate::stats::Stats;
-use crate::{Result, DEFAULT_AUTO_CHECKPOINT};
+use crate::Result;
 
 use super::config::DatabaseConfigStore;
 use super::libsql::LibSqlConnection;
@@ -88,7 +88,7 @@ impl MakeConnection for MakeWriteProxyConnection {
             QueryBuilderConfig {
                 max_size: Some(self.max_response_size),
                 max_total_size: Some(self.max_total_response_size),
-                auto_checkpoint: DEFAULT_AUTO_CHECKPOINT,
+                auto_checkpoint: 1000,
             },
             self.namespace.clone(),
         )

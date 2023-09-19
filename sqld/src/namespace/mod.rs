@@ -620,6 +620,7 @@ pub struct PrimaryNamespaceConfig {
     pub max_total_response_size: u64,
     pub checkpoint_interval: Option<Duration>,
     pub disable_namespace: bool,
+    pub auto_checkpoint: u32,
 }
 
 pub type DumpStream =
@@ -678,20 +679,13 @@ impl Namespace<PrimaryDatabase> {
         };
 
         let is_fresh_db = check_fresh_db(&db_path)?;
-        // switch frame-count checkpoint to time-based one
-        let auto_checkpoint =
-            if config.checkpoint_interval.is_some() && config.bottomless_replication.is_some() {
-                0
-            } else {
-                DEFAULT_AUTO_CHECKPOINT
-            };
 
         let logger = Arc::new(ReplicationLogger::open(
             &db_path,
             config.max_log_size,
             config.max_log_duration,
             is_dirty,
-            auto_checkpoint,
+            config.auto_checkpoint,
             Box::new({
                 let name = name.clone();
                 let cb = config.snapshot_callback.clone();
@@ -727,7 +721,7 @@ impl Namespace<PrimaryDatabase> {
             config.extensions.clone(),
             config.max_response_size,
             config.max_total_response_size,
-            auto_checkpoint,
+            config.auto_checkpoint,
             logger.new_frame_notifier.subscribe(),
         )
         .await?
@@ -980,7 +974,7 @@ async fn run_storage_monitor(db_path: PathBuf, stats: Weak<Stats>) -> anyhow::Re
             let ctx = &mut ();
             // We can safely open db with DEFAULT_AUTO_CHECKPOINT, since monitor is read-only: it 
             // won't produce new updates, frames or generate checkpoints.
-            match open_db(&db_path, &TRANSPARENT_METHODS, ctx, Some(rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY), DEFAULT_AUTO_CHECKPOINT) {
+            match open_db(&db_path, &TRANSPARENT_METHODS, ctx, Some(rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY), 1000) {
                 Ok(conn) => {
                     if let Ok(storage_bytes_used) =
                         conn.query_row("select sum(pgsize) from dbstat;", [], |row| {

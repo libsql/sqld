@@ -54,6 +54,7 @@ async fn configure_server(
             max_total_response_size: 10000000 * 4096,
             snapshot_exec: None,
             checkpoint_interval: None,
+            auto_checkpoint: 1000,
         },
         admin_api_config: if let Some(addr) = admin_addr {
             Some(AdminApiConfig {

@@ -120,6 +120,7 @@ pub struct DbConfig {
     pub max_total_response_size: u64,
     pub snapshot_exec: Option<String>,
     pub checkpoint_interval: Option<Duration>,
+    pub auto_checkpoint: u32,
 }
 
 impl Default for DbConfig {
