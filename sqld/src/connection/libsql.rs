@@ -1,12 +1,11 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use crossbeam::channel::RecvTimeoutError;
+use parking_lot::Mutex;
 use rusqlite::{ErrorCode, OpenFlags, StatementStatus};
 use sqld_libsql_bindings::wal_hook::WalMethodsHook;
-use tokio::sync::{oneshot, watch};
+use tokio::sync::watch;
 use tokio::time::{Duration, Instant};
-use tracing::warn;
 
 use crate::auth::{Authenticated, Authorized, Permission};
 use crate::error::Error;
@@ -18,12 +17,8 @@ use crate::replication::FrameNo;
 use crate::stats::Stats;
 use crate::Result;
 
-use super::config::DatabaseConfigStore;
-use super::program::{Cond, DescribeCol, DescribeParam, DescribeResponse, DescribeResult};
+use super::config::DatabaseConfigStore; use super::program::{Cond, DescribeCol, DescribeParam, DescribeResponse, DescribeResult};
 use super::{MakeConnection, Program, Step, TXN_TIMEOUT};
-
-/// Internal message used to communicate between the database thread and the `LibSqlDb` handle.
-type ExecCallback = Box<dyn FnOnce(Result<&mut Connection>) -> anyhow::Result<()> + Send + 'static>;
 
 pub struct LibSqlDbFactory<W: WalHook + 'static> {
     db_path: PathBuf,
@@ -38,7 +33,7 @@ pub struct LibSqlDbFactory<W: WalHook + 'static> {
     current_frame_no_receiver: watch::Receiver<Option<FrameNo>>,
     /// In wal mode, closing the last database takes time, and causes other databases creation to
     /// return sqlite busy. To mitigate that, we hold on to one connection
-    _db: Option<LibSqlConnection>,
+    _db: Option<LibSqlConnection<W>>,
 }
 
 impl<W: WalHook + 'static> LibSqlDbFactory<W>
@@ -83,7 +78,7 @@ where
     }
 
     /// Tries to create a database, retrying if the database is busy.
-    async fn try_create_db(&self) -> Result<LibSqlConnection> {
+    async fn try_create_db(&self) -> Result<LibSqlConnection<W>> {
         // try 100 times to acquire initial db connection.
         let mut retries = 0;
         loop {
@@ -111,7 +106,7 @@ where
         }
     }
 
-    async fn create_database(&self) -> Result<LibSqlConnection> {
+    async fn create_database(&self) -> Result<LibSqlConnection<W>> {
         LibSqlConnection::new(
             self.db_path.clone(),
             self.extensions.clone(),
@@ -136,25 +131,25 @@ where
     W: WalHook + 'static + Sync + Send,
     W::Context: Send + 'static,
 {
-    type Connection = LibSqlConnection;
+    type Connection = LibSqlConnection<W>;
 
     async fn create(&self) -> Result<Self::Connection, Error> {
         self.create_database().await
     }
 }
 
-#[derive(Clone, Debug)]
-pub struct LibSqlConnection {
-    sender: crossbeam::channel::Sender<ExecCallback>,
+#[derive(Clone)]
+pub struct LibSqlConnection<W: WalHook> {
+    conn: Arc<Mutex<Connection<W>>>,
 }
 
 pub fn open_db<'a, W>(
     path: &Path,
     wal_methods: &'static WalMethodsHook<W>,
-    hook_ctx: &'a mut W::Context,
+    hook_ctx: W::Context,
     flags: Option<OpenFlags>,
     auto_checkpoint: u32,
-) -> Result<sqld_libsql_bindings::Connection<'a>, rusqlite::Error>
+) -> Result<sqld_libsql_bindings::Connection<W>, rusqlite::Error>
 where
     W: WalHook,
 {
@@ -167,8 +162,12 @@ where
     sqld_libsql_bindings::Connection::open(path, flags, wal_methods, hook_ctx, auto_checkpoint)
 }
 
-impl LibSqlConnection {
-    pub async fn new<W>(
+impl<W> LibSqlConnection<W>
+where
+    W: WalHook,
+    W::Context: Send,
+{
+    pub async fn new(
         path: impl AsRef<Path> + Send + 'static,
         extensions: Arc<[PathBuf]>,
         wal_hook: &'static WalMethodsHook<W>,
@@ -177,77 +176,62 @@ impl LibSqlConnection {
         config_store: Arc<DatabaseConfigStore>,
         builder_config: QueryBuilderConfig,
         current_frame_no_receiver: watch::Receiver<Option<FrameNo>>,
-    ) -> crate::Result<Self>
-    where
-        W: WalHook,
-        W::Context: Send,
-    {
-        let (sender, receiver) = crossbeam::channel::unbounded::<ExecCallback>();
-        let (init_sender, init_receiver) = oneshot::channel();
+    ) -> crate::Result<Self> {
 
-        crate::BLOCKING_RT.spawn_blocking(move || {
-            let mut ctx = hook_ctx;
-            let mut connection = match Connection::new(
+        let conn = tokio::task::spawn_blocking(move || {
+            Connection::new(
                 path.as_ref(),
                 extensions,
                 wal_hook,
-                &mut ctx,
+                hook_ctx,
                 stats,
                 config_store,
                 builder_config,
                 current_frame_no_receiver,
-            ) {
-                Ok(conn) => {
-                    let Ok(_) = init_sender.send(Ok(())) else { return };
-                    conn
-                }
-                Err(e) => {
-                    let _ = init_sender.send(Err(e));
-                    return;
-                }
-            };
+            )
+        }).await.unwrap()?;
+        // tokio::task::spawn_blocking(move || {
+        //     let mut ctx = hook_ctx;
+        //
+        //     loop {
+        //         let exec = match connection.timeout_deadline {
+        //             Some(deadline) => match receiver.recv_deadline(deadline) {
+        //                 Ok(msg) => msg,
+        //                 Err(RecvTimeoutError::Timeout) => {
+        //                     warn!("transaction timed out");
+        //                     connection.rollback();
+        //                     connection.timed_out = true;
+        //                     connection.timeout_deadline = None;
+        //                     continue;
+        //                 }
+        //                 Err(RecvTimeoutError::Disconnected) => break,
+        //             },
+        //             None => match receiver.recv() {
+        //                 Ok(msg) => msg,
+        //                 Err(_) => break,
+        //             },
+        //         };
+        //
+        //         let maybe_conn = if !connection.timed_out {
+        //             Ok(&mut connection)
+        //         } else {
+        //             Err(Error::LibSqlTxTimeout)
+        //         };
+        //
+        //         if exec(maybe_conn).is_err() {
+        //             tracing::warn!("Database connection closed unexpectedly");
+        //             return;
+        //         };
+        //     }
+        // });
 
-            loop {
-                let exec = match connection.timeout_deadline {
-                    Some(deadline) => match receiver.recv_deadline(deadline.into()) {
-                        Ok(msg) => msg,
-                        Err(RecvTimeoutError::Timeout) => {
-                            warn!("transaction timed out");
-                            connection.rollback();
-                            connection.timed_out = true;
-                            connection.timeout_deadline = None;
-                            continue;
-                        }
-                        Err(RecvTimeoutError::Disconnected) => break,
-                    },
-                    None => match receiver.recv() {
-                        Ok(msg) => msg,
-                        Err(_) => break,
-                    },
-                };
-
-                let maybe_conn = if !connection.timed_out {
-                    Ok(&mut connection)
-                } else {
-                    Err(Error::LibSqlTxTimeout)
-                };
-
-                if exec(maybe_conn).is_err() {
-                    tracing::warn!("Database connection closed unexpectedly");
-                    return;
-                };
-            }
-        });
-
-        init_receiver.await??;
-
-        Ok(Self { sender })
+        Ok(Self { conn: Arc::new(Mutex::new(conn)) })
     }
 }
 
-struct Connection<'a> {
+struct Connection<W: WalHook> {
     timeout_deadline: Option<Instant>,
-    conn: sqld_libsql_bindings::Connection<'a>,
+    conn: sqld_libsql_bindings::Connection<W>,
     timed_out: bool,
     stats: Arc<Stats>,
     config_store: Arc<DatabaseConfigStore>,
@@ -255,12 +239,12 @@ struct Connection<'a> {
     current_frame_no_receiver: watch::Receiver<Option<FrameNo>>,
 }
 
-impl<'a> Connection<'a> {
-    fn new<W: WalHook>(
+impl<W: WalHook> Connection<W> {
+    fn new(
         path: &Path,
         extensions: Arc<[PathBuf]>,
         wal_methods: &'static WalMethodsHook<W>,
-        hook_ctx: &'a mut W::Context,
+        hook_ctx: W::Context,
         stats: Arc<Stats>,
         config_store: Arc<DatabaseConfigStore>,
         builder_config: QueryBuilderConfig,
@@ -306,6 +290,13 @@ impl<'a> Connection<'a> {
             let res = self.execute_step(step, &results, &mut builder)?;
             results.push(res);
         }
+
+        dbg!();
+        self.conn.pragma_query(None, "lock_status", |row| {
+            dbg!(row);
+            Ok(())
+        }).unwrap();
+        dbg!();
 
         // A transaction is still open, set up a timeout
         if is_autocommit_before && !self.conn.is_autocommit() {
@@ -537,7 +528,10 @@ fn check_describe_auth(auth: Authenticated) -> Result<()> {
 }
 
 #[async_trait::async_trait]
-impl super::Connection for LibSqlConnection {
+impl<W> super::Connection for LibSqlConnection<W>
+where W: WalHook + 'static,
+      W::Context: Send,
+{
     async fn execute_program<B: QueryResultBuilder>(
         &self,
         pgm: Program,
@@ -546,29 +540,17 @@ impl super::Connection for LibSqlConnection {
         _replication_index: Option<FrameNo>,
     ) -> Result<(B, State)> {
         check_program_auth(auth, &pgm)?;
-        let (resp, receiver) = oneshot::channel();
-        let cb = Box::new(move |maybe_conn: Result<&mut Connection>| {
-            let res = maybe_conn.and_then(|c| {
-                let b = c.run(pgm, builder)?;
-                let state = if c.conn.is_autocommit() {
-                    State::Init
-                } else {
-                    State::Txn
-                };
-
-                Ok((b, state))
-            });
-
-            if resp.send(res).is_err() {
-                anyhow::bail!("connection closed");
-            }
-
-            Ok(())
-        });
-
-        let _: Result<_, _> = self.sender.send(cb);
-
-        Ok(receiver.await??)
+        let conn = self.conn.clone();
+        tokio::task::spawn_blocking(move || -> crate::Result<_> {
+            let mut conn = conn.lock();
+            let builder = conn.run(pgm, builder)?;
+            let state = if conn.is_autocommit() {
+                State::Init
+            } else {
+                State::Txn
+            };
+            Ok((builder, state))
+        }).await.unwrap()
     }
 
     async fn describe(
@@ -578,48 +560,24 @@ impl super::Connection for LibSqlConnection {
         _replication_index: Option<FrameNo>,
     ) -> Result<DescribeResult> {
         check_describe_auth(auth)?;
-        let (resp, receiver) = oneshot::channel();
-        let cb = Box::new(move |maybe_conn: Result<&mut Connection>| {
-            let res = maybe_conn.and_then(|c| c.describe(&sql));
+        let conn = self.conn.clone();
+        let res = tokio::task::spawn_blocking(move || {
+            conn.lock().describe(&sql)
+        }).await.unwrap();
 
-            if resp.send(res).is_err() {
-                anyhow::bail!("connection closed");
-            }
-
-            Ok(())
-        });
-
-        let _: Result<_, _> = self.sender.send(cb);
-
-        Ok(receiver.await?)
+        Ok(res)
     }
 
     async fn is_autocommit(&self) -> Result<bool> {
-        let (resp, receiver) = oneshot::channel();
-        let cb = Box::new(move |maybe_conn: Result<&mut Connection>| {
-            let res = maybe_conn.map(|c| c.is_autocommit());
-            if resp.send(res).is_err() {
-                anyhow::bail!("connection closed");
-            }
-            Ok(())
-        });
-
-        let _: Result<_, _> = self.sender.send(cb);
-        receiver.await?
+        Ok(self.conn.lock().is_autocommit())
     }
 
     async fn checkpoint(&self) -> Result<()> {
-        let (resp, receiver) = oneshot::channel();
-        let cb = Box::new(move |maybe_conn: Result<&mut Connection>| {
-            let res = maybe_conn.and_then(|c| c.checkpoint());
-            if resp.send(res).is_err() {
-                anyhow::bail!("connection closed");
-            }
-            Ok(())
-        });
-
-        let _: Result<_, _> = self.sender.send(cb);
-        receiver.await?
+        let conn = self.conn.clone();
+        tokio::task::spawn_blocking(move || {
+            conn.lock().checkpoint()
+        }).await.unwrap()?;
+        Ok(())
     }
 }
 

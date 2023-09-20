@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use parking_lot::Mutex as PMutex;
 use rusqlite::types::ValueRef;
-use sqld_libsql_bindings::wal_hook::TRANSPARENT_METHODS;
+use sqld_libsql_bindings::wal_hook::{TRANSPARENT_METHODS, TransparentMethods};
 use tokio::sync::{watch, Mutex};
 use tonic::metadata::BinaryMetadataValue;
 use tonic::transport::Channel;
@@ -99,7 +99,7 @@ impl MakeConnection for MakeWriteProxyConnection {
 
 pub struct WriteProxyConnection {
     /// Lazily initialized read connection
-    read_conn: LibSqlConnection,
+    read_conn: LibSqlConnection<TransparentMethods>,
     write_proxy: ProxyClient<Channel>,
     state: Mutex<State>,
     client_id: Uuid,
