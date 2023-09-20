@@ -9,7 +9,6 @@ use std::io::ErrorKind;
 use std::sync::Arc;
 use tokio_util::io::ReaderStream;
 use url::Url;
-use uuid::Uuid;
 
 use crate::connection::config::DatabaseConfig;
 use crate::error::LoadDumpError;
@@ -40,10 +39,6 @@ where
         .route(
             "/v1/namespaces/:namespace/create",
             post(handle_create_namespace),
-        )
-        .route(
-            "/v1/namespaces/:namespace/restore",
-            post(handle_restore_namespace),
         )
         .route("/v1/namespaces/:namespace", delete(handle_delete_namespace))
         .route("/v1/namespaces/:namespace/stats", get(stats::handle_stats))
@@ -178,30 +173,6 @@ async fn handle_delete_namespace<F: MakeNamespace>(
     app_state
         .namespaces
         .destroy(NamespaceName::from_string(namespace)?)
-        .await?;
-    Ok(())
-}
-
-#[derive(Debug, Deserialize)]
-struct RestoreReq {
-    generation: Option<Uuid>,
-    timestamp: Option<NaiveDateTime>,
-}
-
-async fn handle_restore_namespace<F: MakeNamespace>(
-    State(app_state): State<Arc<AppState<F>>>,
-    Path(namespace): Path<String>,
-    Json(req): Json<RestoreReq>,
-) -> crate::Result<()> {
-    let restore_option = match (req.generation, req.timestamp) {
-        (None, None) => RestoreOption::Latest,
-        (Some(generation), None) => RestoreOption::Generation(generation),
-        (None, Some(timestamp)) => RestoreOption::PointInTime(timestamp),
-        (Some(_), Some(_)) => return Err(crate::Error::ConflictingRestoreParameters),
-    };
-    app_state
-        .namespaces
-        .reset(NamespaceName::from_string(namespace)?, restore_option)
         .await?;
     Ok(())
 }

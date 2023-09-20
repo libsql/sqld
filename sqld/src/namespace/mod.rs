@@ -46,7 +46,7 @@ use self::fork::ForkTask;
 mod fork;
 pub type ResetCb = Box<dyn Fn(ResetOp) + Send + Sync + 'static>;
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Clone, PartialEq, Eq, Hash)]
 pub struct NamespaceName(Bytes);
 
 impl fmt::Debug for NamespaceName {

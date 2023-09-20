@@ -158,17 +158,11 @@ impl ForkTask<'_> {
                     }
                 }
             }
-            let dest_path = self
-                .base_path
-                .join("dbs")
-                .join(self.dest_namespace.as_str());
-            tokio::fs::rename(temp_dir.path(), dest_path).await?;
         }
-
         data_file.shutdown().await?;
         Ok(())
     }
-    
+
     async fn restore_from_backup(
         restore_to: PointInTimeRestore,
         db_path: PathBuf,
