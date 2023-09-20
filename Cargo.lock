@@ -776,8 +776,8 @@ dependencies = [
  "chrono",
  "crc",
  "futures",
+ "libsql-bindings",
  "rand",
- "sqld-libsql-bindings",
  "tokio",
  "tokio-util",
  "tracing",
@@ -2383,6 +2383,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "libsql-bindings"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "once_cell",
+ "rusqlite",
+ "tracing",
+]
+
+[[package]]
 name = "libsql-client"
 version = "0.6.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2395,6 +2405,85 @@ dependencies = [
  "reqwest",
  "serde_json",
  "url",
+]
+
+[[package]]
+name = "libsql-server"
+version = "0.20.3"
+dependencies = [
+ "anyhow",
+ "arbitrary",
+ "async-lock",
+ "async-trait",
+ "aws-config",
+ "aws-sdk-s3",
+ "axum",
+ "axum-extra",
+ "base64 0.21.4",
+ "bincode",
+ "bottomless",
+ "bytemuck",
+ "bytes 1.5.0",
+ "bytesize",
+ "chrono",
+ "clap",
+ "console-subscriber",
+ "crc",
+ "crossbeam",
+ "enclose",
+ "env_logger",
+ "fallible-iterator 0.3.0",
+ "futures",
+ "futures-core",
+ "hmac",
+ "hyper",
+ "hyper-rustls 0.24.1 (git+https://github.com/rustls/hyper-rustls.git?rev=163b3f5)",
+ "hyper-tungstenite",
+ "insta",
+ "itertools 0.10.5",
+ "jsonwebtoken",
+ "libsql-bindings",
+ "libsql-client",
+ "memmap",
+ "mimalloc",
+ "nix",
+ "once_cell",
+ "parking_lot",
+ "pin-project-lite",
+ "priority-queue",
+ "proptest",
+ "prost",
+ "prost-build",
+ "protobuf-src",
+ "rand",
+ "regex",
+ "reqwest",
+ "rusqlite",
+ "rustls 0.21.7",
+ "rustls-pemfile",
+ "semver",
+ "serde",
+ "serde_json",
+ "sha2",
+ "sha256",
+ "sqlite3-parser",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tokio-stream",
+ "tokio-tungstenite",
+ "tokio-util",
+ "tonic",
+ "tonic-build",
+ "tonic-web",
+ "tower",
+ "tower-http 0.3.5",
+ "tracing",
+ "tracing-panic",
+ "tracing-subscriber",
+ "url",
+ "uuid",
+ "vergen",
 ]
 
 [[package]]
@@ -3763,95 +3852,6 @@ name = "spin"
 version = "0.5.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6e63cff320ae2c57904679ba7cb63280a3dc4613885beafb148ee7bf9aa9042d"
-
-[[package]]
-name = "sqld"
-version = "0.20.3"
-dependencies = [
- "anyhow",
- "arbitrary",
- "async-lock",
- "async-trait",
- "aws-config",
- "aws-sdk-s3",
- "axum",
- "axum-extra",
- "base64 0.21.4",
- "bincode",
- "bottomless",
- "bytemuck",
- "bytes 1.5.0",
- "bytesize",
- "chrono",
- "clap",
- "console-subscriber",
- "crc",
- "crossbeam",
- "enclose",
- "env_logger",
- "fallible-iterator 0.3.0",
- "futures",
- "futures-core",
- "hmac",
- "hyper",
- "hyper-rustls 0.24.1 (git+https://github.com/rustls/hyper-rustls.git?rev=163b3f5)",
- "hyper-tungstenite",
- "insta",
- "itertools 0.10.5",
- "jsonwebtoken",
- "libsql-client",
- "memmap",
- "mimalloc",
- "nix",
- "once_cell",
- "parking_lot",
- "pin-project-lite",
- "priority-queue",
- "proptest",
- "prost",
- "prost-build",
- "protobuf-src",
- "rand",
- "regex",
- "reqwest",
- "rusqlite",
- "rustls 0.21.7",
- "rustls-pemfile",
- "semver",
- "serde",
- "serde_json",
- "sha2",
- "sha256",
- "sqld-libsql-bindings",
- "sqlite3-parser",
- "tempfile",
- "thiserror",
- "tokio",
- "tokio-stream",
- "tokio-tungstenite",
- "tokio-util",
- "tonic",
- "tonic-build",
- "tonic-web",
- "tower",
- "tower-http 0.3.5",
- "tracing",
- "tracing-panic",
- "tracing-subscriber",
- "url",
- "uuid",
- "vergen",
-]
-
-[[package]]
-name = "sqld-libsql-bindings"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "once_cell",
- "rusqlite",
- "tracing",
-]
 
 [[package]]
 name = "sqlite3-parser"

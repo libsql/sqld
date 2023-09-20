@@ -63,7 +63,7 @@ The script generates the following files:
 To start a `sqld` server in primary mode, run:
 
 ```console
-sqld \
+libsql-server \
   --http-listen-addr 127.0.0.1:8081 \
   --grpc-listen-addr 127.0.0.1:5001 \
   --grpc-tls \
@@ -72,14 +72,14 @@ sqld \
   --grpc-key-file server_key.pem
 ```
 
-You now have a `sqld` primary server listening to SQL over HTTP at `127.0.0.1:8081` and gRPC with TLS at `127.0.0.1:5001`.
+You now have a `libsql-server` primary server listening to SQL over HTTP at `127.0.0.1:8081` and gRPC with TLS at `127.0.0.1:5001`.
 
 ### Launching a replica server
 
-To start a a `sqld` server in replica mode, run:
+To start a a `libsql-server` server in replica mode, run:
 
 ```console
-sqld \
+libsql-server \
   --http-listen-addr 127.0.0.1:8082 \
   --primary-grpc-url https://127.0.0.1:5001 \
   --primary-grpc-tls \
@@ -171,7 +171,7 @@ sqld --snapshot-exec ./snapshot.sh --max-log-duration 5
 When you write to the `sqld` database, you will eventually see log line such as:
 
 ```console
-2023-08-11T08:21:04.183564Z  INFO sqld::replication::snapshot: snapshot `e126f594-90f4-45be-9350-bc8a01160de9-0-2.snap` successfully created
+2023-08-11T08:21:04.183564Z  INFO libsql-server::replication::snapshot: snapshot `e126f594-90f4-45be-9350-bc8a01160de9-0-2.snap` successfully created
 Generated incremental snapshot data.sqld/dbs/default/snapshots/e126f594-90f4-45be-9350-bc8a01160de9-0-2.snap
 ```
 

@@ -108,7 +108,7 @@ jobs:
         submodules: recursive
     - name: Test openssl
       shell: bash {0}
-      run: cargo tree -p sqld -i openssl; [ $? = 101 ]
+      run: cargo tree -p libsql-server -i openssl; [ $? = 101 ]
 
   docker:
     runs-on: ubuntu-latest
@@ -126,4 +126,4 @@ jobs:
         uses: docker/build-push-action@v3
         with:
           context: .
-          tags: sqld:unstable
+          tags: libsql-server:unstable

@@ -1,6 +1,6 @@
-# SQLD HTTP API
+# Libsql-server HTTP API
 
-This is the documentation for the sqld HTTP API.
+This is the documentation for the libsql-server HTTP API.
 
 ## Usage
 
