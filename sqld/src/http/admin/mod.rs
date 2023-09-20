@@ -120,13 +120,20 @@ async fn handle_create_namespace<M: MakeNamespace>(
     Ok(())
 }
 
+#[derive(Debug, Deserialize)]
+struct ForkNamespaceReq {
+    timestamp: NaiveDateTime,
+}
+
 async fn handle_fork_namespace<M: MakeNamespace>(
     State(app_state): State<Arc<AppState<M>>>,
     Path((from, to)): Path<(String, String)>,
+    req: Option<Json<ForkNamespaceReq>>,
 ) -> crate::Result<()> {
+    let timestamp = req.map(|v| v.timestamp);
     let from = NamespaceName::from_string(from)?;
     let to = NamespaceName::from_string(to)?;
-    app_state.namespaces.fork(from, to).await?;
+    app_state.namespaces.fork(from, to, timestamp).await?;
     Ok(())
 }
 
