@@ -1,4 +1,4 @@
-# The sqld HTTP API v1 specification ("Hrana over HTTP")
+# The libsql-server HTTP API v1 specification ("Hrana over HTTP")
 
 Version 1 of the HTTP API ("Hrana over HTTP") is designed to complement the
 WebSocket-based Hrana protocol for use cases that don't require stateful

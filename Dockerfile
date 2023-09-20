@@ -1,4 +1,4 @@
-# build sqld
+# build libsql-server
 FROM rust:slim-bullseye AS chef
 RUN apt update \
     && apt install -y libclang-dev clang \
@@ -23,18 +23,18 @@ FROM chef AS builder
 COPY --from=planner /recipe.json recipe.json
 RUN cargo chef cook --release --recipe-path recipe.json
 COPY . .
-RUN cargo build -p sqld --release
+RUN cargo build -p libsql-server --release
 
 # runtime
 FROM debian:bullseye-slim
-COPY --from=builder /target/release/sqld /bin/sqld
-RUN groupadd --system --gid 666 sqld
-RUN adduser --system --home /var/lib/sqld --uid 666 --gid 666 sqld
+COPY --from=builder /target/release/libsql-server /bin/libsql-server
+RUN groupadd --system --gid 666 libsql-server
+RUN adduser --system --home /var/lib/libsql-server --uid 666 --gid 666 libsql-server
 RUN apt-get update && apt-get install -y ca-certificates
 COPY docker-entrypoint.sh /usr/local/bin
 ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
-VOLUME [ "/var/lib/sqld" ]
-WORKDIR /var/lib/sqld
-USER sqld
+VOLUME [ "/var/lib/libsql-server" ]
+WORKDIR /var/lib/libsql-server
+USER libsql-server
 EXPOSE 5001 8080
-CMD ["/bin/sqld"]
+CMD ["/bin/libsql-server"]

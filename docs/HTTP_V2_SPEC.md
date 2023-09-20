@@ -1,4 +1,4 @@
-# The sqld HTTP API v2 specification ("Hrana over HTTP")
+# The libsql-server HTTP API v2 specification ("Hrana over HTTP")
 
 Version 2 of the HTTP API ("Hrana over HTTP") exposes stateful streams from
 Hrana over HTTP. It provides functionality equivalent to Hrana and it is useful

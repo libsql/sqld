@@ -1,13 +1,13 @@
-# `sqld` - a server mode for libSQL
+# `Libsql-server` - a server mode for libSQL
 
-The `sqld` ("SQL daemon") project is a server mode for
+The `libsql-server` project is a server mode for
 [libSQL](https://github.com/libsql/libsql/).
 
 Embedded SQL databases such as libSQL and SQLite are great for a lot of use
 cases, but sometimes you really do want to consume your database as a server.
 For example, with apps running on serverless infrastructure, fitting a database
 engine might be difficult given the limited size of the hardware. And even when
-it's _possible_, it might be really inconvenient. We created `sqld` for this use
+it's _possible_, it might be really inconvenient. We created `libsql-server` for this use
 case.
 
 ## Features
@@ -21,12 +21,12 @@ case.
 
 ## Build and run
 
-Follow the [instructions](./docs/BUILD-RUN.md) to build and run `sqld`
+Follow the [instructions](./docs/BUILD-RUN.md) to build and run `libsql-server`
 using Homebrew, Docker, or your own Rust toolchain.
 
 ## Client libraries
 
-The following client libraries enable your app to query `sqld` programmatically:
+The following client libraries enable your app to query `libsql-server` programmatically:
 
 * [TypeScript and JavaScript](https://github.com/libsql/libsql-client-ts)
 * [Rust](https://github.com/libsql/libsql-client-rs)
@@ -60,16 +60,16 @@ extension directory
 
 ## Integration with S3 bottomless replication
 
-`sqld` is integrated with [bottomless replication subproject]. With bottomless
+`libsql-server` is integrated with [bottomless replication subproject]. With bottomless
 replication, the database state is continuously backed up to S3-compatible
 storage. Each backup session is called a "generation" and consists of the main
 database file snapshot and replicates [SQLite WAL] pages.
 
-In order to enable automatic replication to S3 storage, compile `sqld` with `-F bottomless` flag
-and run `sqld` with `--enable-bottomless-replication` parameter:
+In order to enable automatic replication to S3 storage, compile `libsql-server` with `-F bottomless` flag
+and run `libsql-server` with `--enable-bottomless-replication` parameter:
 
 ```bash
-sqld --http-listen-addr=127.0.0.1:8000 --enable-bottomless-replication
+libsql-server --http-listen-addr=127.0.0.1:8000 --enable-bottomless-replication
 ```
 
 [bottomless replication subproject]: ./bottomless
@@ -110,4 +110,4 @@ This project is licensed under the MIT license.
 
 ### Contribution
 
-Unless you explicitly state otherwise, any contribution intentionally submitted for inclusion in `sqld` by you, shall be licensed as MIT, without any additional terms or conditions.
+Unless you explicitly state otherwise, any contribution intentionally submitted for inclusion in `libsql-server` by you, shall be licensed as MIT, without any additional terms or conditions.

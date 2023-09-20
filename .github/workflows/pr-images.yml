@@ -1,4 +1,4 @@
-name: Create and publish sqld binaried and Docker image
+name: Create and publish libsql-server binaried and Docker image
 
 on:
   pull_request:
