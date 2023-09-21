@@ -264,7 +264,7 @@ unsafe impl WalHook for ReplicationLoggerHook {
                 let mut replicator = replicator.lock().unwrap();
                 let prev = replicator.new_generation();
                 if let Err(e) =
-                    runtime.block_on(async move { replicator.try_snapshot(prev).await })
+                    runtime.block_on(async move { replicator.snapshot(prev, false).await })
                 {
                     tracing::error!("Failed to snapshot the main db file during checkpoint: {e}");
                     return SQLITE_IOERR_WRITE;

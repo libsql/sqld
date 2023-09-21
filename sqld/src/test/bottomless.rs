@@ -7,6 +7,7 @@ use futures_core::Future;
 use itertools::Itertools;
 use libsql_client::{Connection, QueryResult, Statement, Value};
 use serde_json::json;
+use std::collections::BTreeSet;
 use std::net::{SocketAddr, ToSocketAddrs};
 use std::path::PathBuf;
 use tokio::time::sleep;
@@ -104,6 +105,7 @@ async fn backup_restore() {
         bucket_name: BUCKET.to_string(),
         max_batch_interval: Duration::from_millis(250),
         restore_transaction_page_swap_after: 1, // in this test swap should happen at least once
+        snapshot_interval: Some(Duration::from_millis(500)),
         ..bottomless::replicator::Options::from_env().unwrap()
     };
     let connection_addr = Url::parse(&format!("http://localhost:{}", PORT)).unwrap();
@@ -219,7 +221,7 @@ async fn backup_restore() {
         let cleaner = DbFileCleaner::new(PATH);
         let db_job = start_db(4, make_server().await);
 
-        sleep(Duration::from_secs(2)).await;
+        sleep(Duration::from_secs(3)).await;
 
         assert_updates(&connection_addr, ROWS, OPS, "B").await;
 
@@ -475,7 +477,11 @@ async fn s3_client() -> Result<Client> {
     Ok(client)
 }
 
-async fn list_generations(bucket: &str, db_id: &str, namespace: &str) -> Result<Vec<uuid::Uuid>> {
+async fn list_generations(
+    bucket: &str,
+    db_id: &str,
+    namespace: &str,
+) -> Result<BTreeSet<uuid::Uuid>> {
     let client = s3_client().await?;
     let resp = client
         .list_objects()
@@ -483,13 +489,13 @@ async fn list_generations(bucket: &str, db_id: &str, namespace: &str) -> Result<
         .prefix(format!("ns-{}:{}-", db_id, namespace))
         .send()
         .await?;
-    let mut res = Vec::new();
+    let mut res = BTreeSet::new();
     for o in resp.contents().unwrap() {
         let prefix = o.key().unwrap();
         let delim = prefix.find('/').unwrap();
         let prefix = &prefix[db_id.len() + namespace.len() + 5..delim];
         let uuid = uuid::Uuid::try_parse(prefix)?;
-        res.push(uuid);
+        res.insert(uuid);
     }
     Ok(res)
 }

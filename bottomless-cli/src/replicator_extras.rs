@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{bail, Result};
 use aws_sdk_s3::error::SdkError;
 use aws_sdk_s3::types::ObjectAttributes;
 use aws_sdk_s3::Client;
@@ -119,7 +119,11 @@ impl Replicator {
                 if let Some(prefix) = &prefix.prefix {
                     let prefix = &prefix[self.db_name.len() + 1..prefix.len() - 1];
                     let uuid = uuid::Uuid::try_parse(prefix)?;
-                    let datetime = uuid.date_time();
+                    let datetime = if let Some(d) = uuid.date_time() {
+                        d
+                    } else {
+                        bail!("failed to retrieve timestamp from UUID {}", uuid)
+                    };
                     if datetime.date() < newer_than.unwrap_or(chrono::NaiveDate::MIN) {
                         continue;
                     }
@@ -243,7 +247,9 @@ impl Replicator {
         let meta = self.get_metadata(&generation).await?;
         let dep = self.get_dependency(&generation).await?;
         println!("Generation {} for {}", generation, self.db_name);
-        println!("\tcreated at:           {}", generation.date_time());
+        if let Some(created_at) = generation.date_time() {
+            println!("\tcreated at:           {}", created_at);
+        }
         println!("\tchange counter:       {counter:?}");
         println!("\tconsistent WAL frame: {consistent_frame}");
         if let Some((page_size, crc)) = meta {
