@@ -1,6 +1,7 @@
 // Copy-pasted from uuid crate to avoid their uuid_unstable flag guard.
 // Once uuid v7 is standardized and stabilized, we can go back to using uuid::new_v7() directly.
 
+use chrono::NaiveDateTime;
 use uuid::{NoContext, Timestamp, Uuid};
 
 fn bytes() -> [u8; 16] {
@@ -49,6 +50,39 @@ pub(crate) fn decode_unix_timestamp(uuid: &Uuid) -> Timestamp {
     let seconds = millis / 1000;
     let nanos = ((millis % 1000) * 1_000_000) as u32;
     Timestamp::from_unix(NoContext, seconds, nanos)
+}
+
+pub trait GenerationUuid: Sized {
+    fn date_time(&self) -> Option<NaiveDateTime>;
+    fn timestamp(&self) -> Timestamp;
+    fn from_timestamp(timestamp: Timestamp) -> Self;
+
+    fn new_v7() -> Self {
+        Self::from_timestamp(Timestamp::now(NoContext))
+    }
+}
+
+impl GenerationUuid for Uuid {
+    fn date_time(&self) -> Option<NaiveDateTime> {
+        let ts = decode_unix_timestamp(self);
+        let (seconds, nanos) = ts.to_unix();
+        let (seconds, nanos) = (253370761200 - seconds, 999999999 - nanos);
+        NaiveDateTime::from_timestamp_opt(seconds as i64, nanos)
+    }
+
+    fn timestamp(&self) -> Timestamp {
+        let ts = decode_unix_timestamp(self);
+        let (seconds, nanos) = ts.to_unix();
+        let (seconds, nanos) = (253370761200 - seconds, 999999999 - nanos);
+        Timestamp::from_unix(NoContext, seconds, nanos)
+    }
+
+    fn from_timestamp(timestamp: Timestamp) -> Self {
+        let (seconds, nanos) = timestamp.to_unix();
+        let (seconds, nanos) = (253370761200 - seconds, 999999999 - nanos);
+        let synthetic_ts = Timestamp::from_unix(uuid::NoContext, seconds, nanos);
+        new_v7(synthetic_ts)
+    }
 }
 
 #[cfg(test)]

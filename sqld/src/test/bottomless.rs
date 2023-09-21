@@ -407,11 +407,27 @@ async fn request_restore(url: &Url, timestamp: DateTime<Utc>) -> Result<()> {
     timestamp.pop();
     // NaiveDateTime accepted format is `2018-01-26T18:30:09` (without Z)
     let json = json!({"timestamp": timestamp});
-    let endpoint = url.join("/v1/namespaces/default/restore")?;
+    let endpoint = url.join("/v1/namespaces/default/fork/temp")?;
     tracing::info!("calling {} - {}", endpoint, json);
     let client = reqwest::Client::new();
     let resp = client.post(endpoint.clone()).json(&json).send().await?;
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    tracing::info!("forked `default` to `temp`");
     assert_eq!(resp.status().as_u16(), 200);
+    // replace default with temp
+    let resp = client
+        .delete(url.join("/v1/namespaces/default")?)
+        .send()
+        .await?;
+    assert_eq!(resp.status().as_u16(), 200);
+    tracing::info!("deleted `default`");
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    let resp = client
+        .post(url.join("/v1/namespaces/temp/fork/default")?)
+        .send()
+        .await?;
+    assert_eq!(resp.status().as_u16(), 200);
+    tracing::info!("forked `temp` to `default`");
     Ok(())
 }
 

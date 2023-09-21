@@ -1,7 +1,7 @@
 use crate::backup::WalCopier;
 use crate::read::BatchReader;
 use crate::transaction_cache::TransactionPageCache;
-use crate::uuid_utils::decode_unix_timestamp;
+use crate::uuid_utils::GenerationUuid;
 use crate::wal::WalFileReader;
 use anyhow::{anyhow, bail};
 use arc_swap::ArcSwapOption;
@@ -15,7 +15,7 @@ use aws_sdk_s3::operation::list_objects::ListObjectsOutput;
 use aws_sdk_s3::primitives::ByteStream;
 use aws_sdk_s3::{Client, Config};
 use bytes::{Buf, Bytes};
-use chrono::{NaiveDateTime, TimeZone, Utc};
+use chrono::{NaiveDateTime, Utc};
 use std::io::SeekFrom;
 use std::ops::Deref;
 use std::path::Path;
@@ -28,7 +28,7 @@ use tokio::task::JoinHandle;
 use tokio::task::JoinSet;
 use tokio::time::Duration;
 use tokio::time::{timeout_at, Instant};
-use uuid::{NoContext, Uuid};
+use uuid::Uuid;
 
 /// Maximum number of generations that can participate in database restore procedure.
 /// This effectively means that at least one in [MAX_RESTORE_STACK_DEPTH] number of
@@ -193,7 +193,7 @@ impl Options {
                 other
             ),
         };
-        let snapshot_interval_secs = if let Ok(secs) = env_var("LIBSQL_BOTTOMLESS_SNAPSHOT_INTERVAL") {
+        let snapshot_interval = if let Ok(secs) = env_var("LIBSQL_BOTTOMLESS_SNAPSHOT_INTERVAL") {
             Some(Duration::from_secs(secs.parse::<u64>()?))
         } else {
             None
@@ -213,7 +213,7 @@ impl Options {
             region,
             restore_transaction_cache_fpath,
             bucket_name,
-            snapshot_interval
+            snapshot_interval,
         })
     }
 }
@@ -472,33 +472,9 @@ impl Replicator {
             .store(last_sent.min(frame_no), Ordering::Release);
     }
 
-    // Generates a new generation UUID v7, which contains a timestamp and is binary-sortable.
-    // This timestamp goes back in time - that allows us to list newest generations
-    // first in the S3-compatible bucket, under the assumption that fetching newest generations
-    // is the most common operation.
-    // NOTICE: at the time of writing, uuid v7 is an unstable feature of the uuid crate
-    fn generate_generation() -> Uuid {
-        let ts = uuid::timestamp::Timestamp::now(uuid::NoContext);
-        Self::generation_from_timestamp(ts)
-    }
-
-    fn generation_from_timestamp(ts: uuid::Timestamp) -> Uuid {
-        let (seconds, nanos) = ts.to_unix();
-        let (seconds, nanos) = (253370761200 - seconds, 999999999 - nanos);
-        let synthetic_ts = uuid::Timestamp::from_unix(uuid::NoContext, seconds, nanos);
-        crate::uuid_utils::new_v7(synthetic_ts)
-    }
-
-    pub fn generation_to_timestamp(generation: &Uuid) -> Option<uuid::Timestamp> {
-        let ts = decode_unix_timestamp(generation);
-        let (seconds, nanos) = ts.to_unix();
-        let (seconds, nanos) = (253370761200 - seconds, 999999999 - nanos);
-        Some(uuid::Timestamp::from_unix(NoContext, seconds, nanos))
-    }
-
     // Starts a new generation for this replicator instance
     pub fn new_generation(&mut self) -> Option<Uuid> {
-        let curr = Self::generate_generation();
+        let curr = Uuid::new_v7();
         let prev = self.set_generation(curr);
         if let Some(prev) = prev {
             if prev != curr {
@@ -719,19 +695,19 @@ impl Replicator {
 
     /// Returns info, which generation had the most recent snapshot.
     async fn get_last_snapshot(&self) -> Option<Uuid> {
-        let path = format!("{}/.snaplock", self.db_path);
+        let path = format!("{}.snaplock", self.db_path);
         let mut f = File::open(path).await.ok()?;
         let mut buf = [0u8; 16];
         f.read_exact(&mut buf).await.ok()?;
         Some(Uuid::from_bytes(buf))
     }
 
-    async fn save_last_snapshot<P: AsRef<Path>>(db_path: P, generation: &Uuid) -> Result<()> {
+    async fn save_last_snapshot(db_path: &str, generation: &Uuid) -> Result<()> {
         let mut f = OpenOptions::new()
             .truncate(true)
             .write(true)
             .create(true)
-            .open(format!("{}/.snaplock", db_path))
+            .open(format!("{}.snaplock", db_path))
             .await?;
         f.write_all(generation.as_ref()).await?;
         Ok(())
@@ -759,12 +735,9 @@ impl Replicator {
         let generation = self.generation()?;
         if let Some(snapshot_interval) = self.snapshot_interval {
             if let Some(snapshot_gen) = self.get_last_snapshot().await {
-                if let Some(snapshot_time) = Self::generation_to_timestamp(&snapshot_gen) {
-                    let next_snapshot_date =
-                        snapshot_time.to_unix().0 + snapshot_interval.as_secs();
-                    if snapshot_gen == generation
-                        || next_snapshot_date < Utc::now().naive_utc().timestamp() as u64
-                    {
+                if let Some(snapshot_time) = snapshot_gen.date_time() {
+                    let next_snapshot_date = snapshot_time + snapshot_interval;
+                    if snapshot_gen == generation || next_snapshot_date < Utc::now().naive_utc() {
                         tracing::trace!(
                             "Snapshot already done or scheduled to later date. Skipping."
                         );
@@ -802,6 +775,7 @@ impl Replicator {
             )));
         let snapshot_notifier = self.snapshot_notifier.clone();
         let compression = self.use_compression;
+        let db_path = self.db_path.clone();
         let handle = tokio::spawn(async move {
             tracing::trace!("Start snapshotting generation {}", generation);
             let start = Instant::now();
@@ -837,7 +811,7 @@ impl Replicator {
                 let _ = snapshot_notifier.send(Err(e.into()));
                 return;
             }
-            if let Err(e) = Self::save_last_snapshot(&generation).await {
+            if let Err(e) = Self::save_last_snapshot(&db_path, &generation).await {
                 tracing::error!(
                     "failed to save the latest known snapshot {}: {}",
                     generation,
@@ -861,11 +835,10 @@ impl Replicator {
     // match the <db-name>-<generation-uuid>/ pattern.
     pub async fn latest_generation_before(
         &self,
-        timestamp: Option<&NaiveDateTime>,
+        threshold: Option<&NaiveDateTime>,
     ) -> Option<Uuid> {
         let mut next_marker: Option<String> = None;
         let prefix = format!("{}-", self.db_name);
-        let threshold = timestamp.map(|ts| ts.timestamp() as u64);
         loop {
             let mut request = self.list_objects().prefix(prefix.clone());
             if threshold.is_none() {
@@ -892,10 +865,9 @@ impl Replicator {
                     if Some(key) != last_gen {
                         last_gen = Some(key);
                         if let Ok(generation) = Uuid::parse_str(key) {
-                            match threshold.as_ref() {
+                            match threshold {
                                 None => return Some(generation),
-                                Some(threshold) => match Self::generation_to_timestamp(&generation)
-                                {
+                                Some(threshold) => match generation.date_time() {
                                     None => {
                                         tracing::warn!(
                                             "Generation {} is not valid UUID v7",
@@ -903,19 +875,14 @@ impl Replicator {
                                         );
                                     }
                                     Some(ts) => {
-                                        let (unix_seconds, _) = ts.to_unix();
                                         if tracing::enabled!(tracing::Level::DEBUG) {
-                                            let ts = Utc
-                                                .timestamp_millis_opt((unix_seconds * 1000) as i64)
-                                                .unwrap()
-                                                .to_rfc3339();
                                             tracing::debug!(
                                                 "Generation candidate: {} - timestamp: {}",
                                                 generation,
                                                 ts
                                             );
                                         }
-                                        if &unix_seconds <= threshold {
+                                        if ts <= *threshold {
                                             return Some(generation);
                                         }
                                     }
@@ -990,8 +957,8 @@ impl Replicator {
         timestamp: Option<NaiveDateTime>,
     ) -> Result<(RestoreAction, bool)> {
         if let Some(tombstone) = self.get_tombstone().await? {
-            if let Some(timestamp) = Self::generation_to_timestamp(&generation) {
-                if tombstone.timestamp() as u64 >= timestamp.to_unix().0 {
+            if let Some(timestamp) = generation.date_time() {
+                if tombstone >= timestamp {
                     bail!(
                         "Couldn't restore from generation {}. Database '{}' has been tombstoned at {}.",
                         generation,
@@ -1056,7 +1023,7 @@ impl Replicator {
             restore_stack.push(curr);
             let restored = self.restore_from_snapshot(&curr, &mut db).await?;
             if restored {
-                Self::save_last_snapshot(&curr).await?;
+                Self::save_last_snapshot(&self.db_path, &curr).await?;
                 break;
             } else {
                 if restore_stack.len() > MAX_RESTORE_STACK_DEPTH {
@@ -1224,6 +1191,7 @@ impl Replicator {
         };
         let mut next_marker = None;
         let mut applied_wal_frame = false;
+        let mut last_applied_timestamp = 0;
         'restore_wal: loop {
             let mut list_request = self.list_objects().prefix(&prefix);
             if let Some(marker) = next_marker {
@@ -1276,10 +1244,10 @@ impl Replicator {
                         break;
                     }
                 }
-                if let Some(threshold) = utc_time.as_ref() {
+                if let Some(threshold) = utc_time {
                     match NaiveDateTime::from_timestamp_opt(timestamp as i64, 0) {
                         Some(timestamp) => {
-                            if &timestamp > threshold {
+                            if timestamp > threshold {
                                 tracing::info!("Frame batch {} has timestamp more recent than expected {}. Stopping recovery.", key, timestamp);
                                 break 'restore_wal; // reached end of restoration timestamp
                             }
@@ -1314,6 +1282,7 @@ impl Replicator {
                         );
                         pending_pages.flush(db).await?;
                         applied_wal_frame = true;
+                        last_applied_timestamp = timestamp;
                     }
                     frameno += 1;
                     last_received_frame_no += 1;
@@ -1325,7 +1294,11 @@ impl Replicator {
                 .then(|| objs.last().map(|elem| elem.key().unwrap().to_string()))
                 .flatten();
             if next_marker.is_none() {
-                tracing::trace!("Restored DB from S3 backup using generation {}", generation);
+                tracing::trace!(
+                    "Restored DB from S3 backup using generation {} (timestamp of last applied WAL segment: {:?})",
+                    generation,
+                    if last_applied_timestamp == 0 { None } else { NaiveDateTime::from_timestamp_opt(last_applied_timestamp as i64, 0) }
+                );
                 break;
             }
         }
@@ -1357,7 +1330,11 @@ impl Replicator {
             },
         };
 
-        tracing::info!("Restoring from generation {}", generation);
+        tracing::info!(
+            "Restoring from generation {} ({:?})",
+            generation,
+            generation.date_time().unwrap()
+        );
         self.restore_from(generation, timestamp).await
     }
 
@@ -1600,8 +1577,8 @@ impl DeleteAll {
                 if let Some(prefix) = &prefix.prefix {
                     let prefix = &prefix[self.db_name.len() + 1..prefix.len() - 1];
                     let uuid = Uuid::try_parse(prefix)?;
-                    if let Some(datetime) = Replicator::generation_to_timestamp(&uuid) {
-                        if datetime.to_unix().0 >= self.threshold.timestamp() as u64 {
+                    if let Some(datetime) = uuid.date_time() {
+                        if datetime >= self.threshold {
                             continue;
                         }
                         tracing::debug!("Removing generation {}", uuid);
