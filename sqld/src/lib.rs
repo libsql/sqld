@@ -159,7 +159,7 @@ where
             Ok(conn) => {
                 tracing::trace!("database checkpoint");
                 let start = Instant::now();
-                match conn.checkpoint(None).await {
+                match conn.checkpoint().await {
                     Ok(_) => {
                         let elapsed = Instant::now() - start;
                         tracing::info!("database checkpoint finished (took: {:?})", elapsed);

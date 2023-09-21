@@ -315,9 +315,9 @@ impl Connection for WriteProxyConnection {
         })
     }
 
-    async fn checkpoint(&self, replication_index: Option<FrameNo>) -> Result<()> {
-        self.wait_replication_sync(replication_index).await?;
-        self.read_conn.checkpoint(replication_index).await
+    async fn checkpoint(&self) -> Result<()> {
+        self.wait_replication_sync(None).await?;
+        self.read_conn.checkpoint().await
     }
 }
 

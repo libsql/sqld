@@ -117,7 +117,7 @@ pub trait Connection: Send + Sync + 'static {
     async fn is_autocommit(&self) -> Result<bool>;
 
     /// Calls for database checkpoint (if supported).
-    async fn checkpoint(&self, replication_index: Option<FrameNo>) -> Result<()>;
+    async fn checkpoint(&self) -> Result<()>;
 }
 
 fn make_batch_program(batch: Vec<Query>) -> Vec<Step> {
@@ -307,8 +307,8 @@ impl<DB: Connection> Connection for TrackedConnection<DB> {
     }
 
     #[inline]
-    async fn checkpoint(&self, replication_index: Option<FrameNo>) -> Result<()> {
-        self.inner.checkpoint(replication_index).await
+    async fn checkpoint(&self) -> Result<()> {
+        self.inner.checkpoint().await
     }
 }
 
@@ -343,7 +343,7 @@ mod test {
             unreachable!()
         }
 
-        async fn checkpoint(&self, _replication_index: Option<FrameNo>) -> Result<()> {
+        async fn checkpoint(&self) -> Result<()> {
             unreachable!()
         }
     }

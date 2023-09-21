@@ -606,7 +606,7 @@ impl super::Connection for LibSqlConnection {
         receiver.await?
     }
 
-    async fn checkpoint(&self, _replication_index: Option<FrameNo>) -> Result<()> {
+    async fn checkpoint(&self) -> Result<()> {
         let (resp, receiver) = oneshot::channel();
         let cb = Box::new(move |maybe_conn: Result<&mut Connection>| {
             let res = maybe_conn.and_then(|c| c.checkpoint());
