@@ -3,6 +3,7 @@ use aws_sdk_s3::error::SdkError;
 use aws_sdk_s3::types::ObjectAttributes;
 use aws_sdk_s3::Client;
 use aws_smithy_types::date_time::Format;
+use bottomless::uuid_utils::GenerationUuid;
 use chrono::{NaiveDate, NaiveDateTime, NaiveTime};
 
 pub(crate) struct Replicator {
@@ -21,15 +22,6 @@ impl std::ops::DerefMut for Replicator {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.inner
     }
-}
-
-fn uuid_to_datetime(uuid: &uuid::Uuid) -> chrono::NaiveDateTime {
-    let timestamp = bottomless::replicator::Replicator::generation_to_timestamp(uuid);
-    let (seconds, _) = timestamp
-        .as_ref()
-        .map(uuid::Timestamp::to_unix)
-        .unwrap_or_default();
-    chrono::NaiveDateTime::from_timestamp_millis((seconds * 1000) as i64).unwrap()
 }
 
 pub(crate) async fn detect_db(client: &Client, bucket: &str, namespace: &str) -> Option<String> {
@@ -127,7 +119,7 @@ impl Replicator {
                 if let Some(prefix) = &prefix.prefix {
                     let prefix = &prefix[self.db_name.len() + 1..prefix.len() - 1];
                     let uuid = uuid::Uuid::try_parse(prefix)?;
-                    let datetime = uuid_to_datetime(&uuid);
+                    let datetime = uuid.date_time();
                     if datetime.date() < newer_than.unwrap_or(chrono::NaiveDate::MIN) {
                         continue;
                     }
@@ -251,7 +243,7 @@ impl Replicator {
         let meta = self.get_metadata(&generation).await?;
         let dep = self.get_dependency(&generation).await?;
         println!("Generation {} for {}", generation, self.db_name);
-        println!("\tcreated at:           {}", uuid_to_datetime(&generation));
+        println!("\tcreated at:           {}", generation.date_time());
         println!("\tchange counter:       {counter:?}");
         println!("\tconsistent WAL frame: {consistent_frame}");
         if let Some((page_size, crc)) = meta {

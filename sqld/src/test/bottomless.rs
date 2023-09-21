@@ -12,6 +12,7 @@ use std::path::PathBuf;
 use tokio::time::sleep;
 use tokio::time::Duration;
 use url::Url;
+use uuid::Uuid;
 
 use crate::config::{AdminApiConfig, DbConfig, UserApiConfig};
 use crate::net::AddrIncoming;
@@ -155,6 +156,8 @@ async fn backup_restore() {
         tracing::info!(
             "---STEP 2: recreate the database from WAL - create a snapshot at the end---"
         );
+        let snapshotted = snapshot_exists(BUCKET, DB_ID, "default").await;
+        assert!(!snapshotted, "no generation should have snapshot yet");
         let cleaner = DbFileCleaner::new(PATH);
         let db_job = start_db(2, make_server().await);
 
@@ -170,6 +173,8 @@ async fn backup_restore() {
 
     {
         tracing::info!("---STEP 3: recreate database from snapshot alone---");
+        let snapshotted = snapshot_exists(BUCKET, DB_ID, "default").await;
+        assert!(snapshotted, "at least one generation should have snapshot");
         let cleaner = DbFileCleaner::new(PATH);
         let db_job = start_db(3, make_server().await);
 
@@ -188,6 +193,8 @@ async fn backup_restore() {
 
     {
         tracing::info!("---STEP 4: recreate the database from snapshot + WAL---");
+        let snapshotted = snapshot_exists(BUCKET, DB_ID, "default").await;
+        assert!(snapshotted, "at least one generation should have snapshot");
         let cleaner = DbFileCleaner::new(PATH);
         let db_job = start_db(4, make_server().await);
 
@@ -206,6 +213,8 @@ async fn backup_restore() {
         // manually remove snapshots from all generations, this will force restore across generations
         // from the very beginning
         remove_snapshots(BUCKET).await;
+        let snapshotted = snapshot_exists(BUCKET, DB_ID, "default").await;
+        assert!(!snapshotted, "all snapshots should be removed");
 
         let cleaner = DbFileCleaner::new(PATH);
         let db_job = start_db(4, make_server().await);
@@ -231,6 +240,9 @@ async fn backup_restore() {
         sleep(Duration::from_secs(2)).await;
 
         assert_updates(&connection_addr, ROWS, OPS, "A").await;
+
+        let snapshotted = snapshot_exists(BUCKET, DB_ID, "default").await;
+        assert!(snapshotted, "new fork should have a snapshot");
 
         db_job.await;
         drop(cleaner);
@@ -461,6 +473,50 @@ async fn s3_client() -> Result<Client> {
     let conf = s3_config().await;
     let client = Client::from_conf(conf);
     Ok(client)
+}
+
+async fn list_generations(bucket: &str, db_id: &str, namespace: &str) -> Result<Vec<uuid::Uuid>> {
+    let client = s3_client().await?;
+    let resp = client
+        .list_objects()
+        .bucket(bucket)
+        .prefix(format!("ns-{}:{}-", db_id, namespace))
+        .send()
+        .await?;
+    let mut res = Vec::new();
+    for o in resp.contents().unwrap() {
+        let prefix = o.key().unwrap();
+        let delim = prefix.find('/').unwrap();
+        let prefix = &prefix[db_id.len() + namespace.len() + 5..delim];
+        let uuid = uuid::Uuid::try_parse(prefix)?;
+        res.push(uuid);
+    }
+    Ok(res)
+}
+
+async fn has_snapshot(
+    bucket: &str,
+    db_id: &str,
+    generation: &Uuid,
+    namespace: &str,
+) -> Result<bool> {
+    let client = s3_client().await?;
+    let key = format!("ns-{}:{}-{}/db.gz", db_id, namespace, generation);
+    let resp = client.head_object().bucket(bucket).key(&key).send().await;
+    let res = resp.is_ok();
+    tracing::info!("'{}' has snapshot: {}", key, res);
+    Ok(res)
+}
+
+async fn snapshot_exists(bucket: &str, db_id: &str, namespace: &str) -> bool {
+    let mut snapshotted = false;
+    for gen in list_generations(bucket, db_id, namespace).await.unwrap() {
+        if has_snapshot(bucket, db_id, &gen, namespace).await.unwrap() {
+            snapshotted = true;
+            break;
+        }
+    }
+    snapshotted
 }
 
 /// Remove a snapshot objects from all generation. This may trigger bottomless to do rollup restore
