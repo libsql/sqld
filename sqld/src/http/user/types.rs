@@ -250,9 +250,31 @@ mod test {
 
     #[test]
     fn parse_http_query() {
-        let json = r#"{"statements":["select * from test",
-            {"q": "select ?", "params": [12, true]},
-            {"q": "select ?", "params": {":foo": "bar"}}]}"#;
+        let json = r#"
+            {
+                "statements": [
+                    "select * from test",
+                    {"q": "select ?", "params": [12, true]},
+                    {"q": "select ?", "params": {":foo": "bar"}}
+                ]
+            }"#;
+        let found: HttpQuery = serde_json::from_str(json).unwrap();
+        insta::with_settings!({sort_maps => true}, {
+            insta::assert_json_snapshot!(found);
+        })
+    }
+
+    #[test]
+    fn parse_http_query_with_replication_index() {
+        let json = r#"
+            {
+                "statements": [
+                    "select * from test",
+                    {"q": "select ?", "params": [12, true]},
+                    {"q": "select ?", "params": {":foo": "bar"}}
+                ],
+                "replication_index": 1
+            }"#;
         let found: HttpQuery = serde_json::from_str(json).unwrap();
         insta::with_settings!({sort_maps => true}, {
             insta::assert_json_snapshot!(found);
