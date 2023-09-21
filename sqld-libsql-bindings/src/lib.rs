@@ -7,6 +7,7 @@ use std::{ffi::CString, ops::Deref, time::Duration};
 
 pub use crate::wal_hook::WalMethodsHook;
 pub use once_cell::sync::Lazy;
+use rusqlite::ffi::sqlite3;
 use wal_hook::TransparentMethods;
 
 use self::{
@@ -50,7 +51,6 @@ impl Connection<TransparentMethods> {
 }
 
 impl<W: WalHook> Connection<W> {
-
     /// Opens a database with the regular wal methods in the directory pointed to by path
     pub fn open(
         path: impl AsRef<std::path::Path>,
@@ -103,9 +103,14 @@ impl<W: WalHook> Connection<W> {
         let conn = unsafe { rusqlite::Connection::from_handle_owned(db)? };
         conn.busy_timeout(Duration::from_millis(5000))?;
 
-        Ok(Connection {
-            conn,
-            _ctx,
-        })
+        Ok(Connection { conn, _ctx })
+    }
+
+    /// Returns the raw sqlite handle
+    ///
+    /// # Safety
+    /// The caller is responsible for the returned pointer.
+    pub unsafe fn handle(&mut self) -> *mut sqlite3 {
+        self.conn.handle()
     }
 }

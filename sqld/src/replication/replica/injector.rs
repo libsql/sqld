@@ -5,7 +5,7 @@ use rusqlite::OpenFlags;
 
 use crate::replication::replica::hook::{SQLITE_CONTINUE_REPLICATION, SQLITE_EXIT_REPLICATION};
 
-use super::hook::{InjectorHookCtx, INJECTOR_METHODS, InjectorHook};
+use super::hook::{InjectorHook, InjectorHookCtx, INJECTOR_METHODS};
 
 pub struct FrameInjector {
     conn: sqld_libsql_bindings::Connection<InjectorHook>,
