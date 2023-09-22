@@ -41,6 +41,7 @@ async fn configure_server(
     addr: SocketAddr,
     admin_addr: Option<SocketAddr>,
     path: impl Into<PathBuf>,
+    auto_checkpoint: u32,
 ) -> Server {
     let http_acceptor = AddrIncoming::new(tokio::net::TcpListener::bind(addr).await.unwrap());
     Server {
@@ -54,7 +55,7 @@ async fn configure_server(
             max_response_size: 10000000 * 4096,
             max_total_response_size: 10000000 * 4096,
             snapshot_exec: None,
-            auto_checkpoint: 1000,
+            auto_checkpoint,
         },
         admin_api_config: if let Some(addr) = admin_addr {
             Some(AdminApiConfig {
@@ -83,7 +84,7 @@ async fn configure_server(
     }
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[tokio::test]
 async fn backup_restore() {
     let _ = env_logger::builder().is_test(true).try_init();
     const DB_ID: &str = "testbackuprestore";
@@ -121,7 +122,7 @@ async fn backup_restore() {
         .unwrap();
 
     let make_server =
-        || async { configure_server(&options, listener_addr, Some(admin_addr), PATH).await };
+        || async { configure_server(&options, listener_addr, Some(admin_addr), PATH, 1000).await };
 
     let recover_time = {
         tracing::info!(
@@ -158,8 +159,8 @@ async fn backup_restore() {
         tracing::info!(
             "---STEP 2: recreate the database from WAL - create a snapshot at the end---"
         );
-        let snapshotted = snapshot_exists(BUCKET, DB_ID, "default").await;
-        assert!(!snapshotted, "no generation should have snapshot yet");
+        let snapshots = snapshot_count(BUCKET, DB_ID, "default").await;
+        assert_eq!(snapshots, 0, "no generation should have snapshot yet");
         let cleaner = DbFileCleaner::new(PATH);
         let db_job = start_db(2, make_server().await);
 
@@ -175,8 +176,11 @@ async fn backup_restore() {
 
     {
         tracing::info!("---STEP 3: recreate database from snapshot alone---");
-        let snapshotted = snapshot_exists(BUCKET, DB_ID, "default").await;
-        assert!(snapshotted, "at least one generation should have snapshot");
+        let snapshots = snapshot_count(BUCKET, DB_ID, "default").await;
+        assert!(
+            snapshots > 0,
+            "at least one generation should have snapshot"
+        );
         let cleaner = DbFileCleaner::new(PATH);
         let db_job = start_db(3, make_server().await);
 
@@ -195,8 +199,11 @@ async fn backup_restore() {
 
     {
         tracing::info!("---STEP 4: recreate the database from snapshot + WAL---");
-        let snapshotted = snapshot_exists(BUCKET, DB_ID, "default").await;
-        assert!(snapshotted, "at least one generation should have snapshot");
+        let snapshots = snapshot_count(BUCKET, DB_ID, "default").await;
+        assert!(
+            snapshots > 0,
+            "at least one generation should have snapshot"
+        );
         let cleaner = DbFileCleaner::new(PATH);
         let db_job = start_db(4, make_server().await);
 
@@ -215,8 +222,8 @@ async fn backup_restore() {
         // manually remove snapshots from all generations, this will force restore across generations
         // from the very beginning
         remove_snapshots(BUCKET).await;
-        let snapshotted = snapshot_exists(BUCKET, DB_ID, "default").await;
-        assert!(!snapshotted, "all snapshots should be removed");
+        let snapshots = snapshot_count(BUCKET, DB_ID, "default").await;
+        assert_eq!(snapshots, 0, "all snapshots should be removed");
 
         let cleaner = DbFileCleaner::new(PATH);
         let db_job = start_db(4, make_server().await);
@@ -243,8 +250,8 @@ async fn backup_restore() {
 
         assert_updates(&connection_addr, ROWS, OPS, "A").await;
 
-        let snapshotted = snapshot_exists(BUCKET, DB_ID, "default").await;
-        assert!(snapshotted, "new fork should have a snapshot");
+        let snapshots = snapshot_count(BUCKET, DB_ID, "default").await;
+        assert_eq!(snapshots, 1, "new fork should have a snapshot");
 
         db_job.await;
         drop(cleaner);
@@ -292,7 +299,8 @@ async fn rollback_restore() {
         restore_transaction_page_swap_after: 1, // in this test swap should happen at least once
         ..bottomless::replicator::Options::from_env().unwrap()
     };
-    let make_server = || async { configure_server(&options, listener_addr, None, PATH).await };
+    let make_server =
+        || async { configure_server(&options, listener_addr, None, PATH, 1000).await };
 
     {
         tracing::info!("---STEP 1: create db, write row, rollback---");
@@ -369,6 +377,89 @@ async fn rollback_restore() {
         db_job.await;
         drop(cleaner);
     }
+}
+
+#[tokio::test]
+async fn periodic_snapshot() {
+    let _ = env_logger::builder().is_test(true).try_init();
+    const DB_ID: &str = "periodicsnapshot";
+    const BUCKET: &str = "periodicsnapshot";
+    const PATH: &str = "periodic_snapshot.sqld";
+    const PORT: u16 = 15003;
+    const AUTO_CHECKPOINT: usize = 100;
+
+    let _ = S3BucketCleaner::new(BUCKET).await;
+    assert_bucket_occupancy(BUCKET, true).await;
+
+    let options = bottomless::replicator::Options {
+        db_id: Some(DB_ID.to_string()),
+        create_bucket_if_not_exists: true,
+        verify_crc: true,
+        use_compression: bottomless::replicator::CompressionKind::Gzip,
+        bucket_name: BUCKET.to_string(),
+        max_batch_interval: Duration::from_millis(250),
+        restore_transaction_page_swap_after: AUTO_CHECKPOINT as u32,
+        max_frames_per_batch: AUTO_CHECKPOINT,
+        snapshot_interval: Some(Duration::from_secs(3)),
+        ..bottomless::replicator::Options::from_env().unwrap()
+    };
+    let connection_addr = Url::parse(&format!("http://localhost:{}", PORT)).unwrap();
+    let listener_addr = format!("0.0.0.0:{}", PORT)
+        .to_socket_addrs()
+        .unwrap()
+        .next()
+        .unwrap();
+
+    let make_server = || async {
+        configure_server(&options, listener_addr, None, PATH, AUTO_CHECKPOINT as u32).await
+    };
+    {
+        let cleaner = DbFileCleaner::new(PATH);
+        let db_job = start_db(1, make_server().await);
+
+        sleep(Duration::from_secs(2)).await;
+
+        let _ = sql(
+            &connection_addr,
+            ["CREATE TABLE IF NOT EXISTS t(id INT PRIMARY KEY, name TEXT);"],
+        )
+        .await
+        .unwrap();
+
+        // generate enough updates for 3 generations to occur
+        perform_updates(&connection_addr, 10, AUTO_CHECKPOINT + 1, "A").await;
+        perform_updates(&connection_addr, 10, AUTO_CHECKPOINT + 1, "B").await;
+        perform_updates(&connection_addr, 10, AUTO_CHECKPOINT + 1, "C").await;
+
+        // wait long enough to make sure that updates got to the bottomless but not long enough
+        // for a snapshot interval to trigger
+        sleep(Duration::from_secs(2)).await;
+
+        let generations = list_generations(BUCKET, DB_ID, "default").await.unwrap();
+        assert_ne!(generations.len(), 0, "some generations should be created");
+        for gen in generations {
+            let snapshotted = has_snapshot(BUCKET, DB_ID, &gen, "default").await.unwrap();
+            assert!(!snapshotted, "no generation should be snapshotted yet");
+        }
+
+        // make sure that snapshot interval passed
+        sleep(Duration::from_secs(2)).await;
+
+        // perform enough updated to trigger checkpoint - checkpoint will call for snapshot
+        perform_updates(&connection_addr, 10, AUTO_CHECKPOINT + 1, "D").await;
+
+        // wait for snapshot
+        sleep(Duration::from_secs(1)).await;
+
+        let snapshots = snapshot_count(BUCKET, DB_ID, "default").await;
+        assert_eq!(snapshots, 1, "snapshot should be created after interval");
+
+        db_job.await;
+        drop(cleaner);
+        let time = Utc::now(); // remember this timestamp for point-in-time recovery
+        tracing::info!("restoration point: {}", time.to_rfc3339());
+        time
+    };
 }
 
 async fn perform_updates(connection_addr: &Url, row_count: usize, ops_count: usize, update: &str) {
@@ -514,15 +605,14 @@ async fn has_snapshot(
     Ok(res)
 }
 
-async fn snapshot_exists(bucket: &str, db_id: &str, namespace: &str) -> bool {
-    let mut snapshotted = false;
+async fn snapshot_count(bucket: &str, db_id: &str, namespace: &str) -> usize {
+    let mut snapshots = 0;
     for gen in list_generations(bucket, db_id, namespace).await.unwrap() {
         if has_snapshot(bucket, db_id, &gen, namespace).await.unwrap() {
-            snapshotted = true;
-            break;
+            snapshots += 1;
         }
     }
-    snapshotted
+    snapshots
 }
 
 /// Remove a snapshot objects from all generation. This may trigger bottomless to do rollup restore
