@@ -55,9 +55,10 @@ where
                             *this.join_handle = Some(join_handle);
                             task::Poll::Pending
                         }
-                        task::Poll::Ready(Ok(Err(err))) => { 
+                        task::Poll::Ready(Ok(Err(err))) => {
                             tracing::error!("error creating dump: {err}");
-                            task::Poll::Ready(Some(Err(err))) },
+                            task::Poll::Ready(Some(Err(err)))
+                        }
                         task::Poll::Ready(Err(err)) => {
                             task::Poll::Ready(Some(Err(anyhow::anyhow!(err)
                                 .context("Dump task crashed")
@@ -98,7 +99,6 @@ pub(super) async fn handle_dump<F: MakeNamespace>(
         stream: stream.fuse(),
         join_handle: Some(join_handle),
     };
-
 
     let stream = axum::body::StreamBody::new(stream);
 
