@@ -239,9 +239,7 @@ impl ReplicationLog for ReplicationLogService {
             })?;
 
         let response = HelloResponse {
-            database_id: logger.database_id().unwrap().to_string(),
-            generation_start_index: logger.generation.start_index,
-            generation_id: logger.generation.id.to_string(),
+            log_id: logger.log_id().to_string(),
         };
 
         Ok(tonic::Response::new(response))

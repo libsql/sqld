@@ -388,14 +388,14 @@ impl LogFile {
         let file_end = file.metadata()?.len();
 
         let header = if file_end == 0 {
-            let db_id = Uuid::new_v4();
+            let log_id = Uuid::new_v4();
             LogFileHeader {
                 version: 2,
                 start_frame_no: 0,
                 magic: WAL_MAGIC,
                 page_size: LIBSQL_PAGE_SIZE as i32,
                 start_checksum: 0,
-                db_id: db_id.as_u128(),
+                log_id: log_id.as_u128(),
                 frame_count: 0,
                 sqld_version: Version::current().0,
             }
@@ -707,8 +707,8 @@ pub struct LogFileHeader {
     /// Initial checksum value for the rolling CRC checksum
     /// computed with the 64 bits CRC_64_GO_ISO
     pub start_checksum: u64,
-    /// Uuid of the database associated with this log.
-    pub db_id: u128,
+    /// Uuid of the this log.
+    pub log_id: u128,
     /// Frame_no of the first frame in the log
     pub start_frame_no: FrameNo,
     /// entry count in file
@@ -836,7 +836,11 @@ impl ReplicationLogger {
 
         Ok(Self {
             generation: Generation::new(generation_start_frame_no.unwrap_or(0)),
-            compactor: LogCompactor::new(&db_path, log_file.header.db_id, callback)?,
+            compactor: LogCompactor::new(
+                &db_path,
+                Uuid::from_u128(log_file.header.log_id),
+                callback,
+            )?,
             log_file: RwLock::new(log_file),
             db_path,
             closed_signal,
@@ -885,8 +889,8 @@ impl ReplicationLogger {
         Self::from_log_file(data_path, log_file, callback, auto_checkpoint)
     }
 
-    pub fn database_id(&self) -> anyhow::Result<Uuid> {
-        Ok(Uuid::from_u128((self.log_file.read()).header().db_id))
+    pub fn log_id(&self) -> Uuid {
+        Uuid::from_u128((self.log_file.read()).header().log_id)
     }
 
     /// Write pages to the log, without updating the file header.

@@ -35,7 +35,7 @@ const MAX_SNAPSHOT_NUMBER: usize = 32;
 #[repr(C)]
 pub struct SnapshotFileHeader {
     /// id of the database
-    pub db_id: u128,
+    pub log_id: u128,
     /// first frame in the snapshot
     pub start_frame_no: u64,
     /// end frame in the snapshot
@@ -171,6 +171,10 @@ impl SnapshotFile {
             other => other,
         })
     }
+
+    pub fn header(&self) -> &SnapshotFileHeader {
+        &self.header
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -183,18 +187,19 @@ pub type NamespacedSnapshotCallback =
     Arc<dyn Fn(&Path, &NamespaceName) -> anyhow::Result<()> + Send + Sync>;
 
 impl LogCompactor {
-    pub fn new(db_path: &Path, db_id: u128, callback: SnapshotCallback) -> anyhow::Result<Self> {
+    pub fn new(db_path: &Path, log_id: Uuid, callback: SnapshotCallback) -> anyhow::Result<Self> {
         // we create a 0 sized channel, in order to create backpressure when we can't
         // keep up with snapshop creation: if there isn't any ongoind comptaction task processing,
         // the compact does not block, and the log is compacted in the background. Otherwise, the
         // block until there is a free slot to perform compaction.
         let (sender, receiver) = bounded::<(LogFile, PathBuf, u32)>(0);
-        let mut merger = SnapshotMerger::new(db_path, db_id)?;
+        let mut merger = SnapshotMerger::new(db_path, log_id)?;
         let db_path = db_path.to_path_buf();
         let snapshot_dir_path = snapshot_dir_path(&db_path);
+        // FIXME: use tokio task for compaction
         let _handle = std::thread::spawn(move || {
             while let Ok((file, log_path, size_after)) = receiver.recv() {
-                match perform_compaction(&db_path, file, db_id) {
+                match perform_compaction(&db_path, file, log_id) {
                     Ok((snapshot_name, snapshot_frame_count)) => {
                         tracing::info!("snapshot `{snapshot_name}` successfully created");
 
@@ -252,12 +257,12 @@ struct SnapshotMerger {
 }
 
 impl SnapshotMerger {
-    fn new(db_path: &Path, db_id: u128) -> anyhow::Result<Self> {
+    fn new(db_path: &Path, log_id: Uuid) -> anyhow::Result<Self> {
         let (sender, receiver) = mpsc::channel();
 
         let db_path = db_path.to_path_buf();
         let handle =
-            std::thread::spawn(move || Self::run_snapshot_merger_loop(receiver, &db_path, db_id));
+            std::thread::spawn(move || Self::run_snapshot_merger_loop(receiver, &db_path, log_id));
 
         Ok(Self {
             sender,
@@ -274,13 +279,13 @@ impl SnapshotMerger {
     fn run_snapshot_merger_loop(
         receiver: mpsc::Receiver<(String, u64, u32)>,
         db_path: &Path,
-        db_id: u128,
+        log_id: Uuid,
     ) -> anyhow::Result<()> {
         let mut snapshots = Self::init_snapshot_info_list(db_path)?;
         while let Ok((name, size, db_page_count)) = receiver.recv() {
             snapshots.push((name, size));
             if Self::should_compact(&snapshots, db_page_count) {
-                let compacted_snapshot_info = Self::merge_snapshots(&snapshots, db_path, db_id)?;
+                let compacted_snapshot_info = Self::merge_snapshots(&snapshots, db_path, log_id)?;
                 snapshots.clear();
                 snapshots.push(compacted_snapshot_info);
             }
@@ -323,13 +328,18 @@ impl SnapshotMerger {
     fn merge_snapshots(
         snapshots: &[(String, u64)],
         db_path: &Path,
-        db_id: u128,
+        log_id: Uuid,
     ) -> anyhow::Result<(String, u64)> {
-        let mut builder = SnapshotBuilder::new(db_path, db_id)?;
+        let mut builder = SnapshotBuilder::new(db_path, log_id)?;
         let snapshot_dir_path = snapshot_dir_path(db_path);
+        let mut size_after = None;
         for (name, _) in snapshots.iter().rev() {
             let snapshot = SnapshotFile::open(&snapshot_dir_path.join(name))?;
-            let iter = snapshot.frames_iter();
+            // The size after the merged snapshot is the size after the first snapshot to be merged
+            if size_after.is_none() {
+                size_after.replace(snapshot.header.size_after);
+            }
+            let iter = snapshot.frames_iter_mut();
             builder.append_frames(iter)?;
         }
 
@@ -338,6 +348,7 @@ impl SnapshotMerger {
 
         builder.header.start_frame_no = start_frame_no;
         builder.header.end_frame_no = end_frame_no;
+        builder.header.size_after = size_after.unwrap();
 
         let compacted_snapshot_infos = builder.finish()?;
 
@@ -386,7 +397,7 @@ fn snapshot_dir_path(db_path: &Path) -> PathBuf {
 }
 
 impl SnapshotBuilder {
-    fn new(db_path: &Path, db_id: u128) -> anyhow::Result<Self> {
+    fn new(db_path: &Path, log_id: Uuid) -> anyhow::Result<Self> {
         let snapshot_dir_path = snapshot_dir_path(db_path);
         std::fs::create_dir_all(&snapshot_dir_path)?;
         let mut target = BufWriter::new(NamedTempFile::new_in(&snapshot_dir_path)?);
@@ -396,7 +407,7 @@ impl SnapshotBuilder {
         Ok(Self {
             seen_pages: HashSet::new(),
             header: SnapshotFileHeader {
-                db_id,
+                log_id: log_id.as_u128(),
                 start_frame_no: u64::MAX,
                 end_frame_no: u64::MIN,
                 frame_count: 0,
@@ -455,7 +466,7 @@ impl SnapshotBuilder {
         file.as_file().write_all_at(bytes_of(&self.header), 0)?;
         let snapshot_name = format!(
             "{}-{}-{}.snap",
-            Uuid::from_u128(self.header.db_id),
+            Uuid::from_u128(self.header.log_id),
             self.header.start_frame_no,
             self.header.end_frame_no,
         );
@@ -469,10 +480,10 @@ impl SnapshotBuilder {
 fn perform_compaction(
     db_path: &Path,
     file_to_compact: LogFile,
-    db_id: u128,
+    log_id: Uuid,
 ) -> anyhow::Result<(String, u64)> {
-    let mut builder = SnapshotBuilder::new(db_path, db_id)?;
-    builder.append_frames(file_to_compact.rev_frames_iter()?)?;
+    let mut builder = SnapshotBuilder::new(db_path, log_id)?;
+    builder.append_frames(file_to_compact.rev_frames_iter_mut()?)?;
     builder.finish()
 }
 
@@ -495,8 +506,8 @@ mod test {
     fn compact_file_create_snapshot() {
         let temp = tempfile::NamedTempFile::new().unwrap();
         let mut log_file = LogFile::new(temp.as_file().try_clone().unwrap(), 0, None).unwrap();
-        let db_id = Uuid::new_v4();
-        log_file.header.db_id = db_id.as_u128();
+        let log_id = Uuid::new_v4();
+        log_file.header.log_id = log_id.as_u128();
         log_file.write_header().unwrap();
 
         // add 50 pages, each one in two versions
@@ -515,8 +526,7 @@ mod test {
         log_file.commit().unwrap();
 
         let dump_dir = tempdir().unwrap();
-        let compactor =
-            LogCompactor::new(dump_dir.path(), db_id.as_u128(), Box::new(|_| Ok(()))).unwrap();
+        let compactor = LogCompactor::new(dump_dir.path(), log_id, Box::new(|_| Ok(()))).unwrap();
         compactor
             .compact(log_file, temp.path().to_path_buf(), 25)
             .unwrap();
@@ -524,7 +534,7 @@ mod test {
         thread::sleep(Duration::from_secs(1));
 
         let snapshot_path =
-            snapshot_dir_path(dump_dir.path()).join(format!("{}-{}-{}.snap", db_id, 0, 49));
+            snapshot_dir_path(dump_dir.path()).join(format!("{}-{}-{}.snap", log_id, 0, 49));
         let snapshot = read(&snapshot_path).unwrap();
         let header: SnapshotFileHeader =
             pod_read_unaligned(&snapshot[..std::mem::size_of::<SnapshotFileHeader>()]);
