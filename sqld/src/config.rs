@@ -136,6 +136,7 @@ impl Default for DbConfig {
             max_total_response_size: bytesize::mb(10u64),
             snapshot_exec: None,
             checkpoint_interval: None,
+            auto_checkpoint: 1000,
         }
     }
 }

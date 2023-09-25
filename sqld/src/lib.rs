@@ -6,7 +6,6 @@ use std::str::FromStr;
 use std::sync::{Arc, Weak};
 
 use crate::auth::Auth;
-use crate::connection::{Connection, MakeConnection};
 use crate::error::Error;
 use crate::migration::maybe_migrate;
 use crate::net::Accept;
@@ -39,14 +38,6 @@ use tokio::task::JoinSet;
 use tokio::time::Duration;
 use url::Url;
 use utils::services::idle_shutdown::IdleShutdownKicker;
-
-use crate::auth::Auth;
-use crate::error::Error;
-use crate::migration::maybe_migrate;
-use crate::net::Accept;
-use crate::net::AddrIncoming;
-use crate::stats::Stats;
-
 pub mod config;
 pub mod connection;
 pub mod net;

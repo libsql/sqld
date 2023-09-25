@@ -33,10 +33,7 @@ use crate::replication::primary::logger::{ReplicationLoggerHookCtx, REPLICATION_
 use crate::replication::replica::Replicator;
 use crate::replication::{FrameNo, NamespacedSnapshotCallback, ReplicationLogger};
 use crate::stats::Stats;
-use crate::{
-    run_periodic_checkpoint, StatsSender, BLOCKING_RT, DB_CREATE_TIMEOUT, DEFAULT_AUTO_CHECKPOINT,
-    MAX_CONCURRENT_DBS,
-};
+use crate::{StatsSender, BLOCKING_RT, DB_CREATE_TIMEOUT, MAX_CONCURRENT_DBS};
 
 use crate::namespace::fork::PointInTimeRestore;
 pub use fork::ForkError;
@@ -620,7 +617,6 @@ pub struct PrimaryNamespaceConfig {
     pub max_total_response_size: u64,
     pub checkpoint_interval: Option<Duration>,
     pub disable_namespace: bool,
-    pub checkpoint_interval: Option<Duration>,
     pub auto_checkpoint: u32,
 }
 
@@ -754,7 +750,7 @@ impl Namespace<PrimaryDatabase> {
                 ));
             }
         }
-        
+
         Ok(Self {
             tasks: join_set,
             db: PrimaryDatabase {
