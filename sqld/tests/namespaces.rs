@@ -33,6 +33,7 @@ mod test {
                         tls_config: None,
                     }),
                     disable_namespaces: false,
+                    disable_default_namespace: true,
                     ..Default::default()
                 };
 
@@ -51,41 +52,65 @@ mod test {
 
         sim.client("client", async {
             let client = Client::new();
-            client.post("http://primary:9090/v1/namespaces/foo/create", json!({})).await.unwrap();
+            client.post("http://primary:9090/v1/namespaces/foo/create", json!({})).await?;
 
             let foo = Database::open_remote_with_connector("http://foo.primary:8080", "", TurmoilConnector)?;
-            let foo_conn = foo.connect().unwrap();
+            let foo_conn = foo.connect()?;
 
-            foo_conn.execute("create table test (c)", ()).await.unwrap();
-            foo_conn.execute("insert into test values (42)", ()).await.unwrap();
+            foo_conn.execute("create table test (c)", ()).await?;
+            foo_conn.execute("insert into test values (42)", ()).await?;
 
-            client.post("http://primary:9090/v1/namespaces/foo/fork/bar", ()).await.unwrap();
+            client.post("http://primary:9090/v1/namespaces/foo/fork/bar", ()).await?;
 
             let bar = Database::open_remote_with_connector("http://bar.primary:8080", "", TurmoilConnector)?;
-            let bar_conn = bar.connect().unwrap();
+            let bar_conn = bar.connect()?;
 
             // what's in foo is in bar as well
-            let mut rows = bar_conn.query("select count(*) from test", ()).await.unwrap();
+            let mut rows = bar_conn.query("select count(*) from test", ()).await?;
             assert!(matches!(
                 rows.next().unwrap().unwrap().get_value(0).unwrap(),
                 Value::Integer(1)
             ));
 
-            bar_conn.execute("insert into test values (42)", ()).await.unwrap();
+            bar_conn.execute("insert into test values (42)", ()).await?;
 
             // add something to bar
-            let mut rows = bar_conn.query("select count(*) from test", ()).await.unwrap();
+            let mut rows = bar_conn.query("select count(*) from test", ()).await?;
             assert!(matches!(
-                rows.next().unwrap().unwrap().get_value(0).unwrap(),
+                rows.next().unwrap().unwrap().get_value(0)?,
                 Value::Integer(2)
             ));
 
             // ... and make sure it doesn't exist in foo
-            let mut rows = foo_conn.query("select count(*) from test", ()).await.unwrap();
+            let mut rows = foo_conn.query("select count(*) from test", ()).await?;
             assert!(matches!(
-                rows.next().unwrap().unwrap().get_value(0).unwrap(),
+                rows.next().unwrap().unwrap().get_value(0)?,
                 Value::Integer(1)
             ));
+
+            Ok(())
+        });
+
+        sim.run().unwrap();
+    }
+
+    #[test]
+    fn delete_namespace() {
+        let mut sim = Builder::new().build();
+        let tmp = tempdir().unwrap();
+        make_primary(&mut sim, tmp.path().to_path_buf());
+
+        sim.client("client", async {
+            let client = Client::new();
+            client.post("http://primary:9090/v1/namespaces/foo/create", json!({})).await?;
+
+            let foo = Database::open_remote_with_connector("http://foo.primary:8080", "", TurmoilConnector)?;
+            let foo_conn = foo.connect()?;
+            foo_conn.execute("create table test (c)", ()).await?;
+
+            client.post("http://primary:9090/v1/namespaces/foo/destroy", json!({})).await.unwrap();
+            // namespace doesn't exist anymore
+            assert!(foo_conn.execute("create table test (c)", ()).await.is_err());
 
             Ok(())
         });
