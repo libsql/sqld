@@ -12,6 +12,8 @@ use hook::{
     InjectorHookCtx, INJECTOR_METHODS, LIBSQL_INJECT_FATAL, LIBSQL_INJECT_OK, LIBSQL_INJECT_OK_TXN,
 };
 
+use self::hook::InjectorHook;
+
 mod headers;
 mod hook;
 
@@ -29,9 +31,7 @@ pub struct Injector {
     capacity: usize,
     /// Injector connection
     // connection must be dropped before the hook context
-    connection: Arc<Mutex<sqld_libsql_bindings::Connection<'static>>>,
-    /// Pointer to the hook
-    _hook_ctx: Box<InjectorHookCtx>,
+    connection: Arc<Mutex<sqld_libsql_bindings::Connection<InjectorHook>>>,
 }
 
 /// Methods from this trait are called before and after performing a frame injection.
@@ -42,8 +42,7 @@ impl Injector {
     pub fn new(path: &Path, buffer_capacity: usize) -> crate::Result<Self> {
         let buffer = FrameBuffer::default();
         let ctx = InjectorHookCtx::new(buffer.clone());
-        let mut ctx = Box::new(ctx);
-        std::fs::create_dir_all(&path)?;
+        std::fs::create_dir_all(path)?;
         let connection = sqld_libsql_bindings::Connection::open(
             path,
             OpenFlags::SQLITE_OPEN_READ_WRITE
@@ -52,7 +51,7 @@ impl Injector {
                 | OpenFlags::SQLITE_OPEN_NO_MUTEX,
             &INJECTOR_METHODS,
             // safety: hook is dropped after connection
-            unsafe { &mut *(ctx.as_mut() as *mut _) },
+            ctx,
             DEFAULT_AUTO_CHECKPOINT,
         )?;
 
@@ -61,7 +60,6 @@ impl Injector {
             buffer,
             capacity: buffer_capacity,
             connection: Arc::new(Mutex::new(connection)),
-            _hook_ctx: ctx,
         })
     }
 

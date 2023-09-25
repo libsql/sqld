@@ -571,7 +571,7 @@ impl Namespace<ReplicaDatabase> {
         .await?;
         let applied_frame_no_receiver = replicator.current_frame_no_notifier.subscribe();
         let mut join_set = JoinSet::new();
-        join_set.spawn_local(replicator.run());
+        join_set.spawn(replicator.run());
 
         let stats = make_stats(
             &db_path,

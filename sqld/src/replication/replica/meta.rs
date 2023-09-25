@@ -74,9 +74,9 @@ impl WalIndexMeta {
         match self.data {
             Some(meta) => {
                 if meta.log_id != hello_log_id {
-                    return Err(ReplicationError::LogIncompatible);
+                    Err(ReplicationError::LogIncompatible)
                 } else {
-                    return Ok(());
+                    Ok(())
                 }
             }
             None => {
@@ -97,7 +97,7 @@ impl WalIndexMeta {
             let s = self.file.write(bytes_of(&data)).await?;
             // WalIndexMeta is smaller than a page size, and aligned at the beginning of the file, if
             // should always be written in a single call
-            assert_eq!(s as usize, size_of::<WalIndexMetaData>());
+            assert_eq!(s, size_of::<WalIndexMetaData>());
             self.file.flush().await?;
         }
 
