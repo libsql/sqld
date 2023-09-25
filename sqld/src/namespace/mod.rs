@@ -26,7 +26,7 @@ use crate::auth::Authenticated;
 use crate::connection::config::DatabaseConfigStore;
 use crate::connection::libsql::{open_db, LibSqlDbFactory};
 use crate::connection::write_proxy::MakeWriteProxyConnection;
-use crate::connection::MakeConnection;
+use crate::connection::{Connection, MakeConnection};
 use crate::database::{Database, PrimaryDatabase, ReplicaDatabase};
 use crate::error::{Error, LoadDumpError};
 use crate::replication::primary::logger::{ReplicationLoggerHookCtx, REPLICATION_METHODS};
@@ -620,6 +620,7 @@ pub struct PrimaryNamespaceConfig {
     pub max_total_response_size: u64,
     pub checkpoint_interval: Option<Duration>,
     pub disable_namespace: bool,
+    pub checkpoint_interval: Option<Duration>,
     pub auto_checkpoint: u32,
 }
 
@@ -753,7 +754,7 @@ impl Namespace<PrimaryDatabase> {
                 ));
             }
         }
-
+        
         Ok(Self {
             tasks: join_set,
             db: PrimaryDatabase {
@@ -944,6 +945,54 @@ async fn run_periodic_compactions(logger: Arc<ReplicationLogger>) -> anyhow::Res
             .await
             .expect("Compaction task crashed")
             .context("Compaction failed")?;
+    }
+}
+
+async fn run_periodic_checkpoint<C>(
+    connection_maker: Arc<C>,
+    period: Duration,
+) -> anyhow::Result<()>
+where
+    C: MakeConnection,
+{
+    use tokio::time::{interval, sleep, Instant, MissedTickBehavior};
+
+    const RETRY_INTERVAL: Duration = Duration::from_secs(60);
+    tracing::info!("setting checkpoint interval to {:?}", period);
+    let mut interval = interval(period);
+    interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    let mut retry: Option<Duration> = None;
+    loop {
+        if let Some(retry) = retry.take() {
+            if retry.is_zero() {
+                tracing::warn!("database was not set in WAL journal mode");
+                return Ok(());
+            }
+            sleep(retry).await;
+        } else {
+            interval.tick().await;
+        }
+        retry = match connection_maker.create().await {
+            Ok(conn) => {
+                tracing::trace!("database checkpoint");
+                let start = Instant::now();
+                match conn.checkpoint().await {
+                    Ok(_) => {
+                        let elapsed = Instant::now() - start;
+                        tracing::info!("database checkpoint finished (took: {:?})", elapsed);
+                        None
+                    }
+                    Err(err) => {
+                        tracing::warn!("failed to execute checkpoint: {}", err);
+                        Some(RETRY_INTERVAL)
+                    }
+                }
+            }
+            Err(err) => {
+                tracing::warn!("couldn't connect: {}", err);
+                Some(RETRY_INTERVAL)
+            }
+        }
     }
 }
 

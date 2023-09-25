@@ -420,6 +420,7 @@ where
             max_response_size: self.db_config.max_response_size,
             max_total_response_size: self.db_config.max_total_response_size,
             disable_namespace: self.disable_namespaces,
+            checkpoint_interval: self.db_config.checkpoint_interval,
             auto_checkpoint: self.db_config.auto_checkpoint,
         };
         let factory = PrimaryNamespaceMaker::new(conf);

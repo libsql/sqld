@@ -695,21 +695,28 @@ impl Replicator {
 
     /// Returns info, which generation had the most recent snapshot.
     async fn get_last_snapshot(&self) -> Option<Uuid> {
-        let path = format!("{}.snaplock", self.db_path);
-        let mut f = File::open(path).await.ok()?;
+        let snapshot_lock_file_path = format!("{}.snaplock", self.db_path);
+        let mut f = File::open(snapshot_lock_file_path).await.ok()?;
         let mut buf = [0u8; 16];
         f.read_exact(&mut buf).await.ok()?;
         Some(Uuid::from_bytes(buf))
     }
 
     async fn save_last_snapshot(db_path: &str, generation: &Uuid) -> Result<()> {
+        let snapshot_lock_file_path = format!("{}.snaplock", db_path);
         let mut f = OpenOptions::new()
             .truncate(true)
             .write(true)
             .create(true)
-            .open(format!("{}.snaplock", db_path))
+            .open(snapshot_lock_file_path)
             .await?;
         f.write_all(generation.as_ref()).await?;
+        f.shutdown().await?;
+        tracing::trace!(
+            "cached last snapshotted generation: {} ({:?})",
+            generation,
+            generation.date_time().unwrap()
+        );
         Ok(())
     }
 
@@ -722,8 +729,14 @@ impl Replicator {
         if let Some(snapshot_interval) = self.snapshot_interval {
             if let Some(snapshot_gen) = self.get_last_snapshot().await {
                 if let Some(snapshot_time) = snapshot_gen.date_time() {
+                    tracing::trace!(
+                        "last known snapshot: {} ({:?})",
+                        snapshot_gen,
+                        snapshot_time
+                    );
                     let next_snapshot_date = snapshot_time + snapshot_interval;
-                    if snapshot_gen == *generation || next_snapshot_date < Utc::now().naive_utc() {
+                    let now = Utc::now().naive_utc();
+                    if snapshot_gen == *generation || next_snapshot_date > now {
                         return false;
                     }
                 }

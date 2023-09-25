@@ -177,6 +177,11 @@ struct Cli {
     #[clap(long, env = "SQLD_SNAPSHOT_EXEC")]
     snapshot_exec: Option<String>,
 
+    /// Interval in seconds, in which WAL checkpoint is being called.
+    /// By default, the interval is 1 hour.
+    #[clap(long, env = "SQLD_CHECKPOINT_INTERVAL_S")]
+    checkpoint_interval_s: Option<u64>,
+
     /// SQLite autocheckpoint WAL-file setting.
     /// By default equal to SQLite default: 1000 pages (~4MiB).
     #[clap(long, env = "SQLD_AUTO_CHECKPOINT", default_value = "1000")]

@@ -41,7 +41,7 @@ async fn configure_server(
     addr: SocketAddr,
     admin_addr: Option<SocketAddr>,
     path: impl Into<PathBuf>,
-    auto_checkpoint: u32,
+    checkpoint_interval: Option<Duration>,
 ) -> Server {
     let http_acceptor = AddrIncoming::new(tokio::net::TcpListener::bind(addr).await.unwrap());
     Server {
@@ -55,7 +55,8 @@ async fn configure_server(
             max_response_size: 10000000 * 4096,
             max_total_response_size: 10000000 * 4096,
             snapshot_exec: None,
-            auto_checkpoint,
+            checkpoint_interval,
+            auto_checkpoint: 1000,
         },
         admin_api_config: if let Some(addr) = admin_addr {
             Some(AdminApiConfig {
@@ -122,7 +123,7 @@ async fn backup_restore() {
         .unwrap();
 
     let make_server =
-        || async { configure_server(&options, listener_addr, Some(admin_addr), PATH, 1000).await };
+        || async { configure_server(&options, listener_addr, Some(admin_addr), PATH, None).await };
 
     let recover_time = {
         tracing::info!(
@@ -299,8 +300,16 @@ async fn rollback_restore() {
         restore_transaction_page_swap_after: 1, // in this test swap should happen at least once
         ..bottomless::replicator::Options::from_env().unwrap()
     };
-    let make_server =
-        || async { configure_server(&options, listener_addr, None, PATH, 1000).await };
+    let make_server = || async {
+        configure_server(
+            &options,
+            listener_addr,
+            None,
+            PATH,
+            Some(Duration::from_secs(1)),
+        )
+        .await
+    };
 
     {
         tracing::info!("---STEP 1: create db, write row, rollback---");
@@ -386,11 +395,11 @@ async fn periodic_snapshot() {
     const BUCKET: &str = "periodicsnapshot";
     const PATH: &str = "periodic_snapshot.sqld";
     const PORT: u16 = 15003;
-    const AUTO_CHECKPOINT: usize = 100;
 
     let _ = S3BucketCleaner::new(BUCKET).await;
     assert_bucket_occupancy(BUCKET, true).await;
 
+    let snapshot_interval = Duration::from_secs(3);
     let options = bottomless::replicator::Options {
         db_id: Some(DB_ID.to_string()),
         create_bucket_if_not_exists: true,
@@ -398,9 +407,9 @@ async fn periodic_snapshot() {
         use_compression: bottomless::replicator::CompressionKind::Gzip,
         bucket_name: BUCKET.to_string(),
         max_batch_interval: Duration::from_millis(250),
-        restore_transaction_page_swap_after: AUTO_CHECKPOINT as u32,
-        max_frames_per_batch: AUTO_CHECKPOINT,
-        snapshot_interval: Some(Duration::from_secs(3)),
+        restore_transaction_page_swap_after: 100,
+        max_frames_per_batch: 100,
+        snapshot_interval: Some(snapshot_interval),
         ..bottomless::replicator::Options::from_env().unwrap()
     };
     let connection_addr = Url::parse(&format!("http://localhost:{}", PORT)).unwrap();
@@ -411,7 +420,14 @@ async fn periodic_snapshot() {
         .unwrap();
 
     let make_server = || async {
-        configure_server(&options, listener_addr, None, PATH, AUTO_CHECKPOINT as u32).await
+        configure_server(
+            &options,
+            listener_addr,
+            None,
+            PATH,
+            Some(Duration::from_secs(1)),
+        )
+        .await
     };
     {
         let cleaner = DbFileCleaner::new(PATH);
@@ -426,14 +442,17 @@ async fn periodic_snapshot() {
         .await
         .unwrap();
 
-        // generate enough updates for 3 generations to occur
-        perform_updates(&connection_addr, 10, AUTO_CHECKPOINT + 1, "A").await;
-        perform_updates(&connection_addr, 10, AUTO_CHECKPOINT + 1, "B").await;
-        perform_updates(&connection_addr, 10, AUTO_CHECKPOINT + 1, "C").await;
+        // at first there's no snapshot cache file info, so we need to wait for first snasphot to occur
+        perform_updates(&connection_addr, 10, 100, "A").await;
+        sleep(snapshot_interval + Duration::from_secs(1)).await;
 
+        remove_snapshots(BUCKET).await;
+
+        // generate enough updates for 3 generations to occur
         // wait long enough to make sure that updates got to the bottomless but not long enough
         // for a snapshot interval to trigger
-        sleep(Duration::from_secs(2)).await;
+        perform_updates(&connection_addr, 10, 100, "B").await;
+        sleep(Duration::from_secs(1)).await;
 
         let generations = list_generations(BUCKET, DB_ID, "default").await.unwrap();
         assert_ne!(generations.len(), 0, "some generations should be created");
@@ -443,13 +462,7 @@ async fn periodic_snapshot() {
         }
 
         // make sure that snapshot interval passed
-        sleep(Duration::from_secs(2)).await;
-
-        // perform enough updated to trigger checkpoint - checkpoint will call for snapshot
-        perform_updates(&connection_addr, 10, AUTO_CHECKPOINT + 1, "D").await;
-
-        // wait for snapshot
-        sleep(Duration::from_secs(1)).await;
+        sleep(snapshot_interval + Duration::from_secs(1)).await;
 
         let snapshots = snapshot_count(BUCKET, DB_ID, "default").await;
         assert_eq!(snapshots, 1, "snapshot should be created after interval");
@@ -618,6 +631,7 @@ async fn snapshot_count(bucket: &str, db_id: &str, namespace: &str) -> usize {
 /// Remove a snapshot objects from all generation. This may trigger bottomless to do rollup restore
 /// across all generations.
 async fn remove_snapshots(bucket: &str) {
+    tracing::info!("removing all snapshots");
     let client = s3_client().await.unwrap();
     if let Ok(out) = client.list_objects().bucket(bucket).send().await {
         let keys = out
