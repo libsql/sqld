@@ -84,7 +84,7 @@ impl<W: Write> DumpState<W> {
 
                 let mut iter = colss.iter().peekable();
                 while let Some(col) = iter.next() {
-                    write!(&mut select, "{col}")?;
+                    write!(&mut select, "{}", Quoted(col))?;
                     if iter.peek().is_some() {
                         select.push(',');
                     }
