@@ -268,12 +268,18 @@ impl ReplicationLog for ReplicationLogService {
         {
             Ok(Ok(Some(snapshot))) => {
                 BLOCKING_RT.spawn_blocking(move || {
-                    let mut frames = snapshot.frames_iter_from(offset);
+                    let size_after = snapshot.header().size_after;
+                    let mut frames = snapshot.frames_iter_from(offset).peekable();
                     loop {
                         match frames.next() {
-                            Some(Ok(frame)) => {
+                            Some(Ok(mut frame)) => {
+                                // this is the last frame we're sending for this snapshot, set the
+                                // frame_no
+                                if frames.peek().is_none() {
+                                    frame.header_mut().size_after = size_after;
+                                }
                                 let _ = sender.blocking_send(Ok(Frame {
-                                    data: frame.bytes(),
+                                    data: crate::replication::frame::Frame::from(frame).bytes(),
                                 }));
                             }
                             Some(Err(e)) => {

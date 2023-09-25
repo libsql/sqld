@@ -21,7 +21,7 @@ use uuid::Uuid;
 
 use crate::namespace::NamespaceName;
 
-use super::frame::Frame;
+use super::frame::FrameMut;
 use super::primary::logger::LogFile;
 use super::FrameNo;
 
@@ -134,7 +134,7 @@ impl SnapshotFile {
     }
 
     /// Iterator on the frames contained in the snapshot file, in reverse frame_no order.
-    pub fn frames_iter(&self) -> impl Iterator<Item = anyhow::Result<Frame>> + '_ {
+    pub fn frames_iter_mut(&self) -> impl Iterator<Item = anyhow::Result<FrameMut>> + '_ {
         let mut current_offset = 0;
         std::iter::from_fn(move || {
             if current_offset >= self.header.frame_count {
@@ -145,7 +145,7 @@ impl SnapshotFile {
             current_offset += 1;
             let mut buf = BytesMut::zeroed(LogFile::FRAME_SIZE);
             match self.file.read_exact_at(&mut buf, read_offset as _) {
-                Ok(_) => match Frame::try_from_bytes(buf.freeze()) {
+                Ok(_) => match FrameMut::try_from(&*buf) {
                     Ok(frame) => Some(Ok(frame)),
                     Err(e) => Some(Err(e)),
                 },
@@ -158,8 +158,8 @@ impl SnapshotFile {
     pub fn frames_iter_from(
         &self,
         frame_no: u64,
-    ) -> impl Iterator<Item = anyhow::Result<Frame>> + '_ {
-        let mut iter = self.frames_iter();
+    ) -> impl Iterator<Item = anyhow::Result<FrameMut>> + '_ {
+        let mut iter = self.frames_iter_mut();
         std::iter::from_fn(move || match iter.next() {
             Some(Ok(frame)) => {
                 if frame.header().frame_no < frame_no {
@@ -412,7 +412,7 @@ impl SnapshotBuilder {
     /// append frames to the snapshot. Frames must be in decreasing frame_no order.
     fn append_frames(
         &mut self,
-        frames: impl Iterator<Item = anyhow::Result<Frame>>,
+        frames: impl Iterator<Item = anyhow::Result<FrameMut>>,
     ) -> anyhow::Result<()> {
         // We iterate on the frames starting from the end of the log and working our way backward. We
         // make sure that only the most recent version of each file is present in the resulting
@@ -421,7 +421,7 @@ impl SnapshotBuilder {
         // The snapshot file contains the most recent version of each page, in descending frame
         // number order. That last part is important for when we read it later on.
         for frame in frames {
-            let frame = frame?;
+            let mut frame = frame?;
             assert!(frame.header().frame_no < self.last_seen_frame_no);
             self.last_seen_frame_no = frame.header().frame_no;
             if frame.header().frame_no < self.header.start_frame_no {
@@ -432,6 +432,11 @@ impl SnapshotBuilder {
                 self.header.end_frame_no = frame.header().frame_no;
                 self.header.size_after = frame.header().size_after;
             }
+
+            // set all frames as non-commit frame in a snapshot, and let the client decide when to
+            // commit. This is ok because the client will stream frames backward until caught up,
+            // and then commit.
+            frame.header_mut().size_after = 0;
 
             if !self.seen_pages.contains(&frame.header().page_no) {
                 self.seen_pages.insert(frame.header().page_no);
@@ -480,6 +485,7 @@ mod test {
     use bytes::Bytes;
     use tempfile::tempdir;
 
+    use crate::replication::frame::Frame;
     use crate::replication::primary::logger::WalPage;
     use crate::replication::snapshot::SnapshotFile;
 
@@ -526,14 +532,14 @@ mod test {
         assert_eq!(header.start_frame_no, 0);
         assert_eq!(header.end_frame_no, 49);
         assert_eq!(header.frame_count, 25);
-        assert_eq!(header.db_id, db_id.as_u128());
+        assert_eq!(header.log_id, log_id.as_u128());
         assert_eq!(header.size_after, 25);
 
         let mut seen_frames = HashSet::new();
         let mut seen_page_no = HashSet::new();
         let data = &snapshot[std::mem::size_of::<SnapshotFileHeader>()..];
         data.chunks(LogFile::FRAME_SIZE).for_each(|f| {
-            let frame = Frame::try_from_bytes(Bytes::copy_from_slice(f)).unwrap();
+            let frame = Frame::try_from(f).unwrap();
             assert!(!seen_frames.contains(&frame.header().frame_no));
             assert!(!seen_page_no.contains(&frame.header().page_no));
             seen_page_no.insert(frame.header().page_no);

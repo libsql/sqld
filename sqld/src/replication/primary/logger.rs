@@ -23,7 +23,7 @@ use crate::libsql_bindings::ffi::{
     PageHdrIter, PgHdr, Wal, SQLITE_CHECKPOINT_TRUNCATE, SQLITE_IOERR, SQLITE_OK,
 };
 use crate::libsql_bindings::wal_hook::WalHook;
-use crate::replication::frame::{Frame, FrameHeader};
+use crate::replication::frame::{Frame, FrameHeader, FrameMut};
 use crate::replication::snapshot::{find_snapshot_file, LogCompactor, SnapshotFile};
 use crate::replication::{FrameNo, SnapshotCallback, CRC_64_GO_ISO, WAL_MAGIC};
 use crate::LIBSQL_PAGE_SIZE;
@@ -467,8 +467,9 @@ impl LogFile {
     }
 
     /// Returns an iterator over the WAL frame headers
-    #[allow(dead_code)]
-    fn frames_iter(&self) -> anyhow::Result<impl Iterator<Item = anyhow::Result<Frame>> + '_> {
+    pub(crate) fn frames_iter(
+        &self,
+    ) -> anyhow::Result<impl Iterator<Item = anyhow::Result<Frame>> + '_> {
         let mut current_frame_offset = 0;
         Ok(std::iter::from_fn(move || {
             if current_frame_offset >= self.header.frame_count {
@@ -476,14 +477,17 @@ impl LogFile {
             }
             let read_byte_offset = Self::absolute_byte_offset(current_frame_offset);
             current_frame_offset += 1;
-            Some(self.read_frame_byte_offset(read_byte_offset))
+            Some(
+                self.read_frame_byte_offset_mut(read_byte_offset)
+                    .map(|f| f.into()),
+            )
         }))
     }
 
     /// Returns an iterator over the WAL frame headers
-    pub fn rev_frames_iter(
+    pub fn rev_frames_iter_mut(
         &self,
-    ) -> anyhow::Result<impl Iterator<Item = anyhow::Result<Frame>> + '_> {
+    ) -> anyhow::Result<impl Iterator<Item = anyhow::Result<FrameMut>> + '_> {
         let mut current_frame_offset = self.header.frame_count;
 
         Ok(std::iter::from_fn(move || {
@@ -492,7 +496,7 @@ impl LogFile {
             }
             current_frame_offset -= 1;
             let read_byte_offset = Self::absolute_byte_offset(current_frame_offset);
-            let frame = self.read_frame_byte_offset(read_byte_offset);
+            let frame = self.read_frame_byte_offset_mut(read_byte_offset);
             Some(frame)
         }))
     }
@@ -564,9 +568,9 @@ impl LogFile {
             return Err(LogReadError::Ahead);
         }
 
-        let frame = self.read_frame_byte_offset(self.byte_offset(frame_no)?.unwrap())?;
+        let frame = self.read_frame_byte_offset_mut(self.byte_offset(frame_no)?.unwrap())?;
 
-        Ok(frame)
+        Ok(frame.into())
     }
 
     fn should_compact(&self) -> bool {
@@ -630,12 +634,11 @@ impl LogFile {
         Ok(())
     }
 
-    fn read_frame_byte_offset(&self, offset: u64) -> anyhow::Result<Frame> {
+    fn read_frame_byte_offset_mut(&self, offset: u64) -> anyhow::Result<FrameMut> {
         let mut buffer = BytesMut::zeroed(LogFile::FRAME_SIZE);
         self.file.read_exact_at(&mut buffer, offset)?;
-        let buffer = buffer.freeze();
 
-        Frame::try_from_bytes(buffer)
+        FrameMut::try_from(&*buffer)
     }
 
     fn last_commited_frame_no(&self) -> Option<FrameNo> {
@@ -937,7 +940,7 @@ impl ReplicationLogger {
         }
 
         let last_frame = {
-            let mut frames_iter = log_file.rev_frames_iter()?;
+            let mut frames_iter = log_file.rev_frames_iter_mut()?;
             let Some(last_frame_res) = frames_iter.next() else {
                 // the log file is empty, nothing to compact
                 return Ok(false);
