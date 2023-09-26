@@ -641,6 +641,7 @@ impl Namespace<PrimaryDatabase> {
         restore_option: RestoreOption,
         allow_creation: bool,
     ) -> crate::Result<Self> {
+        dbg!();
         // if namespaces are disabled, then we allow creation for the default namespace.
         let allow_creation =
             allow_creation || (config.disable_namespace && name == NamespaceName::default());
