@@ -300,6 +300,7 @@ fn make_db_config(config: &Cli) -> anyhow::Result<DbConfig> {
         max_response_size: config.max_response_size.as_u64(),
         max_total_response_size: config.max_total_response_size.as_u64(),
         snapshot_exec: config.snapshot_exec.clone(),
+        checkpoint_interval: config.checkpoint_interval_s.map(Duration::from_secs),
         auto_checkpoint: config.auto_checkpoint,
     })
 }
