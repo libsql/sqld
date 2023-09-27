@@ -4,7 +4,7 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Weak};
 
-use anyhow::{bail, Context as _};
+use anyhow::{bail, Context as _, ensure};
 use async_lock::{RwLock, RwLockUpgradableReadGuard};
 use bottomless::replicator::Options;
 use bytes::Bytes;
@@ -884,8 +884,10 @@ where
     let mut curr = String::new();
     let mut line = String::new();
     let mut skipped_wasm_table = false;
+    let mut n_stmt = 0;
 
     while let Ok(n) = reader.read_line(&mut curr).await {
+
         if n == 0 {
             break;
         }
@@ -908,11 +910,21 @@ where
         }
 
         if line.ends_with(';') {
+            n_stmt += 1;
+            if n_stmt > 2 {
+                ensure!(!conn.is_autocommit(), "a dump should execute within a transaction.");
+            }
+
             block_in_place(|| conn.execute(&line, ()))?;
             line.clear();
         } else {
             line.push(' ');
         }
+    }
+
+    if !conn.is_autocommit() {
+        let _ = conn.execute("rollback", ());
+        bail!("the dump should commit the transaction.");
     }
 
     Ok(())
