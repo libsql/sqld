@@ -8,11 +8,8 @@ mod test {
 
     use std::{convert::Infallible, path::PathBuf};
 
-    use common::{
-        http::Client,
-        net::{TestServer, TurmoilAcceptor},
-    };
-    use hyper::{service::make_service_fn, Body, Response};
+    use common::{net::{TestServer, TurmoilAcceptor}, http::Client};
+    use hyper::{service::make_service_fn, Response, Body, StatusCode};
     use libsql::{Database, Value};
     use serde_json::json;
     use sqld::config::{AdminApiConfig, RpcServerConfig, UserApiConfig};
@@ -162,13 +159,11 @@ COMMIT;"#;
 
         sim.host("dump-store", || async {
             let incoming = TurmoilAcceptor::bind(([0, 0, 0, 0], 8080)).await?;
-            let server =
-                hyper::server::Server::builder(incoming).serve(make_service_fn(|_conn| async {
-                    Ok::<_, Infallible>(service_fn(|_req| async {
-                        dbg!();
-                        Ok::<_, Infallible>(Response::new(Body::from(DUMP)))
-                    }))
-                }));
+            let server = hyper::server::Server::builder(incoming).serve(make_service_fn(|_conn| async {
+                Ok::<_, Infallible>(service_fn(|_req| async {
+                    Ok::<_, Infallible>(Response::new(Body::from(DUMP)))
+                }))
+            }));
 
             server.await.unwrap();
 
@@ -177,24 +172,55 @@ COMMIT;"#;
 
         sim.client("client", async {
             let client = Client::new();
-            dbg!();
-            client
-                .post(
-                    "http://primary:9090/v1/namespaces/foo/create",
-                    json!({ "dump_url": "http://dump-store:8080/"}),
-                )
-                .await
-                .unwrap()
-                .json::<serde_json::Value>()
-                .await
-                .unwrap();
+            client.post("http://primary:9090/v1/namespaces/foo/create", json!({ "dump_url": "http://dump-store:8080/"})).await.unwrap().json::<serde_json::Value>().await.unwrap();
 
-            dbg!();
-            let foo = Database::open_remote_with_connector(
-                "http://foo.primary:8080",
-                "",
-                TurmoilConnector,
-            )?;
+            let foo = Database::open_remote_with_connector("http://foo.primary:8080", "", TurmoilConnector)?;
+            let foo_conn = foo.connect()?;
+            let mut rows = foo_conn.query("select count(*) from test", ()).await?;
+            assert!(matches!(
+                rows.next().unwrap().unwrap().get_value(0)?,
+                Value::Integer(1)
+            ));
+
+            Ok(())
+        });
+
+        sim.run().unwrap();
+    }
+
+    #[test]
+    #[ignore = "need to remove block in place in load dump, wait for #693"]
+    fn load_namespace_from_dump_from_file() {
+        const DUMP: &str = r#"
+PRAGMA foreign_keys=OFF;
+BEGIN TRANSACTION;
+CREATE TABLE test (x);
+INSERT INTO test VALUES(42);
+COMMIT;"#;
+
+        let mut sim = Builder::new().build();
+        let tmp = tempdir().unwrap();
+        let tmp_path = tmp.path().to_path_buf();
+
+        std::fs::write(tmp_path.join("dump.sql"), &DUMP).unwrap();
+
+        make_primary(&mut sim, tmp.path().to_path_buf());
+
+        sim.client("client", async move {
+            let client = Client::new();
+
+            // path is not absolute is an error
+            let resp = client.post("http://primary:9090/v1/namespaces/foo/create", json!({ "dump_url": "file:dump.sql"})).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+            // path doesn't exist is an error
+            let resp = client.post("http://primary:9090/v1/namespaces/foo/create", json!({ "dump_url": "file:/dump.sql"})).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+            let resp = client.post("http://primary:9090/v1/namespaces/foo/create", json!({ "dump_url": format!("file:{}", tmp_path.join("dump.sql").display())})).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::OK, "{}", resp.json::<serde_json::Value>().await.unwrap_or_default());
+
+            let foo = Database::open_remote_with_connector("http://foo.primary:8080", "", TurmoilConnector)?;
             let foo_conn = foo.connect()?;
             let mut rows = foo_conn.query("select count(*) from test", ()).await?;
             assert!(matches!(

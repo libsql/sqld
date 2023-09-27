@@ -7,6 +7,7 @@ use futures::TryStreamExt;
 use hyper::Body;
 use serde::{Deserialize, Serialize};
 use std::io::ErrorKind;
+use std::path::PathBuf;
 use std::sync::Arc;
 use tokio_util::io::ReaderStream;
 use url::Url;
@@ -75,7 +76,7 @@ async fn handle_get_index() -> &'static str {
     "Welcome to the sqld admin API"
 }
 
-async fn handle_get_config<M: MakeNamespace, C>(
+async fn handle_get_config<M: MakeNamespace, C: Connector>(
     State(app_state): State<Arc<AppState<M, C>>>,
     Path(namespace): Path<String>,
 ) -> crate::Result<Json<HttpDatabaseConfig>> {
@@ -165,7 +166,6 @@ async fn handle_create_namespace<M: MakeNamespace, C: Connector>(
     Path(namespace): Path<String>,
     Json(req): Json<CreateNamespaceReq>,
 ) -> crate::Result<()> {
-    dbg!();
     let dump = match req.dump_url {
         Some(ref url) => {
             RestoreOption::Dump(dump_stream_from_url(url, app_state.connector.clone()).await?)
@@ -221,9 +221,7 @@ where
             Ok(Box::new(body))
         }
         "file" => {
-            let path = url
-                .to_file_path()
-                .map_err(|_| LoadDumpError::InvalidDumpUrl)?;
+            let path = PathBuf::from(url.path());
             if !path.is_absolute() {
                 return Err(LoadDumpError::DumpFilePathNotAbsolute);
             }
