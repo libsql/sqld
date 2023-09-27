@@ -946,7 +946,7 @@ impl Replicator {
 
     // Parses the frame and page number from given key.
     // Format: <db-name>-<generation>/<first-frame-no>-<last-frame-no>-<timestamp>.<compression-kind>
-    fn parse_frame_range(key: &str) -> Option<(u32, u32, u64, CompressionKind)> {
+    pub(crate) fn parse_frame_range(key: &str) -> Option<(u32, u32, u64, CompressionKind)> {
         let frame_delim = key.rfind('/')?;
         let frame_suffix = &key[(frame_delim + 1)..];
         let timestamp_delim = frame_suffix.rfind('-')?;

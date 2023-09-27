@@ -7,6 +7,7 @@ mod ffi;
 mod backup;
 mod read;
 pub mod replicator;
+pub mod s3;
 mod transaction_cache;
 pub mod uuid_utils;
 mod wal;

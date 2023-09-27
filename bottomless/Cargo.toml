@@ -15,7 +15,8 @@ aws-config = { version = "0.55" }
 aws-sdk-s3 = { version = "0.28" }
 bytes = "1"
 crc = "3.0.0"
-futures = { version = "0.3.25" }
+futures = { version = "0.3" }
+futures-core = "0.3"
 sqld-libsql-bindings = { version = "0", path = "../sqld-libsql-bindings" }
 tokio = { version = "1.22.2", features = ["rt-multi-thread", "net", "io-std", "io-util", "time", "macros", "sync", "fs"] }
 tokio-util = "0.7"
@@ -25,6 +26,7 @@ arc-swap = "1.6"
 chrono = "0.4.23"
 uuid = "1.4.1"
 rand = "0.8.5"
+async-trait = { version = "0.1", features = [] }
 
 [features]
 libsql_linked_statically = []
