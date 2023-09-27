@@ -384,7 +384,7 @@ impl Replicator {
 
     pub async fn wait_until_snapshotted(&mut self) -> Result<bool> {
         if let Ok(generation) = self.generation() {
-            if !self.main_db_exists_and_not_empty().await {
+            if !self.db_file_has_data().await {
                 tracing::debug!("Not snapshotting, the main db file does not exist or is empty");
                 let _ = self.snapshot_notifier.send(Ok(Some(generation)));
                 return Ok(false);
@@ -750,23 +750,18 @@ impl Replicator {
     ///
     /// If snapshot process was started, an awaiter will be returned - it can be used to wait for
     /// snapshot completion.
-    pub async fn snapshot(
-        &mut self,
-        prev_generation: Option<Uuid>,
-        force: bool,
-    ) -> Result<Option<JoinHandle<()>>> {
+    pub async fn snapshot(&mut self, force: bool) -> Result<Option<JoinHandle<()>>> {
+        let generation = self.generation()?;
         if !self.db_file_has_data().await {
             tracing::debug!("Not snapshotting, the main db file does not exist or is empty");
-            let _ = self.snapshot_notifier.send(Ok(prev_generation));
+            let _ = self.snapshot_notifier.send(Ok(Some(generation)));
             return Ok(None);
         }
-        let generation = self.generation()?;
         if !(force || self.snapshot_interval_passed(&generation).await) {
             tracing::trace!("Not snapshotting, snapshot interval is still in progress");
-            let _ = self.snapshot_notifier.send(Ok(prev_generation));
+            let _ = self.snapshot_notifier.send(Ok(Some(generation)));
             return Ok(None);
         }
-        let generation = self.generation()?;
         tracing::debug!("Snapshotting generation {}", generation);
         let start_ts = Instant::now();
 
