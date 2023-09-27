@@ -155,12 +155,16 @@ fn sync_many_replica() {
                 .json::<serde_json::Value>()
                 .await
                 .unwrap()
-                .get("current_frame_no")?
+                .get("replication_index")?
                 .as_u64()
                 .unwrap())
         }
 
-        let primary_fno = get_frame_no("http://primary:9090/v1/namespaces/default/stats").await;
+        let primary_fno = loop {
+            if let Some(fno) = get_frame_no("http://primary:9090/v1/namespaces/default/stats").await {
+                break fno;
+            }
+        };
 
         // wait for all replicas to sync
         let mut join_set = JoinSet::new();
@@ -168,9 +172,10 @@ fn sync_many_replica() {
             join_set.spawn(async move {
                 let uri = format!("http://replica{i}:9090/v1/namespaces/default/stats");
                 loop {
-                    let replica_fno = get_frame_no(&uri).await;
-                    if replica_fno == primary_fno {
-                        break;
+                    if let Some(replica_fno) = get_frame_no(&uri).await {
+                        if replica_fno == primary_fno {
+                            break;
+                        }
                     }
                     tokio::time::sleep(Duration::from_millis(100)).await;
                 }
