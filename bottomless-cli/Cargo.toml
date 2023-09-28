@@ -1,6 +1,6 @@
 [package]
 name = "bottomless-cli"
-version = "0.1.14"
+version = "0.1.15"
 edition = "2021"
 license = "MIT"
 keywords = ["libsql", "sqlite", "s3", "cli", "replication"]
