@@ -1,19 +1,16 @@
 use anyhow::Result;
-use async_trait::async_trait;
 use aws_sdk_s3::config::{Credentials, Region};
 use aws_sdk_s3::types::{Delete, ObjectIdentifier};
 use aws_sdk_s3::Client;
+use bottomless::s3::S3Client;
 use chrono::{DateTime, SecondsFormat, Utc};
-use futures_core::{Future, Stream};
+use futures_core::Future;
 use itertools::Itertools;
 use libsql_client::{Connection, QueryResult, Statement, Value};
 use serde_json::json;
 use std::collections::BTreeSet;
-use std::fmt::Display;
 use std::net::{SocketAddr, ToSocketAddrs};
 use std::path::PathBuf;
-use std::pin::Pin;
-use std::task::{Context, Poll};
 use tokio::time::sleep;
 use tokio::time::Duration;
 use url::Url;
@@ -579,10 +576,10 @@ async fn s3_config() -> aws_sdk_s3::config::Config {
         .build()
 }
 
-async fn s3_client() -> Result<Client> {
+async fn s3_client(bucket: &str, db_name: &str) -> S3Client {
     let conf = s3_config().await;
     let client = Client::from_conf(conf);
-    Ok(client)
+    S3Client::new(client, bucket.into(), db_name.into())
 }
 
 async fn list_generations(
@@ -590,22 +587,17 @@ async fn list_generations(
     db_id: &str,
     namespace: &str,
 ) -> Result<BTreeSet<uuid::Uuid>> {
-    let client = s3_client().await?;
-    let resp = client
-        .list_objects()
-        .bucket(bucket)
-        .prefix(format!("ns-{}:{}-", db_id, namespace))
-        .send()
-        .await?;
-    let mut res = BTreeSet::new();
-    for o in resp.contents().unwrap() {
-        let prefix = o.key().unwrap();
-        let delim = prefix.find('/').unwrap();
-        let prefix = &prefix[db_id.len() + namespace.len() + 5..delim];
-        let uuid = uuid::Uuid::try_parse(prefix)?;
-        res.insert(uuid);
+    let client = s3_client(bucket, &db_name(db_id, namespace)).await;
+    let mut set = BTreeSet::new();
+    let mut generations = client.list_generations();
+    while let Some(gen) = generations.next().await? {
+        set.insert(gen);
     }
-    Ok(res)
+    Ok(set)
+}
+
+fn db_name(db_id: &str, namespace: &str) -> String {
+    format!("ns-{db_id}:{namespace}")
 }
 
 async fn has_snapshot(
@@ -614,11 +606,9 @@ async fn has_snapshot(
     generation: &Uuid,
     namespace: &str,
 ) -> Result<bool> {
-    let client = s3_client().await?;
-    let key = format!("ns-{}:{}-{}/db.gz", db_id, namespace, generation);
-    let resp = client.head_object().bucket(bucket).key(&key).send().await;
-    let res = resp.is_ok();
-    tracing::info!("'{}' has snapshot: {}", key, res);
+    let client = s3_client(bucket, &db_name(db_id, namespace)).await;
+    let res = client.has_snapshot(generation).await?;
+    tracing::info!("Generation '{}' has snapshot: {}", generation, res);
     Ok(res)
 }
 
@@ -636,7 +626,7 @@ async fn snapshot_count(bucket: &str, db_id: &str, namespace: &str) -> usize {
 /// across all generations.
 async fn remove_snapshots(bucket: &str) {
     tracing::info!("removing all snapshots");
-    let client = s3_client().await.unwrap();
+    let client = Client::from_conf(s3_config().await);
     if let Ok(out) = client.list_objects().bucket(bucket).send().await {
         let keys = out
             .contents()
@@ -669,7 +659,7 @@ async fn remove_snapshots(bucket: &str) {
 /// Checks if the corresponding bucket is empty (has any elements) or not.
 /// If bucket was not found, it's equivalent of an empty one.
 async fn assert_bucket_occupancy(bucket: &str, expect_empty: bool) {
-    let client = s3_client().await.unwrap();
+    let client = Client::from_conf(s3_config().await);
     if let Ok(out) = client.list_objects().bucket(bucket).send().await {
         let contents = out.contents().unwrap_or_default();
         if expect_empty {
@@ -723,7 +713,7 @@ impl S3BucketCleaner {
 
     /// Delete all objects from S3 bucket with provided name (doesn't delete bucket itself).
     async fn cleanup(bucket: &str) -> Result<()> {
-        let client = s3_client().await?;
+        let client = Client::from_conf(s3_config().await);
         let objects = client.list_objects().bucket(bucket).send().await?;
         let mut delete_keys = Vec::new();
         for o in objects.contents().unwrap_or_default() {

@@ -162,7 +162,7 @@ impl MakeNamespace for PrimaryNamespaceMaker {
                     options,
                 )
                 .await?;
-                let delete_all = replicator.delete_all(None).await?;
+                let delete_all = replicator.client.delete_all(None).await?;
 
                 // perform hard deletion in the background
                 tokio::spawn(delete_all.commit());

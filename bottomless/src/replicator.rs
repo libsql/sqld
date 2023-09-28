@@ -1,5 +1,6 @@
 use crate::backup::WalCopier;
 use crate::read::BatchReader;
+use crate::s3::{S3Client, WalSegmentSummary};
 use crate::transaction_cache::TransactionPageCache;
 use crate::uuid_utils::GenerationUuid;
 use crate::wal::WalFileReader;
@@ -8,13 +9,10 @@ use arc_swap::ArcSwapOption;
 use async_compression::tokio::write::GzipEncoder;
 use aws_sdk_s3::config::{Credentials, Region};
 use aws_sdk_s3::error::SdkError;
-use aws_sdk_s3::operation::get_object::builders::GetObjectFluentBuilder;
-use aws_sdk_s3::operation::get_object::GetObjectError;
 use aws_sdk_s3::operation::list_objects::builders::ListObjectsFluentBuilder;
-use aws_sdk_s3::operation::list_objects::ListObjectsOutput;
 use aws_sdk_s3::primitives::ByteStream;
 use aws_sdk_s3::{Client, Config};
-use bytes::{Buf, Bytes};
+use bytes::Bytes;
 use chrono::{NaiveDateTime, Utc};
 use std::io::SeekFrom;
 use std::ops::Deref;
@@ -39,7 +37,7 @@ pub type Result<T> = anyhow::Result<T>;
 
 #[derive(Debug)]
 pub struct Replicator {
-    pub client: Client,
+    pub client: S3Client,
 
     /// Frame number, incremented whenever a new frame is written from SQLite.
     next_frame_no: Arc<AtomicU32>,
@@ -346,6 +344,7 @@ impl Replicator {
             })
         };
         let (snapshot_notifier, snapshot_waiter) = channel(Ok(None));
+        let client = S3Client::new(client, bucket.clone(), db_name.clone());
         Ok(Self {
             client,
             bucket,
@@ -455,14 +454,9 @@ impl Replicator {
         Ok(())
     }
 
-    // Gets an object from the current bucket
-    fn get_object(&self, key: String) -> GetObjectFluentBuilder {
-        self.client.get_object().bucket(&self.bucket).key(key)
-    }
-
     // Lists objects from the current bucket
     fn list_objects(&self) -> ListObjectsFluentBuilder {
-        self.client.list_objects().bucket(&self.bucket)
+        self.client.as_ref().list_objects().bucket(&self.bucket)
     }
 
     fn reset_frames(&mut self, frame_no: u32) {
@@ -480,7 +474,17 @@ impl Replicator {
             if prev != curr {
                 // try to store dependency between previous and current generation
                 tracing::trace!("New generation {} (parent: {})", curr, prev);
-                self.store_dependency(prev, curr)
+                let client = self.client.clone();
+                tokio::spawn(async move {
+                    if let Err(e) = client.store_dependency(&prev, &curr).await {
+                        tracing::error!(
+                            "Failed to store dependency between parent {} and child {} generations: {}",
+                            prev,
+                            curr,
+                            e
+                        );
+                    }
+                });
             }
         }
         prev
@@ -507,60 +511,6 @@ impl Replicator {
             .as_deref()
             .cloned()
             .ok_or(anyhow!("Replicator generation was not initialized"))
-    }
-
-    /// Request to store dependency between current generation and its predecessor on S3 object.
-    /// This works asynchronously on best-effort rules, as putting object to S3 introduces an
-    /// extra undesired latency and this method may be called during SQLite checkpoint.
-    fn store_dependency(&self, prev: Uuid, curr: Uuid) {
-        let key = format!("{}-{}/.dep", self.db_name, curr);
-        let request =
-            self.client
-                .put_object()
-                .bucket(&self.bucket)
-                .key(key)
-                .body(ByteStream::from(Bytes::copy_from_slice(
-                    prev.into_bytes().as_slice(),
-                )));
-        tokio::spawn(async move {
-            if let Err(e) = request.send().await {
-                tracing::error!(
-                    "Failed to store dependency between generations {} -> {}: {}",
-                    prev,
-                    curr,
-                    e
-                );
-            } else {
-                tracing::trace!(
-                    "Stored dependency between parent ({}) and child ({})",
-                    prev,
-                    curr
-                );
-            }
-        });
-    }
-
-    pub async fn get_dependency(&self, generation: &Uuid) -> Result<Option<Uuid>> {
-        let key = format!("{}-{}/.dep", self.db_name, generation);
-        let resp = self
-            .client
-            .get_object()
-            .bucket(&self.bucket)
-            .key(key)
-            .send()
-            .await;
-        match resp {
-            Ok(out) => {
-                let bytes = out.body.collect().await?.into_bytes();
-                let prev_generation = Uuid::from_bytes(bytes.as_ref().try_into()?);
-                Ok(Some(prev_generation))
-            }
-            Err(SdkError::ServiceError(se)) => match se.into_err() {
-                GetObjectError::NoSuchKey(_) => Ok(None),
-                e => Err(e.into()),
-            },
-            Err(e) => Err(e.into()),
-        }
     }
 
     // Returns the current last valid frame in the replicated log
@@ -654,6 +604,7 @@ impl Replicator {
     // file is present, it was already detected to be newer than its
     // remote counterpart.
     pub async fn maybe_replicate_wal(&mut self) -> Result<()> {
+        let generation = self.generation()?;
         let wal = match WalFileReader::open(&format!("{}-wal", &self.db_path)).await {
             Ok(Some(file)) => file,
             _ => {
@@ -662,7 +613,9 @@ impl Replicator {
             }
         };
 
-        self.store_metadata(wal.page_size(), wal.checksum()).await?;
+        self.client
+            .store_metadata(&generation, wal.page_size(), wal.checksum())
+            .await?;
 
         let frame_count = wal.frame_count().await;
         tracing::trace!("Local WAL pages: {}", frame_count);
@@ -765,7 +718,7 @@ impl Replicator {
         tracing::debug!("Snapshotting generation {}", generation);
         let start_ts = Instant::now();
 
-        let client = self.client.clone();
+        let client = self.client.as_ref().clone();
         let mut db_file = File::open(&self.db_path).await?;
         let change_counter = Self::read_change_counter(&mut db_file).await?;
         let snapshot_req = client.put_object().bucket(self.bucket.clone()).key(format!(
@@ -782,6 +735,7 @@ impl Replicator {
         let change_counter_key = format!("{}-{}/.changecounter", self.db_name, generation);
         let change_counter_req = self
             .client
+            .as_ref()
             .put_object()
             .bucket(&self.bucket)
             .key(change_counter_key)
@@ -844,91 +798,6 @@ impl Replicator {
         Ok(Some(handle))
     }
 
-    // Returns newest replicated generation, or None, if one is not found.
-    // FIXME: assumes that this bucket stores *only* generations for databases,
-    // it should be more robust and continue looking if the first item does not
-    // match the <db-name>-<generation-uuid>/ pattern.
-    pub async fn latest_generation_before(
-        &self,
-        threshold: Option<&NaiveDateTime>,
-    ) -> Option<Uuid> {
-        let mut next_marker: Option<String> = None;
-        let prefix = format!("{}-", self.db_name);
-        loop {
-            let mut request = self.list_objects().prefix(prefix.clone());
-            if threshold.is_none() {
-                request = request.max_keys(1);
-            }
-            if let Some(marker) = next_marker.take() {
-                request = request.marker(marker);
-            }
-            let response = request.send().await.ok()?;
-            let objs = response.contents()?;
-            if objs.is_empty() {
-                break;
-            }
-            let mut last_key = None;
-            let mut last_gen = None;
-            for obj in objs {
-                let key = obj.key();
-                last_key = key;
-                if let Some(key) = last_key {
-                    let key = match key.find('/') {
-                        Some(index) => &key[self.db_name.len() + 1..index],
-                        None => key,
-                    };
-                    if Some(key) != last_gen {
-                        last_gen = Some(key);
-                        if let Ok(generation) = Uuid::parse_str(key) {
-                            match threshold {
-                                None => return Some(generation),
-                                Some(threshold) => match generation.date_time() {
-                                    None => {
-                                        tracing::warn!(
-                                            "Generation {} is not valid UUID v7",
-                                            generation
-                                        );
-                                    }
-                                    Some(ts) => {
-                                        if tracing::enabled!(tracing::Level::DEBUG) {
-                                            tracing::debug!(
-                                                "Generation candidate: {} - timestamp: {}",
-                                                generation,
-                                                ts
-                                            );
-                                        }
-                                        if ts <= *threshold {
-                                            return Some(generation);
-                                        }
-                                    }
-                                },
-                            }
-                        }
-                    }
-                }
-            }
-            next_marker = last_key.map(String::from);
-        }
-        None
-    }
-
-    // Tries to fetch the remote database change counter from given generation
-    pub async fn get_remote_change_counter(&self, generation: &Uuid) -> Result<[u8; 4]> {
-        let mut remote_change_counter = [0u8; 4];
-        if let Ok(response) = self
-            .get_object(format!("{}-{}/.changecounter", self.db_name, generation))
-            .send()
-            .await
-        {
-            response
-                .body
-                .collect()
-                .await?
-                .copy_to_slice(&mut remote_change_counter)
-        }
-        Ok(remote_change_counter)
-    }
-
     // Returns the number of pages stored in the local WAL file, or 0, if there aren't any.
     async fn get_local_wal_page_count(&mut self) -> u32 {
         match WalFileReader::open(&format!("{}-wal", &self.db_path)).await {
@@ -944,26 +813,6 @@ impl Replicator {
         }
     }
 
-    // Parses the frame and page number from given key.
-    // Format: <db-name>-<generation>/<first-frame-no>-<last-frame-no>-<timestamp>.<compression-kind>
-    pub(crate) fn parse_frame_range(key: &str) -> Option<(u32, u32, u64, CompressionKind)> {
-        let frame_delim = key.rfind('/')?;
-        let frame_suffix = &key[(frame_delim + 1)..];
-        let timestamp_delim = frame_suffix.rfind('-')?;
-        let last_frame_delim = frame_suffix[..timestamp_delim].rfind('-')?;
-        let compression_delim = frame_suffix.rfind('.')?;
-        let first_frame_no = frame_suffix[0..last_frame_delim].parse::<u32>().ok()?;
-        let last_frame_no = frame_suffix[(last_frame_delim + 1)..timestamp_delim]
-            .parse::<u32>()
-            .ok()?;
-        let timestamp = frame_suffix[(timestamp_delim + 1)..compression_delim]
-            .parse::<u64>()
-            .ok()?;
-        let compression_kind =
-            CompressionKind::parse(&frame_suffix[(compression_delim + 1)..]).ok()?;
-        Some((first_frame_no, last_frame_no, timestamp, compression_kind))
-    }
-
     /// Restores the database state from given remote generation
     /// On success, returns the RestoreAction, and whether the database was recovered from backup.
     async fn restore_from(
@@ -971,7 +820,7 @@ impl Replicator {
         generation: Uuid,
         timestamp: Option<NaiveDateTime>,
     ) -> Result<(RestoreAction, bool)> {
-        if let Some(tombstone) = self.get_tombstone().await? {
+        if let Some(tombstone) = self.client.get_tombstone().await? {
             if let Some(timestamp) = generation.date_time() {
                 if tombstone >= timestamp {
                     bail!(
@@ -989,8 +838,17 @@ impl Replicator {
         // on time in the last run
         self.upload_remaining_files(&generation).await?;
 
-        let last_frame = self.get_last_consistent_frame(&generation).await?;
-        tracing::debug!("Last consistent remote frame in generation {generation}: {last_frame}.");
+        let last_frame = self
+            .client
+            .get_last_wal_segment(&generation)
+            .await?
+            .map(|w| w.last_frame_no)
+            .unwrap_or(0);
+        tracing::debug!(
+            "Last consistent remote frame in generation {}: {}.",
+            generation,
+            last_frame
+        );
         if let Some(action) = self.compare_with_local(generation, last_frame).await? {
             return Ok((action, false));
         }
@@ -1050,7 +908,7 @@ impl Replicator {
                 //    of the database.
                 // 2. Snapshot never existed - in that case try to reach for parent generation
                 //    of the current one and read snapshot from there.
-                current = self.get_dependency(&curr).await?;
+                current = self.client.get_dependency(&curr).await?;
                 if let Some(prev) = &current {
                     tracing::debug!("Rolling restore back from generation {} to {}", curr, prev);
                 }
@@ -1064,7 +922,7 @@ impl Replicator {
 
         let mut applied_wal_frame = false;
         while let Some(gen) = restore_stack.pop() {
-            if let Some((page_size, checksum)) = self.get_metadata(&gen).await? {
+            if let Some((page_size, checksum)) = self.client.get_metadata(&gen).await? {
                 self.set_page_size(page_size as usize)?;
                 let last_frame = if restore_stack.is_empty() {
                     // we're at the last generation to restore from, it may still being written to
@@ -1122,7 +980,7 @@ impl Replicator {
             Err(_) => [0u8; 4],
         };
 
-        let remote_counter = self.get_remote_change_counter(&generation).await?;
+        let remote_counter = self.client.get_change_counter(&generation).await?;
         tracing::debug!("Counters: l={:?}, r={:?}", local_counter, remote_counter);
 
         let wal_pages = self.get_local_wal_page_count().await;
@@ -1162,12 +1020,12 @@ impl Replicator {
 
     async fn restore_from_snapshot(&mut self, generation: &Uuid, db: &mut File) -> Result<bool> {
         let main_db_path = match self.use_compression {
-            CompressionKind::None => format!("{}-{}/db.db", self.db_name, generation),
-            CompressionKind::Gzip => format!("{}-{}/db.gz", self.db_name, generation),
+            CompressionKind::None => "db.db",
+            CompressionKind::Gzip => "db.gz",
         };
 
-        if let Ok(db_file) = self.get_object(main_db_path).send().await {
-            let mut body_reader = db_file.body.into_async_read();
+        if let Ok(Some(db_file)) = self.client.try_get(generation, main_db_path).await {
+            let mut body_reader = db_file.into_async_read();
             let db_size = match self.use_compression {
                 CompressionKind::None => tokio::io::copy(&mut body_reader, db).await?,
                 CompressionKind::Gzip => {
@@ -1206,7 +1064,7 @@ impl Replicator {
         };
         let mut next_marker = None;
         let mut applied_wal_frame = false;
-        let mut last_applied_timestamp = 0;
+        let mut last_applied_timestamp = None;
         'restore_wal: loop {
             let mut list_request = self.list_objects().prefix(&prefix);
             if let Some(marker) = next_marker {
@@ -1232,51 +1090,53 @@ impl Replicator {
                     .ok_or_else(|| anyhow::anyhow!("Failed to get key for an object"))?;
                 tracing::debug!("Loading {}", key);
 
-                let (first_frame_no, last_frame_no, timestamp, compression_kind) =
-                    match Self::parse_frame_range(key) {
-                        Some(result) => result,
-                        None => {
-                            if !key.ends_with(".gz")
-                                && !key.ends_with(".db")
-                                && !key.ends_with(".meta")
-                                && !key.ends_with(".dep")
-                                && !key.ends_with(".changecounter")
-                            {
-                                tracing::warn!("Failed to parse frame/page from key {}", key);
-                            }
-                            continue;
+                let summary = match WalSegmentSummary::parse(key) {
+                    Some(result) => result,
+                    None => {
+                        if !key.ends_with(".gz")
+                            && !key.ends_with(".db")
+                            && !key.ends_with(".meta")
+                            && !key.ends_with(".dep")
+                            && !key.ends_with(".changecounter")
+                        {
+                            tracing::warn!("Failed to parse frame/page from key {}", key);
                         }
-                    };
-                if first_frame_no != last_received_frame_no + 1 {
+                        continue;
+                    }
+                };
+                if summary.first_frame_no != last_received_frame_no + 1 {
                     tracing::warn!("Missing series of consecutive frames. Last applied frame: {}, next found: {}. Stopping the restoration process",
-                            last_received_frame_no, first_frame_no);
+                            last_received_frame_no, summary.first_frame_no);
                     break;
                 }
                 if let Some(frame) = last_consistent_frame {
-                    if last_frame_no > frame {
+                    if summary.last_frame_no > frame {
                         tracing::warn!("Remote log contains frame {} larger than last consistent frame ({}), stopping the restoration process",
-                                last_frame_no, frame);
+                                summary.last_frame_no, frame);
                         break;
                     }
                 }
                 if let Some(threshold) = utc_time {
-                    match NaiveDateTime::from_timestamp_opt(timestamp as i64, 0) {
-                        Some(timestamp) => {
-                            if timestamp > threshold {
-                                tracing::info!("Frame batch {} has timestamp more recent than expected {}. Stopping recovery.", key, timestamp);
-                                break 'restore_wal; // reached end of restoration timestamp
-                            }
-                        }
-                        _ => {
-                            tracing::trace!("Couldn't parse requested frame batch {} timestamp. Stopping recovery.", key);
-                            break 'restore_wal;
-                        }
+                    if summary.timestamp > threshold {
+                        tracing::info!("Frame batch {} has timestamp more recent than expected {}. Stopping recovery.", key, summary.timestamp);
+                        break 'restore_wal; // reached end of restoration timestamp
                     }
                 }
-                let frame = self.get_object(key.into()).send().await?;
-                let mut frameno = first_frame_no;
-                let mut reader =
-                    BatchReader::new(frameno, frame.body, self.page_size, compression_kind);
+                let frame = self
+                    .client
+                    .as_ref()
+                    .get_object()
+                    .bucket(self.bucket.clone())
+                    .key(key)
+                    .send()
+                    .await?;
+                let mut frameno = summary.first_frame_no;
+                let mut reader = BatchReader::new(
+                    frameno,
+                    frame.body,
+                    self.page_size,
+                    summary.compression_kind,
+                );
 
                 while let Some(frame) = reader.next_frame_header().await? {
                     let pgno = frame.pgno();
@@ -1297,7 +1157,7 @@ impl Replicator {
                         );
                         pending_pages.flush(db).await?;
                         applied_wal_frame = true;
-                        last_applied_timestamp = timestamp;
+                        last_applied_timestamp = Some(summary.timestamp);
                     }
                     frameno += 1;
                     last_received_frame_no += 1;
@@ -1312,7 +1172,7 @@ impl Replicator {
                 tracing::trace!(
                     "Restored DB from S3 backup using generation {} (timestamp of last applied WAL segment: {:?})",
                     generation,
-                    if last_applied_timestamp == 0 { None } else { NaiveDateTime::from_timestamp_opt(last_applied_timestamp as i64, 0) }
+                    last_applied_timestamp
                 );
                 break;
             }
@@ -1336,7 +1196,11 @@ impl Replicator {
     ) -> Result<(RestoreAction, bool)> {
         let generation = match generation {
             Some(gen) => gen,
-            None => match self.latest_generation_before(timestamp.as_ref()).await {
+            None => match self
+                .client
+                .latest_generation_before(timestamp.as_ref())
+                .await
+            {
                 Some(gen) => gen,
                 None => {
                     tracing::debug!("No generation found, nothing to restore");
@@ -1351,36 +1215,6 @@ impl Replicator {
             generation.date_time().unwrap()
         );
         self.restore_from(generation, timestamp).await
-    }
-
-    pub async fn get_last_consistent_frame(&self, generation: &Uuid) -> Result<u32> {
-        let prefix = format!("{}-{}/", self.db_name, generation);
-        let mut marker: Option<String> = None;
-        let mut last_frame = 0;
-        while {
-            let mut list_objects = self.list_objects().prefix(&prefix);
-            if let Some(marker) = marker.take() {
-                list_objects = list_objects.marker(marker);
-            }
-            let response = list_objects.send().await?;
-            marker = Self::try_get_last_frame_no(response, &mut last_frame);
-            marker.is_some()
-        } {}
-        Ok(last_frame)
-    }
-
-    fn try_get_last_frame_no(response: ListObjectsOutput, frame_no: &mut u32) -> Option<String> {
-        let objs = response.contents()?;
-        let mut last_key = None;
-        for obj in objs.iter() {
-            last_key = Some(obj.key()?);
-            if let Some(key) = last_key {
-                if let Some((_, last_frame_no, _, _)) = Self::parse_frame_range(key) {
-                    *frame_no = last_frame_no;
-                }
-            }
-        }
-        last_key.map(String::from)
     }
 
     async fn upload_remaining_files(&self, generation: &Uuid) -> Result<()> {
@@ -1400,6 +1234,7 @@ impl Replicator {
                     tokio::spawn(async move {
                         let body = ByteStream::from_path(&fpath).await.unwrap();
                         if let Err(e) = client
+                            .as_ref()
                             .put_object()
                             .bucket(bucket)
                             .key(key.clone())
@@ -1440,231 +1275,6 @@ impl Replicator {
             return Some(&str[idx..]);
         }
         None
-    }
-
-    async fn store_metadata(&self, page_size: u32, crc: u64) -> Result<()> {
-        let generation = self.generation()?;
-        let key = format!("{}-{}/.meta", self.db_name, generation);
-        tracing::debug!(
-            "Storing metadata at '{}': page size - {}, crc - {}",
-            key,
-            page_size,
-            crc
-        );
-        let mut body = Vec::with_capacity(12);
-        body.extend_from_slice(page_size.to_be_bytes().as_slice());
-        body.extend_from_slice(crc.to_be_bytes().as_slice());
-        let _ = self
-            .client
-            .put_object()
-            .bucket(self.bucket.clone())
-            .key(key)
-            .body(ByteStream::from(body))
-            .send()
-            .await?;
-        Ok(())
-    }
-
-    pub async fn get_metadata(&self, generation: &Uuid) -> Result<Option<(u32, u64)>> {
-        let key = format!("{}-{}/.meta", self.db_name, generation);
-        if let Ok(obj) = self
-            .client
-            .get_object()
-            .bucket(&self.bucket)
-            .key(key)
-            .send()
-            .await
-        {
-            let mut data = obj.body.collect().await?;
-            let page_size = data.get_u32();
-            let crc = data.get_u64();
-            Ok(Some((page_size, crc)))
-        } else {
-            Ok(None)
-        }
-    }
-
-    /// Marks current replicator database as deleted, invalidating all generations.
-    pub async fn delete_all(&self, older_than: Option<NaiveDateTime>) -> Result<DeleteAll> {
-        tracing::info!(
-            "Called for tombstoning of all contents of the '{}' database",
-            self.db_name
-        );
-        let key = format!("{}.tombstone", self.db_name);
-        let threshold = older_than.unwrap_or(NaiveDateTime::MAX);
-        self.client
-            .put_object()
-            .bucket(&self.bucket)
-            .key(key)
-            .body(ByteStream::from(
-                threshold.timestamp().to_be_bytes().to_vec(),
-            ))
-            .send()
-            .await?;
-        let delete_task = DeleteAll::new(
-            self.client.clone(),
-            self.bucket.clone(),
-            self.db_name.clone(),
-            threshold,
-        );
-        Ok(delete_task)
-    }
-
-    /// Checks if current replicator database has been marked as deleted.
-    pub async fn get_tombstone(&self) -> Result<Option<NaiveDateTime>> {
-        let key = format!("{}.tombstone", self.db_name);
-        let resp = self
-            .client
-            .get_object()
-            .bucket(&self.bucket)
-            .key(key)
-            .send()
-            .await;
-        match resp {
-            Ok(out) => {
-                let mut buf = [0u8; 8];
-                out.body.collect().await?.copy_to_slice(&mut buf);
-                let timestamp = i64::from_be_bytes(buf);
-                let tombstone = NaiveDateTime::from_timestamp_opt(timestamp, 0);
-                Ok(tombstone)
-            }
-            Err(SdkError::ServiceError(se)) => match se.into_err() {
-                GetObjectError::NoSuchKey(_) => Ok(None),
-                e => Err(e.into()),
-            },
-            Err(e) => Err(e.into()),
-        }
-    }
-}
-
-/// This structure is returned by [Replicator::delete_all] after tombstoning (soft deletion) has
-/// been confirmed. It may be called using [DeleteAll::commit] to trigger a follow up procedure that
-/// performs hard deletion of corresponding S3 objects.
-#[derive(Debug)]
-pub struct DeleteAll {
-    client: Client,
-    bucket: String,
-    db_name: String,
-    threshold: NaiveDateTime,
-}
-
-impl DeleteAll {
-    fn new(client: Client, bucket: String, db_name: String, threshold: NaiveDateTime) -> Self {
-        DeleteAll {
-            client,
-            bucket,
-            db_name,
-            threshold,
-        }
-    }
-
-    pub fn threshold(&self) -> &NaiveDateTime {
-        &self.threshold
-    }
-
-    /// Performs hard deletion of all bottomless generations older than timestamp provided in
-    /// current request.
-    pub async fn commit(self) -> Result<u32> {
-        let mut next_marker = None;
-        let mut removed_count = 0;
-        loop {
-            let mut list_request = self
-                .client
-                .list_objects()
-                .bucket(&self.bucket)
-                .set_delimiter(Some("/".to_string()))
-                .prefix(&self.db_name);
-
-            if let Some(marker) = next_marker {
-                list_request = list_request.marker(marker)
-            }
-
-            let response = list_request.send().await?;
-            let prefixes = match response.common_prefixes() {
-                Some(prefixes) => prefixes,
-                None => {
-                    tracing::debug!("no generations found to delete");
-                    return Ok(0);
-                }
-            };
-
-            for prefix in prefixes {
-                if let Some(prefix) = &prefix.prefix {
-                    let prefix = &prefix[self.db_name.len() + 1..prefix.len() - 1];
-                    let uuid = Uuid::try_parse(prefix)?;
-                    if let Some(datetime) = uuid.date_time() {
-                        if datetime >= self.threshold {
-                            continue;
-                        }
-                        tracing::debug!("Removing generation {}", uuid);
-                        self.remove(uuid).await?;
-                        removed_count += 1;
-                    }
-                }
-            }
-
-            next_marker = response.next_marker().map(|s| s.to_owned());
-            if next_marker.is_none() {
-                break;
-            }
-        }
-        tracing::debug!("Removed {} generations", removed_count);
-        self.remove_tombstone().await?;
-        Ok(removed_count)
-    }
-
-    pub async fn remove_tombstone(&self) -> Result<()> {
-        let key = format!("{}.tombstone", self.db_name);
-        self.client
-            .delete_object()
-            .bucket(&self.bucket)
-            .key(key)
-            .send()
-            .await?;
-        Ok(())
-    }
-
-    async fn remove(&self, generation: Uuid) -> Result<()> {
-        let mut removed = 0;
-        let mut next_marker = None;
-        loop {
-            let mut list_request = self
-                .client
-                .list_objects()
-                .bucket(&self.bucket)
-                .prefix(format!("{}-{}/", &self.db_name, generation));
-
-            if let Some(marker) = next_marker {
-                list_request = list_request.marker(marker)
-            }
-
-            let response = list_request.send().await?;
-            let objs = match response.contents() {
-                Some(prefixes) => prefixes,
-                None => {
-                    return Ok(());
-                }
-            };
-
-            for obj in objs {
-                if let Some(key) = obj.key() {
-                    tracing::trace!("Removing {}", key);
-                    self.client
-                        .delete_object()
-                        .bucket(&self.bucket)
-                        .key(key)
-                        .send()
-                        .await?;
-                    removed += 1;
-                }
-            }
-
-            next_marker = response.next_marker().map(|s| s.to_owned());
-            if next_marker.is_none() {
-                tracing::trace!("Removed {} snapshot generations", removed);
-                return Ok(());
-            }
-        }
     }
 }
 
