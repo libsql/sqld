@@ -91,6 +91,8 @@ impl<'a> Connection<'a> {
             }
 
             assert!(!db.is_null());
+
+            rusqlite::ffi::sqlite3_enable_shared_cache(1)
         };
 
         let conn = unsafe { rusqlite::Connection::from_handle_owned(db)? };
