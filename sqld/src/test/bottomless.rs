@@ -8,13 +8,11 @@ use futures_core::Future;
 use itertools::Itertools;
 use libsql_client::{Connection, QueryResult, Statement, Value};
 use serde_json::json;
-use std::collections::BTreeSet;
 use std::net::{SocketAddr, ToSocketAddrs};
 use std::path::PathBuf;
 use tokio::time::sleep;
 use tokio::time::Duration;
 use url::Url;
-use uuid::Uuid;
 
 use crate::config::{AdminApiConfig, DbConfig, UserApiConfig};
 use crate::net::AddrIncoming;
@@ -443,7 +441,7 @@ async fn periodic_snapshot() {
         .await
         .unwrap();
 
-        // at first there's no snapshot cache file info, so we need to wait for first snasphot to occur
+        // at first there's no snapshot cache file info, so we need to wait for first snapshot to occur
         perform_updates(&connection_addr, 10, 100, "A").await;
         sleep(snapshot_interval + Duration::from_secs(1)).await;
 
@@ -455,12 +453,8 @@ async fn periodic_snapshot() {
         perform_updates(&connection_addr, 10, 100, "B").await;
         sleep(Duration::from_secs(1)).await;
 
-        let generations = list_generations(BUCKET, DB_ID, "default").await.unwrap();
-        assert_ne!(generations.len(), 0, "some generations should be created");
-        for gen in generations {
-            let snapshotted = has_snapshot(BUCKET, DB_ID, &gen, "default").await.unwrap();
-            assert!(!snapshotted, "no generation should be snapshotted yet");
-        }
+        let snapshots = snapshot_count(BUCKET, DB_ID, "default").await;
+        assert_eq!(snapshots, 0, "no generation should be snapshotted yet");
 
         // make sure that snapshot interval passed
         sleep(snapshot_interval + Duration::from_secs(1)).await;
@@ -582,40 +576,17 @@ async fn s3_client(bucket: &str, db_name: &str) -> S3Client {
     S3Client::new(client, bucket.into(), db_name.into())
 }
 
-async fn list_generations(
-    bucket: &str,
-    db_id: &str,
-    namespace: &str,
-) -> Result<BTreeSet<uuid::Uuid>> {
-    let client = s3_client(bucket, &db_name(db_id, namespace)).await;
-    let mut set = BTreeSet::new();
-    let mut generations = client.list_generations();
-    while let Some(gen) = generations.next().await? {
-        set.insert(gen);
-    }
-    Ok(set)
-}
-
 fn db_name(db_id: &str, namespace: &str) -> String {
     format!("ns-{db_id}:{namespace}")
 }
 
-async fn has_snapshot(
-    bucket: &str,
-    db_id: &str,
-    generation: &Uuid,
-    namespace: &str,
-) -> Result<bool> {
-    let client = s3_client(bucket, &db_name(db_id, namespace)).await;
-    let res = client.has_snapshot(generation).await?;
-    tracing::info!("Generation '{}' has snapshot: {}", generation, res);
-    Ok(res)
-}
-
 async fn snapshot_count(bucket: &str, db_id: &str, namespace: &str) -> usize {
+    let db_name = db_name(db_id, namespace);
+    let client = s3_client(bucket, &db_name).await;
     let mut snapshots = 0;
-    for gen in list_generations(bucket, db_id, namespace).await.unwrap() {
-        if has_snapshot(bucket, db_id, &gen, namespace).await.unwrap() {
+    let mut iter = client.list_generations();
+    while let Some(gen) = iter.next().await.unwrap() {
+        if client.has_snapshot(&gen).await.unwrap() {
             snapshots += 1;
         }
     }

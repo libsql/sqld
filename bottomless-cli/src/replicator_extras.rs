@@ -3,6 +3,7 @@ use aws_sdk_s3::error::SdkError;
 use aws_sdk_s3::types::ObjectAttributes;
 use aws_sdk_s3::Client;
 use aws_smithy_types::date_time::Format;
+use bottomless::s3::GenerationSummary;
 use bottomless::uuid_utils::GenerationUuid;
 use chrono::{NaiveDate, NaiveDateTime, NaiveTime};
 
@@ -88,79 +89,44 @@ impl Replicator {
         newer_than: Option<chrono::NaiveDate>,
         verbose: bool,
     ) -> Result<()> {
-        let mut next_marker = None;
         let mut limit = limit.unwrap_or(u64::MAX);
-        loop {
-            let mut list_request = self
-                .client
-                .list_objects()
-                .bucket(&self.bucket)
-                .set_delimiter(Some("/".to_string()))
-                .prefix(&self.db_name);
-
-            if let Some(marker) = next_marker {
-                list_request = list_request.marker(marker)
-            }
-
-            if verbose {
-                println!("Database {}:", self.db_name);
-            }
-
-            let response = list_request.send().await?;
-            let prefixes = match response.common_prefixes() {
-                Some(prefixes) => prefixes,
-                None => {
-                    println!("No generations found");
-                    return Ok(());
-                }
+        let mut generations = self.client.list_generations();
+        let mut found = false;
+        while let Some(generation) = generations.next().await? {
+            let created_at = if let Some(d) = generation.date_time() {
+                d
+            } else {
+                bail!("failed to retrieve timestamp from UUID {}", uuid)
             };
-
-            for prefix in prefixes {
-                if let Some(prefix) = &prefix.prefix {
-                    let prefix = &prefix[self.db_name.len() + 1..prefix.len() - 1];
-                    let uuid = uuid::Uuid::try_parse(prefix)?;
-                    let datetime = if let Some(d) = uuid.date_time() {
-                        d
-                    } else {
-                        bail!("failed to retrieve timestamp from UUID {}", uuid)
-                    };
-                    if datetime.date() < newer_than.unwrap_or(chrono::NaiveDate::MIN) {
-                        continue;
-                    }
-                    if datetime.date() > older_than.unwrap_or(chrono::NaiveDate::MAX) {
-                        continue;
-                    }
-                    println!("{} (created: {})", uuid, datetime.and_utc().to_rfc3339());
-                    if verbose {
-                        let counter = self.get_remote_change_counter(&uuid).await?;
-                        let consistent_frame = self.get_last_consistent_frame(&uuid).await?;
-                        let m = self.get_metadata(&uuid).await?;
-                        let parent = self.get_dependency(&uuid).await?;
-                        println!("\tcreated at (UTC):     {datetime}");
-                        println!("\tchange counter:       {counter:?}");
-                        println!("\tconsistent WAL frame: {consistent_frame}");
-                        if let Some((page_size, crc)) = m {
-                            println!("\tpage size:            {}", page_size);
-                            println!("\tWAL frame checksum:   {:x}", crc);
-                        }
-                        if let Some(prev_gen) = parent {
-                            println!("\tprevious generation:  {}", prev_gen);
-                        }
-                        self.print_snapshot_summary(&uuid).await?;
-                        println!()
-                    }
-                }
-                limit -= 1;
-                if limit == 0 {
-                    return Ok(());
-                }
+            found = true;
+            if created_at.date() < newer_than.unwrap_or(chrono::NaiveDate::MIN) {
+                continue;
+            }
+            if created_at.date() > older_than.unwrap_or(chrono::NaiveDate::MAX) {
+                continue;
+            }
+            if verbose {
+                let summary = self.client.generation_summary(generation).await?;
+                self.print_summary(summary);
+                self.print_snapshot_summary(&generation).await?;
+                println!()
+            } else {
+                println!(
+                    "{} (created: {})",
+                    generation,
+                    created_at.and_utc().to_rfc3339()
+                );
             }
 
-            next_marker = response.next_marker().map(|s| s.to_owned());
-            if next_marker.is_none() {
-                return Ok(());
+            limit -= 1;
+            if limit == 0 {
+                break;
             }
         }
+        if !found {
+            println!("No generations found");
+        }
+        Ok(())
     }
 
     pub(crate) async fn remove_many(&self, older_than: NaiveDate, verbose: bool) -> Result<()> {
@@ -230,36 +196,31 @@ impl Replicator {
     }
 
     pub(crate) async fn list_generation(&self, generation: uuid::Uuid) -> Result<()> {
-        self.client
-            .list_objects()
-            .bucket(&self.bucket)
-            .prefix(format!("{}-{}/", &self.db_name, generation))
-            .max_keys(1)
-            .send()
-            .await?
-            .contents()
-            .ok_or_else(|| {
-                anyhow::anyhow!("Generation {} not found for {}", generation, &self.db_name)
-            })?;
-
-        let counter = self.get_remote_change_counter(&generation).await?;
-        let consistent_frame = self.get_last_consistent_frame(&generation).await?;
-        let meta = self.get_metadata(&generation).await?;
-        let dep = self.get_dependency(&generation).await?;
-        println!("Generation {} for {}", generation, self.db_name);
-        if let Some(created_at) = generation.date_time() {
-            println!("\tcreated at:           {}", created_at);
-        }
-        println!("\tchange counter:       {counter:?}");
-        println!("\tconsistent WAL frame: {consistent_frame}");
-        if let Some((page_size, crc)) = meta {
-            println!("\tpage size:            {}", page_size);
-            println!("\tWAL frame checksum:   {:x}", crc);
-        }
-        if let Some(prev_gen) = dep {
-            println!("\tprevious generation:  {}", prev_gen);
-        }
+        let summary = self.client.generation_summary(generation).await?;
+        self.print_summary(summary);
         self.print_snapshot_summary(&generation).await?;
         Ok(())
+    }
+
+    fn print_summary(&self, summary: GenerationSummary) {
+        println!("Generation {} for {}", summary.generation, self.db_name);
+        println!("\tchange counter:       {:?}", summary.change_counter);
+        println!("\tWAL frame checksum:   {:x}", summary.init_crc);
+        if let Some(created_at) = summary.generation.date_time() {
+            println!("\tcreated at:           {}", created_at);
+        }
+        if let Some(last_frame) = summary.last_wal_segment {
+            println!(
+                "\tconsistent WAL frame: {} (timestamp: {})",
+                last_frame.last_frame_no, last_frame.timestamp
+            );
+        }
+        if let Some(page_size) = summary.page_size {
+            println!("\tpage size:            {}", page_size);
+        }
+
+        if let Some(prev_gen) = summary.parent {
+            println!("\tprevious generation:  {}", prev_gen);
+        }
     }
 }

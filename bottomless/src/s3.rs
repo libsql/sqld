@@ -41,6 +41,11 @@ impl S3Client {
         Generations::new(self.client.clone(), self.keyspace.clone())
     }
 
+    /// Returns an async iterator over contents of a particular generation.
+    pub fn list_generation_keys(&self, generation: &Uuid) -> GenerationKeys {
+        GenerationKeys::new(self.client.clone(), self.keyspace.clone(), generation)
+    }
+
     /// Returns newest replicated generation, or None, if one is not found.
     pub async fn latest_generation_before(
         &self,
@@ -157,29 +162,37 @@ impl S3Client {
         suffix: S,
     ) -> Result<Option<ByteStream>> {
         let key = format!("{}-{}/{}", self.db_name(), generation, suffix);
+        let resp = self.get_object(key).await;
+        Ok(resp.exists()?)
+    }
+
+    pub async fn get_object<S: Into<String>>(
+        &self,
+        key: S,
+    ) -> std::result::Result<ByteStream, SdkError<GetObjectError>> {
         let resp = self
             .client
             .get_object()
             .bucket(self.bucket())
             .key(key)
             .send()
-            .await;
-        if let Some(out) = resp.exists()? {
-            Ok(Some(out.body))
-        } else {
-            Ok(None)
-        }
+            .await?;
+        Ok(resp.body)
     }
 
     async fn put<S: Display>(&self, generation: &Uuid, suffix: S, data: &[u8]) -> Result<()> {
         let key = format!("{}-{}/{}", self.db_name(), generation, suffix);
-        let body = Vec::from(data);
+        self.put_object(key, ByteStream::from(Vec::from(data)))
+            .await
+    }
+
+    pub async fn put_object<S: Into<String>>(&self, key: S, data: ByteStream) -> Result<()> {
         let _ = self
             .client
             .put_object()
             .bucket(self.bucket())
             .key(key)
-            .body(ByteStream::from(body))
+            .body(data)
             .send()
             .await?;
         Ok(())
@@ -232,6 +245,28 @@ impl S3Client {
             data.copy_to_slice(&mut change_counter)
         }
         Ok(change_counter)
+    }
+
+    pub async fn store_change_counter(
+        &self,
+        generation: &Uuid,
+        change_counter: [u8; 4],
+    ) -> Result<()> {
+        self.put(generation, ".changecounter", &change_counter)
+            .await
+    }
+
+    pub async fn store_snapshot(
+        &self,
+        generation: &Uuid,
+        compression: CompressionKind,
+        body: ByteStream,
+    ) -> Result<()> {
+        let key = format!(
+            "{}-{}/db.{}",
+            self.keyspace.db_name, generation, compression
+        );
+        self.put_object(key, body).await
     }
 
     pub async fn get_last_wal_segment(
@@ -319,12 +354,6 @@ impl S3Client {
     }
 }
 
-impl AsRef<Client> for S3Client {
-    fn as_ref(&self) -> &Client {
-        &self.client
-    }
-}
-
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct WalSegmentSummary {
     /// Number (in current generation) of the first frame included by corresponding WAL segment.
@@ -380,9 +409,7 @@ impl Display for WalSegmentSummary {
 
 #[derive(Debug)]
 pub struct Generations {
-    client: Client,
-    keyspace: Keyspace,
-    next_marker: Option<String>,
+    stream: ListObjectStream,
     latest_resp: Option<ListObjectsOutput>,
     offset: usize,
 }
@@ -390,9 +417,12 @@ pub struct Generations {
 impl Generations {
     fn new(client: Client, keyspace: Keyspace) -> Self {
         Generations {
-            client,
-            keyspace,
-            next_marker: None,
+            stream: ListObjectStream::new(
+                client,
+                keyspace.bucket,
+                keyspace.db_name,
+                Some("/".to_string()),
+            ),
             latest_resp: None,
             offset: 0,
         }
@@ -400,43 +430,137 @@ impl Generations {
 
     pub async fn next(&mut self) -> Result<Option<Uuid>> {
         loop {
-            let resp: &ListObjectsOutput = if let Some(resp) = &self.latest_resp {
+            let resp = if let Some(resp) = &self.latest_resp {
                 resp
+            } else if let Some(resp) = self.stream.next().await? {
+                self.offset = 0;
+                self.latest_resp.insert(resp)
             } else {
-                let resp = self.request_next_batch().await?;
-                self.latest_resp = Some(resp);
-                self.latest_resp.as_ref().unwrap()
+                return Ok(None);
             };
+
             let prefixes = if let Some(prefixes) = resp.common_prefixes() {
                 prefixes
             } else {
                 return Ok(None);
             };
+
             while self.offset < prefixes.len() {
                 let prefix = &prefixes[self.offset];
                 self.offset += 1;
-                if let Some(p) = prefix.prefix() {
-                    let prefix = &p[self.keyspace.db_name.len() + 1..p.len() - 1];
+                if let Some(pref) = prefix.prefix() {
+                    let prefix = &pref[self.stream.prefix.len() + 1..pref.len() - 1];
                     let generation = Uuid::try_parse(prefix)?;
                     return Ok(Some(generation));
                 }
             }
-            self.next_marker = resp.next_marker().map(|s| s.to_owned());
-            if self.next_marker.is_none() {
-                return Ok(None);
-            }
+
+            // iterated over all prefixes, fetch next response
+            self.latest_resp = None;
+        }
+    }
+}
+
+pub struct GenerationKeys {
+    stream: ListObjectStream,
+    latest_resp: Option<ListObjectsOutput>,
+    offset: usize,
+}
+
+impl GenerationKeys {
+    fn new(client: Client, keyspace: Keyspace, generation: &Uuid) -> Self {
+        let prefix = format!("{}-{}/", keyspace.db_name, generation);
+        GenerationKeys {
+            stream: ListObjectStream::new(client, keyspace.bucket, prefix, None),
+            latest_resp: None,
+            offset: 0,
         }
     }
 
+    pub async fn next(&mut self) -> Result<Option<String>> {
+        loop {
+            if self.latest_resp.is_none() {
+                if let Some(resp) = self.stream.next().await? {
+                    self.offset = 0;
+                    self.latest_resp = Some(resp);
+                } else {
+                    return Ok(None);
+                }
+            };
+            let resp = self.latest_resp.as_ref().unwrap();
+
+            let contents = if let Some(contents) = resp.contents() {
+                contents
+            } else {
+                return Ok(None);
+            };
+
+            while self.offset < contents.len() {
+                let o = &contents[self.offset];
+                self.offset += 1;
+                if let Some(key) = o.key() {
+                    return Ok(Some(key.to_owned()));
+                }
+            }
+
+            // iterated over all prefixes, fetch next response
+            self.latest_resp = None;
+        }
+    }
+}
+
+/// Async iterator used to iterate over partial responses produced by S3 list_objects request.
+#[derive(Debug)]
+struct ListObjectStream {
+    client: Client,
+    bucket: String,
+    prefix: String,
+    delimiter: Option<String>,
+    next_marker: Option<String>,
+    done: bool,
+}
+
+impl ListObjectStream {
+    fn new(client: Client, bucket: String, prefix: String, delimiter: Option<String>) -> Self {
+        ListObjectStream {
+            client,
+            bucket,
+            prefix,
+            delimiter,
+            next_marker: None,
+            done: false,
+        }
+    }
+
+    async fn next(&mut self) -> Result<Option<ListObjectsOutput>> {
+        if self.done {
+            return Ok(None);
+        }
+
+        let resp = self.request_next_batch().await?;
+        let next_marker = resp.next_marker().map(String::from);
+        tracing::trace!(
+            "Loaded next list objects chunk: `{}` (next: `{}`)",
+            resp.prefix().unwrap_or(""),
+            next_marker.as_deref().unwrap_or_default()
+        );
+        self.next_marker = next_marker;
+        if self.next_marker.is_none() {
+            self.done = true;
+        }
+        return Ok(Some(resp));
+    }
+
     async fn request_next_batch(&mut self) -> Result<ListObjectsOutput> {
-        self.offset = 0;
         let mut list_request = self
             .client
             .list_objects()
-            .bucket(&self.keyspace.bucket)
-            .set_delimiter(Some("/".to_string()))
-            .prefix(&self.keyspace.db_name);
+            .bucket(self.bucket.clone())
+            .prefix(self.prefix.clone());
 
+        if self.delimiter.is_some() {
+            list_request = list_request.set_delimiter(self.delimiter.clone());
+        }
         if let Some(marker) = self.next_marker.take() {
             list_request = list_request.marker(marker)
         }
