@@ -369,6 +369,7 @@ impl<W: WalHook> Connection<W> {
 
             if let Some(slot) = &lock.slot {
                 if slot.is_stolen.load(Ordering::Relaxed) || Instant::now() > slot.timeout_at {
+                    lock.rollback();
                     has_timeout = true;
                 }
             }
@@ -414,7 +415,7 @@ impl<W: WalHook> Connection<W> {
 
         builder.finish(*this.lock().current_frame_no_receiver.borrow_and_update())?;
 
-        let state = if matches!(previous_state, Tx::Read | Tx::Write) {
+        let state = if matches!(this.lock().conn.transaction_state(Some(DatabaseName::Main))?, Tx::Read | Tx::Write) {
             State::Txn
         } else {
             State::Init
@@ -692,11 +693,13 @@ where
 
 #[cfg(test)]
 mod test {
+    use insta::assert_json_snapshot;
     use itertools::Itertools;
     use sqld_libsql_bindings::wal_hook::TRANSPARENT_METHODS;
     use tempfile::tempdir;
     use tokio::task::JoinSet;
 
+    use crate::connection::Connection as _;
     use crate::query_result_builder::test::{test_driver, TestBuilder};
     use crate::query_result_builder::QueryResultBuilder;
     use crate::DEFAULT_AUTO_CHECKPOINT;
@@ -733,7 +736,7 @@ mod test {
     }
 
     #[tokio::test]
-    async fn test_txn_stealing() {
+    async fn txn_stealing() {
         let tmp = tempdir().unwrap();
         let make_conn = MakeLibSqlConn::new(
             tmp.path().into(),
@@ -862,5 +865,35 @@ mod test {
         });
 
         while join_set.join_next().await.is_some() {}
+    }
+
+    #[tokio::test]
+    async fn txn_timeout_no_stealing() {
+        let tmp = tempdir().unwrap();
+        let make_conn = MakeLibSqlConn::new(
+            tmp.path().into(),
+            &TRANSPARENT_METHODS,
+            || (),
+            Default::default(),
+            Arc::new(DatabaseConfigStore::load(tmp.path()).unwrap()),
+            Arc::new([]),
+            100000000,
+            100000000,
+            DEFAULT_AUTO_CHECKPOINT,
+            watch::channel(None).1,
+        )
+            .await
+            .unwrap();
+
+        tokio::time::pause();
+        let conn = make_conn.make_connection().await.unwrap();
+        let (_builder, state) = Connection::run(conn.inner.clone(), Program::seq(&["BEGIN IMMEDIATE"]), TestBuilder::default()).unwrap();
+        assert_eq!(state, State::Txn);
+
+        tokio::time::advance(TXN_TIMEOUT * 2).await;
+
+        let (builder, state) = Connection::run(conn.inner.clone(), Program::seq(&["BEGIN IMMEDIATE"]), TestBuilder::default()).unwrap();
+        assert_eq!(state, State::Init);
+        assert!(matches!(builder.into_ret()[0], Err(Error::LibSqlTxTimeout)));
     }
 }
