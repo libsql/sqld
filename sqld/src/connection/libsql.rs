@@ -264,14 +264,18 @@ impl<W: WalHook> Default for TxnState<W> {
 /// - When a connection notices that it's slot has been stolen, it returns a timedout error to the next request.
 unsafe extern "C" fn busy_handler<W: WalHook>(state: *mut c_void, _retries: c_int) -> c_int {
     let state = &*(state as *mut TxnState<W>);
+    let lock = state.slot.read();
+    // fast path
+    if lock.is_none() {
+        return 1;
+    }
+
     tokio::runtime::Handle::current().block_on(async move {
         let timeout = {
-            let lock = state.slot.read();
-            if lock.is_none() {
-                return 1;
-            }
             let slot = lock.as_ref().unwrap();
-            tokio::time::sleep_until(slot.timeout_at)
+            let timeout_at = slot.timeout_at;
+            drop(lock);
+            tokio::time::sleep_until(timeout_at)
         };
 
         tokio::select! {
