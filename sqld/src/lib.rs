@@ -190,7 +190,11 @@ where
                 match conn.checkpoint().await {
                     Ok(_) => {
                         let elapsed = Instant::now() - start;
-                        tracing::info!("database checkpoint finished (took: {:?})", elapsed);
+                        if elapsed >= Duration::from_secs(10) {
+                            tracing::warn!("database checkpoint finished (took: {:?})", elapsed);
+                        } else {
+                            tracing::info!("database checkpoint finished (took: {:?})", elapsed);
+                        }
                         None
                     }
                     Err(err) => {
