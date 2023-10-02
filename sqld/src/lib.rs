@@ -185,7 +185,7 @@ where
         }
         retry = match connection_maker.create().await {
             Ok(conn) => {
-                tracing::trace!("database checkpoint");
+                tracing::info!("database checkpoint starts");
                 let start = Instant::now();
                 match conn.checkpoint().await {
                     Ok(_) => {
