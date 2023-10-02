@@ -264,7 +264,7 @@ pub mod rpc {
 }
 
 pub struct ProxyService {
-    clients: RwLock<HashMap<Uuid, Arc<PrimaryConnection>>>,
+    clients: Arc<RwLock<HashMap<Uuid, Arc<PrimaryConnection>>>>,
     namespaces: NamespaceStore<PrimaryNamespaceMaker>,
     auth: Option<Arc<Auth>>,
     disable_namespaces: bool,
@@ -448,13 +448,11 @@ impl QueryResultBuilder for ExecuteResultBuilder {
 // FIXME: we should also keep a list of recently disconnected clients,
 // and if one should arrive with a late message, it should be rejected
 // with an error. A similar mechanism is already implemented in hrana-over-http.
-pub async fn garbage_collect(
-    clients: &mut HashMap<Uuid, Arc<TrackedConnection<LibSqlConnection>>>,
-) {
+pub async fn garbage_collect(clients: &mut HashMap<Uuid, Arc<PrimaryConnection>>) {
     let limit = std::time::Duration::from_secs(30);
 
     clients.retain(|_, db| db.idle_time() < limit);
-    tracing::trace!("gc: remaining client handles: {:?}", clients);
+    tracing::trace!("gc: remaining client handles count: {}", clients.len());
 }
 
 #[tonic::async_trait]
