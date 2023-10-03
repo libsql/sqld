@@ -150,7 +150,69 @@ message ProgramReq {
     Program pgm = 2;
 }
 
+message ExecMessage {
+    /// id of the request. The response will contain this id
+    uint32 request_id = 1;
+    oneof request {
+        ProgramReq execute = 2;
+        DescribeRequest describe = 3;
+    }
+}
+
+/// streaming exec proto
+
+message Init            { }
+message BeginStep       { }
+message FinishStep      { 
+    uint64 affected_row_count = 1;
+    optional uint64 last_insert_row_id = 2;
+}
+message StepError       {
+    string error = 1;
+}
+message ColsDescription {
+    repeated Column columns = 1;
+}
+message BeginRows       { }
+message BeginRow        { }
+message AddRowValue     { 
+    Value val = 1;
+}
+message FinishRow       { }
+message FinishRows      { }
+message Finish          {
+    optional uint64 last_frame_no = 1;
+}
+
+
+message Message {
+    oneof payload {
+        Description     describe_result = 1;
+
+        Init            init = 2;
+        BeginStep       begin_step = 3;
+        FinishStep      finish_step = 4;
+        StepError       step_error = 5;
+        ColsDescription cols_description = 6;
+        BeginRows       begin_rows = 7;
+        BeginRow        begin_row = 8;
+        AddRowValue     add_row_value = 9;
+        FinishRow       finish_row = 10;
+        FinishRows      finish_rows = 11;
+        Finish          finish = 12;
+
+        Error           error = 13;
+    }
+}
+
+message ExecResponse {
+    uint32  request_id = 1;
+    repeated Message messages = 2;
+}
+
 service Proxy {
+  rpc StreamExec(stream ExecMessage) returns (stream ExecResponse) {}
+
   rpc Execute(ProgramReq) returns (ExecuteResults) {}
   rpc Describe(DescribeRequest) returns (DescribeResult) {}
   rpc Disconnect(DisconnectMessage) returns (Ack) {}
