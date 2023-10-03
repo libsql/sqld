@@ -20,7 +20,8 @@ use crate::libsql_bindings::ffi::SQLITE_IOERR_WRITE;
 use crate::libsql_bindings::ffi::{
     sqlite3,
     types::{XWalCheckpointFn, XWalFrameFn, XWalSavePointUndoFn, XWalUndoFn},
-    PageHdrIter, PgHdr, Wal, SQLITE_CHECKPOINT_TRUNCATE, SQLITE_IOERR, SQLITE_OK,
+    PageHdrIter, PgHdr, Wal, SQLITE_CHECKPOINT_PASSIVE, SQLITE_CHECKPOINT_TRUNCATE, SQLITE_IOERR,
+    SQLITE_OK,
 };
 use crate::libsql_bindings::wal_hook::WalHook;
 use crate::replication::frame::{Frame, FrameHeader};
@@ -41,9 +42,10 @@ impl Version {
     }
 }
 
+#[derive(Debug)]
 pub enum ReplicationLoggerHook {}
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct ReplicationLoggerHookCtx {
     buffer: Vec<WalPage>,
     logger: Arc<ReplicationLogger>,
@@ -199,6 +201,9 @@ unsafe impl WalHook for ReplicationLoggerHook {
                     "Ignoring a checkpoint request weaker than TRUNCATE: {}",
                     emode
                 );
+                if emode == SQLITE_CHECKPOINT_PASSIVE {
+                    return SQLITE_OK;
+                }
                 // Return an error to signal to sqlite that the WAL was not checkpointed, and it is
                 // therefore not safe to delete it.
                 return SQLITE_BUSY;
@@ -276,7 +281,7 @@ unsafe impl WalHook for ReplicationLoggerHook {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct WalPage {
     pub page_no: u32,
     /// 0 for non-commit frames
@@ -731,6 +736,7 @@ impl LogFileHeader {
     }
 }
 
+#[derive(Debug)]
 pub struct Generation {
     pub id: Uuid,
     pub start_index: u64,
@@ -745,6 +751,7 @@ impl Generation {
     }
 }
 
+#[derive(Debug)]
 pub struct ReplicationLogger {
     pub generation: Generation,
     pub log_file: RwLock<LogFile>,

@@ -340,6 +340,14 @@ where
                         hrana::Encoding::Json,
                     )),
                 )
+                .route(
+                    "/v2/diagnostics",
+                    get(handle_hrana!(
+                        hrana::http::Endpoint::Diagnostics,
+                        hrana::Version::Hrana2,
+                        hrana::Encoding::Json,
+                    )),
+                )
                 .route("/v3", get(crate::hrana::http::handle_index))
                 .route(
                     "/v3/pipeline",

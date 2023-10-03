@@ -144,7 +144,7 @@ where
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct LibSqlConnection<W: WalHook> {
     inner: Arc<Mutex<Connection<W>>>,
 }
@@ -206,6 +206,7 @@ where
     }
 }
 
+#[derive(Debug)]
 struct Connection<W: WalHook = TransparentMethods> {
     conn: sqld_libsql_bindings::Connection<W>,
     stats: Arc<Stats>,
@@ -229,7 +230,23 @@ struct TxnSlot<T: WalHook> {
     is_stolen: AtomicBool,
 }
 
+impl<T: WalHook> std::fmt::Debug for TxnSlot<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let stolen = self.is_stolen.load(Ordering::Relaxed);
+        let time_left = self
+            .timeout_at
+            .duration_since(tokio::time::Instant::now())
+            .as_millis();
+        write!(
+            f,
+            "(conn: {:?}, timeout_ms: {time_left}, stolen: {stolen})",
+            self.conn
+        )
+    }
+}
+
 /// The transaction state shared among all connections to the same database
+#[derive(Debug)]
 pub struct TxnState<T: WalHook> {
     /// Slot for the connection currently holding the transaction lock
     slot: RwLock<Option<Arc<TxnSlot<T>>>>,
@@ -710,6 +727,16 @@ where
             .await
             .unwrap()?;
         Ok(())
+    }
+
+    fn diagnostics(&self) -> String {
+        match self.inner.try_lock() {
+            Some(conn) => match conn.slot {
+                Some(ref slot) => format!("{slot:?}"),
+                None => "[BUG] connection closed".to_string(),
+            },
+            None => "[BUG] connection busy".to_string(),
+        }
     }
 }
 
