@@ -454,19 +454,10 @@ impl QueryResultBuilder for ExecuteResultBuilder {
 pub async fn garbage_collect(
     clients: &mut HashMap<Uuid, Arc<TrackedConnection<LibSqlConnection>>>,
 ) {
-    let mut to_remove = Vec::new();
     let limit = std::time::Duration::from_secs(30);
-    for (client_id, db) in clients.iter() {
-        if db.idle_time() > limit {
-            to_remove.push(*client_id);
-        }
-    }
 
-    tracing::trace!("garbage collecting clients: {to_remove:?}");
-    for client_id in to_remove {
-        clients.remove(&client_id);
-    }
-    tracing::trace!("remaining client handles: {:?}", clients);
+    clients.retain(|_, db| db.idle_time() < limit);
+    tracing::trace!("gc: remaining client handles: {:?}", clients);
 }
 
 #[tonic::async_trait]

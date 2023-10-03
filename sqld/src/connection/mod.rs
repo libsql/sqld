@@ -294,7 +294,7 @@ impl<DB> TrackedConnection<DB> {
     pub fn idle_time(&self) -> Duration {
         let now = now_millis();
         let atime = self.atime.load(Ordering::Relaxed);
-        Duration::from_millis(now - atime)
+        Duration::from_millis(now.saturating_sub(atime))
     }
 }
 
