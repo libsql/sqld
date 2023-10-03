@@ -1071,16 +1071,17 @@ impl Replicator {
     ) -> Result<Option<RestoreAction>> {
         // Check if the database needs to be restored by inspecting the database
         // change counter and the WAL size.
-        let local_counter = match File::open(&self.db_path).await {
+        let (local_counter, db_len) = match File::open(&self.db_path).await {
             Ok(mut db) => {
                 // While reading the main database file for the first time,
                 // page size from an existing database should be set.
                 if let Ok(page_size) = Self::read_page_size(&mut db).await {
                     self.set_page_size(page_size)?;
                 }
-                Self::read_change_counter(&mut db).await.unwrap_or([0u8; 4])
+                let change_counter = Self::read_change_counter(&mut db).await.unwrap_or([0u8; 4]);
+                (change_counter, db.metadata().await?.len())
             }
-            Err(_) => [0u8; 4],
+            Err(_) => ([0u8; 4], 0),
         };
 
         let remote_counter = self.get_remote_change_counter(&generation).await?;
@@ -1091,7 +1092,7 @@ impl Replicator {
         // generation. This is used later in [Self::new_generation] to create a dependency between
         // this generation and a new one.
         self.generation.store(Some(Arc::new(generation)));
-        if local_counter == [0, 0, 0, 0] {
+        if local_counter == [0, 0, 0, 0] && db_len == 0 {
             Ok(None) // local db is empty or doesn't exist
         } else if local_counter == remote_counter {
             tracing::debug!(
