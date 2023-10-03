@@ -110,7 +110,6 @@ message Step {
     optional Cond cond = 1;
     Query query = 2;
 }
-
 message Cond {
     oneof cond {
         OkCond ok = 1;

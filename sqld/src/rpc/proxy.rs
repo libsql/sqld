@@ -1,8 +1,13 @@
 use std::collections::HashMap;
+use std::pin::Pin;
 use std::str::FromStr;
 use std::sync::Arc;
+use std::task::{ready, Context, Poll};
+use std::future::Future;
 
 use async_lock::{RwLock, RwLockUpgradableReadGuard};
+use futures_core::Stream;
+use tokio::sync::mpsc;
 use uuid::Uuid;
 
 use crate::auth::{Auth, Authenticated};
@@ -14,11 +19,12 @@ use crate::query_result_builder::{
 };
 use crate::replication::FrameNo;
 
+use self::rpc::exec_message::Request;
 use self::rpc::proxy_server::Proxy;
 use self::rpc::query_result::RowResult;
 use self::rpc::{
     describe_result, Ack, DescribeRequest, DescribeResult, Description, DisconnectMessage,
-    ExecuteResults, QueryResult, ResultRows, Row,
+    ExecuteResults, QueryResult, ResultRows, Row, ExecMessage, ExecResponse,
 };
 use super::NAMESPACE_DOESNT_EXIST;
 
@@ -455,8 +461,189 @@ pub async fn garbage_collect(clients: &mut HashMap<Uuid, Arc<PrimaryConnection>>
     tracing::trace!("gc: remaining client handles count: {}", clients.len());
 }
 
+pin_project_lite::pin_project! {
+    pub struct StreamRequestHandler<S> {
+        #[pin]
+        request_stream: S,
+        connection: Arc<TrackedConnection<LibSqlConnection>>,
+        state: HandlerState,
+        authenticated: Authenticated,
+    }
+}
+
+struct StreamResponseBuilder {
+    request_id: u32,
+    sender: mpsc::Sender<ExecResponse>,
+}
+
+impl QueryResultBuilder for StreamResponseBuilder {
+    type Ret = ();
+
+    fn init(&mut self, _config: &QueryBuilderConfig) -> Result<(), QueryResultBuilderError> {
+        todo!()
+    }
+
+    fn begin_step(&mut self) -> Result<(), QueryResultBuilderError> {
+        todo!()
+    }
+
+    fn finish_step(
+        &mut self,
+        _affected_row_count: u64,
+        _last_insert_rowid: Option<i64>,
+    ) -> Result<(), QueryResultBuilderError> {
+        todo!()
+    }
+
+    fn step_error(&mut self, _error: crate::error::Error) -> Result<(), QueryResultBuilderError> {
+        todo!()
+    }
+
+    fn cols_description<'a>(
+        &mut self,
+        _cols: impl IntoIterator<Item = impl Into<Column<'a>>>,
+    ) -> Result<(), QueryResultBuilderError> {
+        todo!()
+    }
+
+    fn begin_rows(&mut self) -> Result<(), QueryResultBuilderError> {
+        todo!()
+    }
+
+    fn begin_row(&mut self) -> Result<(), QueryResultBuilderError> {
+        todo!()
+    }
+
+    fn add_row_value(&mut self, _v: rusqlite::types::ValueRef) -> Result<(), QueryResultBuilderError> {
+        todo!()
+    }
+
+    fn finish_row(&mut self) -> Result<(), QueryResultBuilderError> {
+        todo!()
+    }
+
+    fn finish_rows(&mut self) -> Result<(), QueryResultBuilderError> {
+        todo!()
+    }
+
+    fn finish(&mut self, _last_frame_no: Option<FrameNo>) -> Result<(), QueryResultBuilderError> {
+        todo!()
+    }
+
+    fn into_ret(self) -> Self::Ret {
+        todo!()
+    }
+}
+
+enum HandlerState {
+    Execute(Pin<Box<dyn Stream<Item = ExecMessage>>>),
+    Idle,
+    Fused,
+}
+
+impl<S> Stream for StreamRequestHandler<S> 
+    where S: Stream<Item = Result<ExecMessage, tonic::Status>>
+{
+    type Item = Result<ExecResponse, tonic::Status>;
+
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let this = self.project();
+
+        match this.state {
+            HandlerState::Idle => {
+                match ready!(this.request_stream.poll_next(cx)) {
+                    Some(Err(e)) => {
+                        *this.state = HandlerState::Fused;
+                        return Poll::Ready(Some(Err(e)));
+                    }
+                    Some(Ok(req)) => {
+                        match req.request.unwrap() {
+                            Request::Execute(exec) => {
+                                let pgm = crate::connection::program::Program::try_from(exec.pgm.unwrap()).unwrap();
+                                let conn = this.connection.clone();
+                                let authenticated = this.authenticated.clone();
+
+                                let s = async_stream::stream! {
+                                    let (sender, receiver) = mpsc::channel(1);
+                                    let builder = StreamResponseBuilder {
+                                        request_id: req.request_id,
+                                        sender,
+                                    };
+                                    let fut = conn.execute_program(pgm, authenticated, builder, None);
+                                    loop {
+                                        tokio::select! {
+                                            res = fut => {
+                                                // todo check result?
+                                                break
+                                            }
+                                            msg = receiver.recv() => {
+                                                if let Some(msg) = msg {
+                                                    yield msg;
+                                                }
+                                            }
+                                        }
+                                    }
+                                };
+                                let fut = Box::pin(async move {
+                                    Ok(())
+                                });
+                                *this.state = HandlerState::Execute(Box::pin(s));
+                            },
+                            Request::Describe(_) => todo!(),
+                        }
+                        // we have placed the request, poll immediately
+                        cx.waker().wake_by_ref();
+                        return Poll::Pending;
+                    },
+                    None => Poll::Ready(None),
+                }
+            },
+            HandlerState::Fused => Poll::Ready(None),
+            HandlerState::Execute(_) => todo!(),
+        }
+    }
+}
+
 #[tonic::async_trait]
 impl Proxy for ProxyService {
+    type StreamExecStream = StreamRequestHandler<tonic::Streaming<ExecMessage>>;
+
+    async fn stream_exec(&self, req: tonic::Request<tonic::Streaming<ExecMessage>>) ->Result<tonic::Response<Self::StreamExecStream>, tonic::Status> {
+        let authenticated = if let Some(auth) = &self.auth {
+            auth.authenticate_grpc(&req, self.disable_namespaces)?
+        } else {
+            Authenticated::from_proxy_grpc_request(&req, self.disable_namespaces)?
+        };
+
+        let namespace = super::extract_namespace(self.disable_namespaces, &req)?;
+        let (connection_maker, _new_frame_notifier) = self
+            .namespaces
+            .with(namespace, |ns| {
+                let connection_maker = ns.db.connection_maker();
+                let notifier = ns.db.logger.new_frame_notifier.subscribe();
+                (connection_maker, notifier)
+            })
+        .await
+            .map_err(|e| {
+                if let crate::error::Error::NamespaceDoesntExist(_) = e {
+                    tonic::Status::failed_precondition(NAMESPACE_DOESNT_EXIST)
+                } else {
+                    tonic::Status::internal(e.to_string())
+                }
+            })?;
+
+        let connection = connection_maker.create().await.unwrap();
+
+        let handler = StreamRequestHandler {
+            authenticated,
+            request_stream: req.into_inner(),
+            connection: connection.into(),
+            state: HandlerState::Idle,
+        };
+
+        Ok(tonic::Response::new(handler))
+    }
+
     async fn execute(
         &self,
         req: tonic::Request<rpc::ProgramReq>,
@@ -615,4 +802,5 @@ impl Proxy for ProxyService {
             })),
         }))
     }
+
 }
