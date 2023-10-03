@@ -1078,9 +1078,7 @@ impl Replicator {
                 if let Ok(page_size) = Self::read_page_size(&mut db).await {
                     self.set_page_size(page_size)?;
                 }
-                // if database file exists always treat it as new and more up to date, skipping the
-                // restoration process and calling for a new generation to be made
-                return Ok(Some(RestoreAction::SnapshotMainDbFile));
+                Self::read_change_counter(&mut db).await.unwrap_or([0u8; 4])
             }
             Err(_) => [0u8; 4],
         };
@@ -1093,33 +1091,29 @@ impl Replicator {
         // generation. This is used later in [Self::new_generation] to create a dependency between
         // this generation and a new one.
         self.generation.store(Some(Arc::new(generation)));
-        match local_counter.cmp(&remote_counter) {
-            std::cmp::Ordering::Equal => {
-                tracing::debug!(
-                    "Consistent: {}; wal pages: {}",
-                    last_consistent_frame,
-                    wal_pages
-                );
-                match wal_pages.cmp(&last_consistent_frame) {
-                    std::cmp::Ordering::Equal => {
-                        tracing::info!(
-                            "Remote generation is up-to-date, reusing it in this session"
-                        );
-                        self.reset_frames(wal_pages + 1);
-                        Ok(Some(RestoreAction::ReuseGeneration(generation)))
-                    }
-                    std::cmp::Ordering::Greater => {
-                        tracing::info!("Local change counter matches the remote one, but local WAL contains newer data from generation {}, which needs to be replicated.", generation);
-                        Ok(Some(RestoreAction::SnapshotMainDbFile))
-                    }
-                    std::cmp::Ordering::Less => Ok(None),
+        if local_counter == [0, 0, 0, 0] {
+            Ok(None) // local db is empty or doesn't exist
+        } else if local_counter == remote_counter {
+            tracing::debug!(
+                "Consistent: {}; wal pages: {}",
+                last_consistent_frame,
+                wal_pages
+            );
+            match wal_pages.cmp(&last_consistent_frame) {
+                std::cmp::Ordering::Equal => {
+                    tracing::info!("Remote generation is up-to-date, reusing it in this session");
+                    self.reset_frames(wal_pages + 1);
+                    Ok(Some(RestoreAction::ReuseGeneration(generation)))
                 }
+                std::cmp::Ordering::Greater => {
+                    tracing::info!("Local change counter matches the remote one, but local WAL contains newer data from generation {}, which needs to be replicated.", generation);
+                    Ok(Some(RestoreAction::SnapshotMainDbFile))
+                }
+                std::cmp::Ordering::Less => Ok(None),
             }
-            std::cmp::Ordering::Greater => {
-                tracing::info!("Local change counter is larger than its remote counterpart - a new snapshot needs to be replicated (generation: {})", generation);
-                Ok(Some(RestoreAction::SnapshotMainDbFile))
-            }
-            std::cmp::Ordering::Less => Ok(None),
+        } else {
+            tracing::info!("Local change counter is different than its remote counterpart - a new snapshot needs to be replicated (generation: {})", generation);
+            Ok(Some(RestoreAction::SnapshotMainDbFile))
         }
     }
 
