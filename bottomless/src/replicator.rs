@@ -1303,7 +1303,9 @@ impl Replicator {
         };
 
         let (action, recovered) = self.restore_from(generation, timestamp).await?;
-        tracing::info!("Restoring from generation {generation}: action={action:?}, recovered={recovered}");
+        tracing::info!(
+            "Restoring from generation {generation}: action={action:?}, recovered={recovered}"
+        );
         Ok((action, recovered))
     }
 
