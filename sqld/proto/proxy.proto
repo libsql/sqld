@@ -164,7 +164,7 @@ message Init            { }
 message BeginStep       { }
 message FinishStep      { 
     uint64 affected_row_count = 1;
-    optional uint64 last_insert_row_id = 2;
+    optional int64 last_insert_rowid = 2;
 }
 message StepError       {
     string error = 1;

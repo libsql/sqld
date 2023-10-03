@@ -8,7 +8,7 @@ use crate::auth::Auth;
 
 use super::proxy::rpc::{
     self, proxy_client::ProxyClient, proxy_server::Proxy, Ack, DescribeRequest, DescribeResult,
-    DisconnectMessage, ExecuteResults, ExecResponse, ExecMessage,
+    DisconnectMessage, ExecMessage, ExecResponse, ExecuteResults,
 };
 
 pub struct ReplicaProxyService {
@@ -35,7 +35,10 @@ impl ReplicaProxyService {
 impl Proxy for ReplicaProxyService {
     type StreamExecStream = tonic::codec::Streaming<ExecResponse>;
 
-    async fn stream_exec(&self,req: tonic::Request<tonic::Streaming<ExecMessage>>) -> Result<tonic::Response<Self::StreamExecStream>, tonic::Status> {
+    async fn stream_exec(
+        &self,
+        req: tonic::Request<tonic::Streaming<ExecMessage>>,
+    ) -> Result<tonic::Response<Self::StreamExecStream>, tonic::Status> {
         let (meta, ext, stream) = req.into_parts();
         let mut req = tonic::Request::from_parts(meta, ext, stream.map(|r| r.unwrap())); // TODO: handle mapping error
         self.do_auth(&mut req)?;

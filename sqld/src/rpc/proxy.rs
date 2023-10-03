@@ -3,10 +3,11 @@ use std::pin::Pin;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::task::{ready, Context, Poll};
-use std::future::Future;
 
 use async_lock::{RwLock, RwLockUpgradableReadGuard};
+use futures::StreamExt;
 use futures_core::Stream;
+use rusqlite::types::ValueRef;
 use tokio::sync::mpsc;
 use uuid::Uuid;
 
@@ -20,11 +21,12 @@ use crate::query_result_builder::{
 use crate::replication::FrameNo;
 
 use self::rpc::exec_message::Request;
+use self::rpc::message::Payload;
 use self::rpc::proxy_server::Proxy;
 use self::rpc::query_result::RowResult;
 use self::rpc::{
     describe_result, Ack, DescribeRequest, DescribeResult, Description, DisconnectMessage,
-    ExecuteResults, QueryResult, ResultRows, Row, ExecMessage, ExecResponse,
+    ExecMessage, ExecResponse, ExecuteResults, Message, QueryResult, ResultRows, Row,
 };
 use super::NAMESPACE_DOESNT_EXIST;
 
@@ -405,7 +407,7 @@ impl QueryResultBuilder for ExecuteResultBuilder {
 
     fn add_row_value(
         &mut self,
-        v: rusqlite::types::ValueRef,
+        v: ValueRef,
     ) -> Result<(), QueryResultBuilderError> {
         let data = bincode::serialize(
             &crate::query::Value::try_from(v).map_err(QueryResultBuilderError::from_any)?,
@@ -474,75 +476,141 @@ pin_project_lite::pin_project! {
 struct StreamResponseBuilder {
     request_id: u32,
     sender: mpsc::Sender<ExecResponse>,
+    current: Option<ExecResponse>,
+}
+
+impl StreamResponseBuilder {
+    fn current(&mut self) -> &mut ExecResponse {
+        self.current.get_or_insert_with(|| ExecResponse {
+            messages: Vec::new(),
+            request_id: self.request_id,
+        })
+    }
+
+    fn push(&mut self, payload: Payload) {
+        const MAX_RESPONSE_MESSAGES: usize = 10;
+
+        let current = self.current();
+        current.messages.push(Message {
+            payload: Some(payload),
+        });
+
+        if current.messages.len() > MAX_RESPONSE_MESSAGES {
+            self.flush()
+        }
+    }
+
+    fn flush(&mut self) {
+        if let Some(current) = self.current.take() {
+            self.sender.blocking_send(current).unwrap();
+        }
+    }
 }
 
 impl QueryResultBuilder for StreamResponseBuilder {
     type Ret = ();
 
     fn init(&mut self, _config: &QueryBuilderConfig) -> Result<(), QueryResultBuilderError> {
-        todo!()
+        self.push(Payload::Init(rpc::Init {}));
+        Ok(())
     }
 
     fn begin_step(&mut self) -> Result<(), QueryResultBuilderError> {
-        todo!()
+        self.push(Payload::BeginStep(rpc::BeginStep {}));
+        Ok(())
     }
 
     fn finish_step(
         &mut self,
-        _affected_row_count: u64,
-        _last_insert_rowid: Option<i64>,
+        affected_row_count: u64,
+        last_insert_rowid: Option<i64>,
     ) -> Result<(), QueryResultBuilderError> {
-        todo!()
+        self.push(Payload::FinishStep(rpc::FinishStep {
+            affected_row_count,
+            last_insert_rowid,
+        }));
+        Ok(())
     }
 
-    fn step_error(&mut self, _error: crate::error::Error) -> Result<(), QueryResultBuilderError> {
-        todo!()
+    fn step_error(&mut self, error: crate::error::Error) -> Result<(), QueryResultBuilderError> {
+        self.push(Payload::StepError(rpc::StepError {
+            error: error.to_string(),
+        }));
+        Ok(())
     }
 
     fn cols_description<'a>(
         &mut self,
-        _cols: impl IntoIterator<Item = impl Into<Column<'a>>>,
+        cols: impl IntoIterator<Item = impl Into<Column<'a>>>,
     ) -> Result<(), QueryResultBuilderError> {
-        todo!()
+        self.push(Payload::ColsDescription(rpc::ColsDescription {
+            columns: cols
+                .into_iter()
+                .map(Into::into)
+                .map(|c| rpc::Column {
+                    name: c.name.into(),
+                    decltype: c.decl_ty.map(Into::into),
+                })
+                .collect::<Vec<_>>(),
+        }));
+        Ok(())
     }
 
     fn begin_rows(&mut self) -> Result<(), QueryResultBuilderError> {
-        todo!()
+        self.push(Payload::BeginRows(rpc::BeginRows {}));
+        Ok(())
     }
 
     fn begin_row(&mut self) -> Result<(), QueryResultBuilderError> {
-        todo!()
+        self.push(Payload::BeginRow(rpc::BeginRow {}));
+        Ok(())
     }
 
-    fn add_row_value(&mut self, _v: rusqlite::types::ValueRef) -> Result<(), QueryResultBuilderError> {
-        todo!()
+    fn add_row_value(
+        &mut self,
+        v: ValueRef,
+    ) -> Result<(), QueryResultBuilderError> {
+        let data = bincode::serialize(
+            &crate::query::Value::try_from(v).map_err(QueryResultBuilderError::from_any)?,
+        )
+        .map_err(QueryResultBuilderError::from_any)?;
+
+        let val = Some(rpc::Value { data });
+
+        self.push(Payload::AddRowValue(rpc::AddRowValue { val }));
+        Ok(())
     }
 
     fn finish_row(&mut self) -> Result<(), QueryResultBuilderError> {
-        todo!()
+        self.push(Payload::FinishRow(rpc::FinishRow {}));
+        Ok(())
     }
 
     fn finish_rows(&mut self) -> Result<(), QueryResultBuilderError> {
-        todo!()
+        self.push(Payload::FinishRows(rpc::FinishRows {}));
+        Ok(())
     }
 
-    fn finish(&mut self, _last_frame_no: Option<FrameNo>) -> Result<(), QueryResultBuilderError> {
-        todo!()
+    fn finish(&mut self, last_frame_no: Option<FrameNo>) -> Result<(), QueryResultBuilderError> {
+        self.push(Payload::Finish(rpc::Finish { last_frame_no }));
+        self.flush();
+        Ok(())
     }
 
     fn into_ret(self) -> Self::Ret {
-        todo!()
+        ()
     }
 }
 
 enum HandlerState {
-    Execute(Pin<Box<dyn Stream<Item = ExecMessage>>>),
+    Execute(Pin<Box<dyn Stream<Item = ExecResponse> + Send>>),
     Idle,
     Fused,
 }
 
-impl<S> Stream for StreamRequestHandler<S> 
-    where S: Stream<Item = Result<ExecMessage, tonic::Status>>
+impl<S> Stream for StreamRequestHandler<S>
+where
+    S: Stream<Item = Result<ExecMessage, tonic::Status>>,
 {
     type Item = Result<ExecResponse, tonic::Status>;
 
@@ -557,22 +625,27 @@ impl<S> Stream for StreamRequestHandler<S>
                         return Poll::Ready(Some(Err(e)));
                     }
                     Some(Ok(req)) => {
+                        let request_id = req.request_id;
                         match req.request.unwrap() {
                             Request::Execute(exec) => {
-                                let pgm = crate::connection::program::Program::try_from(exec.pgm.unwrap()).unwrap();
+                                let pgm = crate::connection::program::Program::try_from(
+                                    exec.pgm.unwrap(),
+                                )
+                                .unwrap();
                                 let conn = this.connection.clone();
                                 let authenticated = this.authenticated.clone();
 
                                 let s = async_stream::stream! {
-                                    let (sender, receiver) = mpsc::channel(1);
+                                    let (sender, mut receiver) = mpsc::channel(1);
                                     let builder = StreamResponseBuilder {
-                                        request_id: req.request_id,
+                                        request_id,
                                         sender,
+                                        current: None,
                                     };
-                                    let fut = conn.execute_program(pgm, authenticated, builder, None);
+                                    let mut fut = conn.execute_program(pgm, authenticated, builder, None);
                                     loop {
                                         tokio::select! {
-                                            res = fut => {
+                                            _res = &mut fut => {
                                                 // todo check result?
                                                 break
                                             }
@@ -584,22 +657,35 @@ impl<S> Stream for StreamRequestHandler<S>
                                         }
                                     }
                                 };
-                                let fut = Box::pin(async move {
-                                    Ok(())
-                                });
                                 *this.state = HandlerState::Execute(Box::pin(s));
-                            },
+                            }
                             Request::Describe(_) => todo!(),
                         }
                         // we have placed the request, poll immediately
                         cx.waker().wake_by_ref();
                         return Poll::Pending;
-                    },
-                    None => Poll::Ready(None),
+                    }
+                    None => {
+                        // this would easier if tokio_stream re-exported combinators
+                        *this.state = HandlerState::Fused;
+                        Poll::Ready(None)
+                    }
                 }
-            },
+            }
             HandlerState::Fused => Poll::Ready(None),
-            HandlerState::Execute(_) => todo!(),
+            HandlerState::Execute(stream) => {
+                let resp = ready!(stream.poll_next_unpin(cx));
+                match resp {
+                    Some(resp) => return Poll::Ready(Some(Ok(resp))),
+                    None => {
+                        // finished processing this query. Wake up immediately to prepare for the
+                        // next
+                        *this.state = HandlerState::Idle;
+                        cx.waker().wake_by_ref();
+                        return Poll::Pending;
+                    }
+                }
+            }
         }
     }
 }
@@ -608,7 +694,10 @@ impl<S> Stream for StreamRequestHandler<S>
 impl Proxy for ProxyService {
     type StreamExecStream = StreamRequestHandler<tonic::Streaming<ExecMessage>>;
 
-    async fn stream_exec(&self, req: tonic::Request<tonic::Streaming<ExecMessage>>) ->Result<tonic::Response<Self::StreamExecStream>, tonic::Status> {
+    async fn stream_exec(
+        &self,
+        req: tonic::Request<tonic::Streaming<ExecMessage>>,
+    ) -> Result<tonic::Response<Self::StreamExecStream>, tonic::Status> {
         let authenticated = if let Some(auth) = &self.auth {
             auth.authenticate_grpc(&req, self.disable_namespaces)?
         } else {
@@ -623,7 +712,7 @@ impl Proxy for ProxyService {
                 let notifier = ns.db.logger.new_frame_notifier.subscribe();
                 (connection_maker, notifier)
             })
-        .await
+            .await
             .map_err(|e| {
                 if let crate::error::Error::NamespaceDoesntExist(_) = e {
                     tonic::Status::failed_precondition(NAMESPACE_DOESNT_EXIST)
@@ -802,5 +891,4 @@ impl Proxy for ProxyService {
             })),
         }))
     }
-
 }
