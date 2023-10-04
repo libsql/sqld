@@ -677,7 +677,7 @@ impl Replicator {
     }
 
     fn restore_db_path(&self) -> PathBuf {
-        let mut gzip_path = PathBuf::from(&self.db_path).to_path_buf();
+        let mut gzip_path = PathBuf::from(&self.db_path);
         gzip_path.pop();
         gzip_path.join("data.tmp")
     }
