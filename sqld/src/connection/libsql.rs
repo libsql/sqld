@@ -13,7 +13,7 @@ use crate::auth::{Authenticated, Authorized, Permission};
 use crate::error::Error;
 use crate::libsql_bindings::wal_hook::WalHook;
 use crate::query::Query;
-use crate::query_analysis::{State, StmtKind};
+use crate::query_analysis::{StmtKind, TxnStatus};
 use crate::query_result_builder::{QueryBuilderConfig, QueryResultBuilder};
 use crate::replication::FrameNo;
 use crate::stats::Stats;
@@ -405,7 +405,7 @@ impl<W: WalHook> Connection<W> {
         this: Arc<Mutex<Self>>,
         pgm: Program,
         mut builder: B,
-    ) -> Result<(B, State)> {
+    ) -> Result<(B, TxnStatus)> {
         use rusqlite::TransactionState as Tx;
 
         let state = this.lock().state.clone();
@@ -469,20 +469,23 @@ impl<W: WalHook> Connection<W> {
             results.push(res);
         }
 
-        builder.finish(*this.lock().current_frame_no_receiver.borrow_and_update())?;
-
-        let state = if matches!(
+        let status = if matches!(
             this.lock()
                 .conn
                 .transaction_state(Some(DatabaseName::Main))?,
             Tx::Read | Tx::Write
         ) {
-            State::Txn
+            TxnStatus::Txn
         } else {
-            State::Init
+            TxnStatus::Init
         };
 
-        Ok((builder, state))
+        builder.finish(
+            *this.lock().current_frame_no_receiver.borrow_and_update(),
+            status,
+        )?;
+
+        Ok((builder, status))
     }
 
     fn execute_step(
@@ -733,7 +736,7 @@ where
         auth: Authenticated,
         builder: B,
         _replication_index: Option<FrameNo>,
-    ) -> Result<(B, State)> {
+    ) -> Result<(B, TxnStatus)> {
         check_program_auth(auth, &pgm)?;
         let conn = self.inner.clone();
         tokio::task::spawn_blocking(move || Connection::run(conn, pgm, builder))

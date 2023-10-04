@@ -1,27 +1,31 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use futures_core::future::BoxFuture;
 use parking_lot::Mutex as PMutex;
 use rusqlite::types::ValueRef;
 use sqld_libsql_bindings::wal_hook::{TransparentMethods, TRANSPARENT_METHODS};
-use tokio::sync::{watch, Mutex};
+use tokio::sync::{mpsc, watch, Mutex};
+use tokio_stream::StreamExt;
 use tonic::metadata::BinaryMetadataValue;
 use tonic::transport::Channel;
-use tonic::Request;
+use tonic::{Request, Streaming};
 use uuid::Uuid;
 
 use crate::auth::Authenticated;
 use crate::error::Error;
 use crate::namespace::NamespaceName;
 use crate::query::Value;
-use crate::query_analysis::State;
+use crate::query_analysis::TxnStatus;
 use crate::query_result_builder::{
     Column, QueryBuilderConfig, QueryResultBuilder, QueryResultBuilderError,
 };
 use crate::replication::FrameNo;
 use crate::rpc::proxy::rpc::proxy_client::ProxyClient;
-use crate::rpc::proxy::rpc::query_result::RowResult;
-use crate::rpc::proxy::rpc::{DisconnectMessage, ExecuteResults};
+use crate::rpc::proxy::rpc::{
+    self, AddRowValue, ColsDescription, DisconnectMessage, ExecReq, ExecResp, Finish, FinishStep,
+    StepError,
+};
 use crate::rpc::NAMESPACE_METADATA_KEY;
 use crate::stats::Stats;
 use crate::{Result, DEFAULT_AUTO_CHECKPOINT};
@@ -109,7 +113,7 @@ pub struct WriteProxyConnection {
     /// Lazily initialized read connection
     read_conn: LibSqlConnection<TransparentMethods>,
     write_proxy: ProxyClient<Channel>,
-    state: Mutex<State>,
+    state: Mutex<TxnStatus>,
     client_id: Uuid,
     /// FrameNo of the last write performed by this connection on the primary.
     /// any subsequent read on this connection must wait for the replicator to catch up with this
@@ -120,51 +124,8 @@ pub struct WriteProxyConnection {
     builder_config: QueryBuilderConfig,
     stats: Arc<Stats>,
     namespace: NamespaceName,
-}
 
-fn execute_results_to_builder<B: QueryResultBuilder>(
-    execute_result: ExecuteResults,
-    mut builder: B,
-    config: &QueryBuilderConfig,
-) -> Result<B> {
-    builder.init(config)?;
-    for result in execute_result.results {
-        match result.row_result {
-            Some(RowResult::Row(rows)) => {
-                builder.begin_step()?;
-                builder.cols_description(rows.column_descriptions.iter().map(|c| Column {
-                    name: &c.name,
-                    decl_ty: c.decltype.as_deref(),
-                }))?;
-
-                builder.begin_rows()?;
-                for row in rows.rows {
-                    builder.begin_row()?;
-                    for value in row.values {
-                        let value: Value = bincode::deserialize(&value.data)
-                            // something is wrong, better stop right here
-                            .map_err(QueryResultBuilderError::from_any)?;
-                        builder.add_row_value(ValueRef::from(&value))?;
-                    }
-                    builder.finish_row()?;
-                }
-
-                builder.finish_rows()?;
-
-                builder.finish_step(rows.affected_row_count, rows.last_insert_rowid)?;
-            }
-            Some(RowResult::Error(err)) => {
-                builder.begin_step()?;
-                builder.step_error(Error::RpcQueryError(err))?;
-                builder.finish_step(0, None)?;
-            }
-            None => (),
-        }
-    }
-
-    builder.finish(execute_result.current_frame_no)?;
-
-    Ok(builder)
+    remote_conn: Mutex<Option<RemoteConnection>>,
 }
 
 impl WriteProxyConnection {
@@ -180,56 +141,63 @@ impl WriteProxyConnection {
         Ok(Self {
             read_conn,
             write_proxy,
-            state: Mutex::new(State::Init),
+            state: Mutex::new(TxnStatus::Init),
             client_id: Uuid::new_v4(),
-            last_write_frame_no: PMutex::new(None),
+            last_write_frame_no: Default::default(),
             applied_frame_no_receiver,
             builder_config,
             stats,
             namespace,
+            remote_conn: Default::default(),
         })
+    }
+
+    async fn with_remote_conn<F, Ret>(
+        &self,
+        auth: Authenticated,
+        builder_config: QueryBuilderConfig,
+        cb: F,
+    ) -> crate::Result<Ret>
+    where
+        F: FnOnce(&mut RemoteConnection) -> BoxFuture<'_, crate::Result<Ret>>,
+    {
+        let mut remote_conn = self.remote_conn.lock().await;
+        // TODO: catch broken connection, and reset it to None.
+        if remote_conn.is_some() {
+            cb(remote_conn.as_mut().unwrap()).await
+        } else {
+            let conn = RemoteConnection::connect(
+                self.write_proxy.clone(),
+                self.namespace.clone(),
+                auth,
+                builder_config,
+            )
+            .await?;
+            let conn = remote_conn.insert(conn);
+            cb(conn).await
+        }
     }
 
     async fn execute_remote<B: QueryResultBuilder>(
         &self,
         pgm: Program,
-        state: &mut State,
+        status: &mut TxnStatus,
         auth: Authenticated,
         builder: B,
-    ) -> Result<(B, State)> {
+    ) -> Result<(B, TxnStatus)> {
         self.stats.inc_write_requests_delegated();
-        let mut client = self.write_proxy.clone();
-
-        let mut req = Request::new(crate::rpc::proxy::rpc::ProgramReq {
-            client_id: self.client_id.to_string(),
-            pgm: Some(pgm.into()),
-        });
-
-        let namespace = BinaryMetadataValue::from_bytes(self.namespace.as_slice());
-        req.metadata_mut()
-            .insert_bin(NAMESPACE_METADATA_KEY, namespace);
-        auth.upgrade_grpc_request(&mut req);
-
-        match client.execute(req).await {
-            Ok(r) => {
-                let execute_result = r.into_inner();
-                *state = execute_result.state().into();
-                let current_frame_no = execute_result.current_frame_no;
-                let builder =
-                    execute_results_to_builder(execute_result, builder, &self.builder_config)?;
-                if let Some(current_frame_no) = current_frame_no {
-                    self.update_last_write_frame_no(current_frame_no);
-                }
-
-                Ok((builder, *state))
-            }
-            Err(e) => {
-                // Set state to invalid, so next call is sent to remote, and we have a chance
-                // to recover state.
-                *state = State::Invalid;
-                Err(Error::RpcQueryExecutionError(e))
-            }
+        *status = TxnStatus::Invalid;
+        let (builder, new_status, new_frame_no) = self
+            .with_remote_conn(auth, self.builder_config, |conn| {
+                Box::pin(conn.execute(pgm, builder))
+            })
+            .await?;
+        *status = new_status;
+        if let Some(current_frame_no) = new_frame_no {
+            self.update_last_write_frame_no(current_frame_no);
         }
+
+        Ok((builder, new_status))
     }
 
     fn update_last_write_frame_no(&self, new_frame_no: FrameNo) {
@@ -261,6 +229,118 @@ impl WriteProxyConnection {
     }
 }
 
+struct RemoteConnection {
+    response_stream: Streaming<ExecResp>,
+    request_sender: mpsc::Sender<ExecReq>,
+    current_request_id: u32,
+    builder_config: QueryBuilderConfig,
+}
+
+impl RemoteConnection {
+    async fn connect(
+        mut client: ProxyClient<Channel>,
+        namespace: NamespaceName,
+        auth: Authenticated,
+        builder_config: QueryBuilderConfig,
+    ) -> crate::Result<Self> {
+        let (request_sender, receiver) = mpsc::channel(1);
+
+        let stream = tokio_stream::wrappers::ReceiverStream::new(receiver);
+        let mut req = Request::new(stream);
+        let namespace = BinaryMetadataValue::from_bytes(namespace.as_slice());
+        req.metadata_mut()
+            .insert_bin(NAMESPACE_METADATA_KEY, namespace);
+        auth.upgrade_grpc_request(&mut req);
+        dbg!();
+        let response_stream = client.stream_exec(req).await.unwrap().into_inner();
+        dbg!();
+
+        Ok(Self {
+            response_stream,
+            request_sender,
+            current_request_id: 0,
+            builder_config,
+        })
+    }
+
+    async fn execute<B: QueryResultBuilder>(
+        &mut self,
+        program: Program,
+        mut builder: B,
+    ) -> crate::Result<(B, TxnStatus, Option<FrameNo>)> {
+        let request_id = self.current_request_id;
+        self.current_request_id += 1;
+
+        let req = ExecReq {
+            request_id,
+            request: Some(rpc::exec_req::Request::Execute(program.into())),
+        };
+
+        dbg!();
+        self.request_sender.send(req).await.unwrap(); // TODO: the stream was close!
+        dbg!();
+        let mut txn_status = TxnStatus::Invalid;
+        let mut new_frame_no = None;
+
+        'outer: while let Some(resp) = self.response_stream.next().await {
+            dbg!(&resp);
+            match resp {
+                Ok(resp) => {
+                    if resp.request_id != request_id {
+                        todo!("stream misuse: connection should be serialized");
+                    }
+                    for message in resp.messages {
+                        use rpc::message::Payload;
+
+                        match message.payload.unwrap() {
+                            Payload::DescribeResult(_) => todo!("invalid response"),
+
+                            Payload::Init(_) => builder.init(&self.builder_config)?,
+                            Payload::BeginStep(_) => builder.begin_step()?,
+                            Payload::FinishStep(FinishStep {
+                                affected_row_count,
+                                last_insert_rowid,
+                            }) => builder.finish_step(affected_row_count, last_insert_rowid)?,
+                            Payload::StepError(StepError { error }) => builder
+                                .step_error(crate::error::Error::RpcQueryError(error.unwrap()))?,
+                            Payload::ColsDescription(ColsDescription { columns }) => {
+                                let cols = columns.iter().map(|c| Column {
+                                    name: &c.name,
+                                    decl_ty: c.decltype.as_deref(),
+                                });
+                                builder.cols_description(cols)?
+                            }
+                            Payload::BeginRows(_) => builder.begin_rows()?,
+                            Payload::BeginRow(_) => builder.begin_row()?,
+                            Payload::AddRowValue(AddRowValue { val }) => {
+                                let value: Value = bincode::deserialize(&val.unwrap().data)
+                                    // something is wrong, better stop right here
+                                    .map_err(QueryResultBuilderError::from_any)?;
+                                builder.add_row_value(ValueRef::from(&value))?;
+                            }
+                            Payload::FinishRow(_) => builder.finish_row()?,
+                            Payload::FinishRows(_) => builder.finish_rows()?,
+                            Payload::Finish(f @ Finish { last_frame_no, .. }) => {
+                                txn_status = TxnStatus::from(f.state());
+                                new_frame_no = last_frame_no;
+                                builder.finish(last_frame_no, txn_status)?;
+                                dbg!();
+                                break 'outer;
+                            }
+                            Payload::Error(error) => {
+                                return Err(crate::error::Error::RpcQueryError(error))
+                            }
+                        }
+                    }
+                }
+                Err(_e) => todo!("handle stream error"),
+            }
+        }
+
+        Ok((builder, txn_status, new_frame_no))
+    }
+}
+
 #[async_trait::async_trait]
 impl Connection for WriteProxyConnection {
     async fn execute_program<B: QueryResultBuilder>(
@@ -269,13 +349,13 @@ impl Connection for WriteProxyConnection {
         auth: Authenticated,
         builder: B,
         replication_index: Option<FrameNo>,
-    ) -> Result<(B, State)> {
+    ) -> Result<(B, TxnStatus)> {
         let mut state = self.state.lock().await;
 
         // This is a fresh namespace, and it is not replicated yet, proxy the first request.
         if self.applied_frame_no_receiver.borrow().is_none() {
             self.execute_remote(pgm, &mut state, auth, builder).await
-        } else if *state == State::Init && pgm.is_read_only() {
+        } else if *state == TxnStatus::Init && pgm.is_read_only() {
             self.wait_replication_sync(replication_index).await?;
             // We know that this program won't perform any writes. We attempt to run it on the
             // replica. If it leaves an open transaction, then this program is an interactive
@@ -284,7 +364,7 @@ impl Connection for WriteProxyConnection {
                 .read_conn
                 .execute_program(pgm.clone(), auth.clone(), builder, replication_index)
                 .await?;
-            if new_state != State::Init {
+            if new_state != TxnStatus::Init {
                 self.read_conn.rollback(auth.clone()).await?;
                 self.execute_remote(pgm, &mut state, auth, builder).await
             } else {
@@ -308,8 +388,8 @@ impl Connection for WriteProxyConnection {
     async fn is_autocommit(&self) -> Result<bool> {
         let state = self.state.lock().await;
         Ok(match *state {
-            State::Txn => false,
-            State::Init | State::Invalid => true,
+            TxnStatus::Txn => false,
+            TxnStatus::Init | TxnStatus::Invalid => true,
         })
     }
 

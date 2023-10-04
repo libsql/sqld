@@ -89,13 +89,14 @@ message DisconnectMessage {
 
 message Ack { }
 
+enum State {
+    INIT = 0;
+    INVALID = 1;
+    TXN = 2;
+}
+
 message ExecuteResults {
     repeated QueryResult results = 1;
-    enum State {
-        Init = 0;
-        Invalid = 1;
-        Txn = 2;
-    }
     /// State after executing the queries
     State state = 2;
     /// Primary frame_no after executing the request.
@@ -149,11 +150,11 @@ message ProgramReq {
     Program pgm = 2;
 }
 
-message ExecMessage {
+message ExecReq {
     /// id of the request. The response will contain this id
     uint32 request_id = 1;
     oneof request {
-        ProgramReq execute = 2;
+        Program         execute = 2;
         DescribeRequest describe = 3;
     }
 }
@@ -167,7 +168,7 @@ message FinishStep      {
     optional int64 last_insert_rowid = 2;
 }
 message StepError       {
-    string error = 1;
+    Error error = 1;
 }
 message ColsDescription {
     repeated Column columns = 1;
@@ -181,6 +182,7 @@ message FinishRow       { }
 message FinishRows      { }
 message Finish          {
     optional uint64 last_frame_no = 1;
+    State state = 2;
 }
 
 
@@ -204,13 +206,13 @@ message Message {
     }
 }
 
-message ExecResponse {
+message ExecResp {
     uint32  request_id = 1;
     repeated Message messages = 2;
 }
 
 service Proxy {
-  rpc StreamExec(stream ExecMessage) returns (stream ExecResponse) {}
+  rpc StreamExec(stream ExecReq) returns (stream ExecResp) {}
 
   rpc Execute(ProgramReq) returns (ExecuteResults) {}
   rpc Describe(DescribeRequest) returns (DescribeResult) {}

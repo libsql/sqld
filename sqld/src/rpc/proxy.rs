@@ -1,33 +1,28 @@
 use std::collections::HashMap;
-use std::pin::Pin;
 use std::str::FromStr;
 use std::sync::Arc;
-use std::task::{ready, Context, Poll};
 
 use async_lock::{RwLock, RwLockUpgradableReadGuard};
-use futures::StreamExt;
-use futures_core::Stream;
 use rusqlite::types::ValueRef;
-use tokio::sync::mpsc;
 use uuid::Uuid;
 
 use crate::auth::{Auth, Authenticated};
 use crate::connection::Connection;
 use crate::database::{Database, PrimaryConnection};
 use crate::namespace::{NamespaceStore, PrimaryNamespaceMaker};
+use crate::query_analysis::TxnStatus;
 use crate::query_result_builder::{
     Column, QueryBuilderConfig, QueryResultBuilder, QueryResultBuilderError,
 };
 use crate::replication::FrameNo;
 
-use self::rpc::exec_message::Request;
-use self::rpc::message::Payload;
 use self::rpc::proxy_server::Proxy;
 use self::rpc::query_result::RowResult;
 use self::rpc::{
-    describe_result, Ack, DescribeRequest, DescribeResult, Description, DisconnectMessage,
-    ExecMessage, ExecResponse, ExecuteResults, Message, QueryResult, ResultRows, Row,
+    describe_result, Ack, DescribeRequest, DescribeResult, Description, DisconnectMessage, ExecReq,
+    ExecuteResults, QueryResult, ResultRows, Row,
 };
+use super::streaming_exec::StreamRequestHandler;
 use super::NAMESPACE_DOESNT_EXIST;
 
 pub mod rpc {
@@ -40,7 +35,7 @@ pub mod rpc {
     use crate::query_analysis::Statement;
     use crate::{connection, error::Error as SqldError};
 
-    use self::{error::ErrorCode, execute_results::State};
+    use self::error::ErrorCode;
     tonic::include_proto!("proxy");
 
     impl From<SqldError> for Error {
@@ -63,22 +58,22 @@ pub mod rpc {
         }
     }
 
-    impl From<crate::query_analysis::State> for State {
-        fn from(other: crate::query_analysis::State) -> Self {
+    impl From<crate::query_analysis::TxnStatus> for State {
+        fn from(other: crate::query_analysis::TxnStatus) -> Self {
             match other {
-                crate::query_analysis::State::Txn => Self::Txn,
-                crate::query_analysis::State::Init => Self::Init,
-                crate::query_analysis::State::Invalid => Self::Invalid,
+                crate::query_analysis::TxnStatus::Txn => Self::Txn,
+                crate::query_analysis::TxnStatus::Init => Self::Init,
+                crate::query_analysis::TxnStatus::Invalid => Self::Invalid,
             }
         }
     }
 
-    impl From<State> for crate::query_analysis::State {
+    impl From<State> for crate::query_analysis::TxnStatus {
         fn from(other: State) -> Self {
             match other {
-                State::Txn => crate::query_analysis::State::Txn,
-                State::Init => crate::query_analysis::State::Init,
-                State::Invalid => crate::query_analysis::State::Invalid,
+                State::Txn => crate::query_analysis::TxnStatus::Txn,
+                State::Init => crate::query_analysis::TxnStatus::Init,
+                State::Invalid => crate::query_analysis::TxnStatus::Invalid,
             }
         }
     }
@@ -405,10 +400,7 @@ impl QueryResultBuilder for ExecuteResultBuilder {
         Ok(())
     }
 
-    fn add_row_value(
-        &mut self,
-        v: ValueRef,
-    ) -> Result<(), QueryResultBuilderError> {
+    fn add_row_value(&mut self, v: ValueRef) -> Result<(), QueryResultBuilderError> {
         let data = bincode::serialize(
             &crate::query::Value::try_from(v).map_err(QueryResultBuilderError::from_any)?,
         )
@@ -443,7 +435,11 @@ impl QueryResultBuilder for ExecuteResultBuilder {
         Ok(())
     }
 
-    fn finish(&mut self, _last_frame_no: Option<FrameNo>) -> Result<(), QueryResultBuilderError> {
+    fn finish(
+        &mut self,
+        _last_frame_no: Option<FrameNo>,
+        _state: TxnStatus,
+    ) -> Result<(), QueryResultBuilderError> {
         Ok(())
     }
 
@@ -463,247 +459,22 @@ pub async fn garbage_collect(clients: &mut HashMap<Uuid, Arc<PrimaryConnection>>
     tracing::trace!("gc: remaining client handles count: {}", clients.len());
 }
 
-pin_project_lite::pin_project! {
-    pub struct StreamRequestHandler<S> {
-        #[pin]
-        request_stream: S,
-        connection: Arc<TrackedConnection<LibSqlConnection>>,
-        state: HandlerState,
-        authenticated: Authenticated,
-    }
-}
-
-struct StreamResponseBuilder {
-    request_id: u32,
-    sender: mpsc::Sender<ExecResponse>,
-    current: Option<ExecResponse>,
-}
-
-impl StreamResponseBuilder {
-    fn current(&mut self) -> &mut ExecResponse {
-        self.current.get_or_insert_with(|| ExecResponse {
-            messages: Vec::new(),
-            request_id: self.request_id,
-        })
-    }
-
-    fn push(&mut self, payload: Payload) {
-        const MAX_RESPONSE_MESSAGES: usize = 10;
-
-        let current = self.current();
-        current.messages.push(Message {
-            payload: Some(payload),
-        });
-
-        if current.messages.len() > MAX_RESPONSE_MESSAGES {
-            self.flush()
-        }
-    }
-
-    fn flush(&mut self) {
-        if let Some(current) = self.current.take() {
-            self.sender.blocking_send(current).unwrap();
-        }
-    }
-}
-
-impl QueryResultBuilder for StreamResponseBuilder {
-    type Ret = ();
-
-    fn init(&mut self, _config: &QueryBuilderConfig) -> Result<(), QueryResultBuilderError> {
-        self.push(Payload::Init(rpc::Init {}));
-        Ok(())
-    }
-
-    fn begin_step(&mut self) -> Result<(), QueryResultBuilderError> {
-        self.push(Payload::BeginStep(rpc::BeginStep {}));
-        Ok(())
-    }
-
-    fn finish_step(
-        &mut self,
-        affected_row_count: u64,
-        last_insert_rowid: Option<i64>,
-    ) -> Result<(), QueryResultBuilderError> {
-        self.push(Payload::FinishStep(rpc::FinishStep {
-            affected_row_count,
-            last_insert_rowid,
-        }));
-        Ok(())
-    }
-
-    fn step_error(&mut self, error: crate::error::Error) -> Result<(), QueryResultBuilderError> {
-        self.push(Payload::StepError(rpc::StepError {
-            error: error.to_string(),
-        }));
-        Ok(())
-    }
-
-    fn cols_description<'a>(
-        &mut self,
-        cols: impl IntoIterator<Item = impl Into<Column<'a>>>,
-    ) -> Result<(), QueryResultBuilderError> {
-        self.push(Payload::ColsDescription(rpc::ColsDescription {
-            columns: cols
-                .into_iter()
-                .map(Into::into)
-                .map(|c| rpc::Column {
-                    name: c.name.into(),
-                    decltype: c.decl_ty.map(Into::into),
-                })
-                .collect::<Vec<_>>(),
-        }));
-        Ok(())
-    }
-
-    fn begin_rows(&mut self) -> Result<(), QueryResultBuilderError> {
-        self.push(Payload::BeginRows(rpc::BeginRows {}));
-        Ok(())
-    }
-
-    fn begin_row(&mut self) -> Result<(), QueryResultBuilderError> {
-        self.push(Payload::BeginRow(rpc::BeginRow {}));
-        Ok(())
-    }
-
-    fn add_row_value(
-        &mut self,
-        v: ValueRef,
-    ) -> Result<(), QueryResultBuilderError> {
-        let data = bincode::serialize(
-            &crate::query::Value::try_from(v).map_err(QueryResultBuilderError::from_any)?,
-        )
-        .map_err(QueryResultBuilderError::from_any)?;
-
-        let val = Some(rpc::Value { data });
-
-        self.push(Payload::AddRowValue(rpc::AddRowValue { val }));
-        Ok(())
-    }
-
-    fn finish_row(&mut self) -> Result<(), QueryResultBuilderError> {
-        self.push(Payload::FinishRow(rpc::FinishRow {}));
-        Ok(())
-    }
-
-    fn finish_rows(&mut self) -> Result<(), QueryResultBuilderError> {
-        self.push(Payload::FinishRows(rpc::FinishRows {}));
-        Ok(())
-    }
-
-    fn finish(&mut self, last_frame_no: Option<FrameNo>) -> Result<(), QueryResultBuilderError> {
-        self.push(Payload::Finish(rpc::Finish { last_frame_no }));
-        self.flush();
-        Ok(())
-    }
-
-    fn into_ret(self) -> Self::Ret {
-        ()
-    }
-}
-
-enum HandlerState {
-    Execute(Pin<Box<dyn Stream<Item = ExecResponse> + Send>>),
-    Idle,
-    Fused,
-}
-
-impl<S> Stream for StreamRequestHandler<S>
-where
-    S: Stream<Item = Result<ExecMessage, tonic::Status>>,
-{
-    type Item = Result<ExecResponse, tonic::Status>;
-
-    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        let this = self.project();
-
-        match this.state {
-            HandlerState::Idle => {
-                match ready!(this.request_stream.poll_next(cx)) {
-                    Some(Err(e)) => {
-                        *this.state = HandlerState::Fused;
-                        return Poll::Ready(Some(Err(e)));
-                    }
-                    Some(Ok(req)) => {
-                        let request_id = req.request_id;
-                        match req.request.unwrap() {
-                            Request::Execute(exec) => {
-                                let pgm = crate::connection::program::Program::try_from(
-                                    exec.pgm.unwrap(),
-                                )
-                                .unwrap();
-                                let conn = this.connection.clone();
-                                let authenticated = this.authenticated.clone();
-
-                                let s = async_stream::stream! {
-                                    let (sender, mut receiver) = mpsc::channel(1);
-                                    let builder = StreamResponseBuilder {
-                                        request_id,
-                                        sender,
-                                        current: None,
-                                    };
-                                    let mut fut = conn.execute_program(pgm, authenticated, builder, None);
-                                    loop {
-                                        tokio::select! {
-                                            _res = &mut fut => {
-                                                // todo check result?
-                                                break
-                                            }
-                                            msg = receiver.recv() => {
-                                                if let Some(msg) = msg {
-                                                    yield msg;
-                                                }
-                                            }
-                                        }
-                                    }
-                                };
-                                *this.state = HandlerState::Execute(Box::pin(s));
-                            }
-                            Request::Describe(_) => todo!(),
-                        }
-                        // we have placed the request, poll immediately
-                        cx.waker().wake_by_ref();
-                        return Poll::Pending;
-                    }
-                    None => {
-                        // this would easier if tokio_stream re-exported combinators
-                        *this.state = HandlerState::Fused;
-                        Poll::Ready(None)
-                    }
-                }
-            }
-            HandlerState::Fused => Poll::Ready(None),
-            HandlerState::Execute(stream) => {
-                let resp = ready!(stream.poll_next_unpin(cx));
-                match resp {
-                    Some(resp) => return Poll::Ready(Some(Ok(resp))),
-                    None => {
-                        // finished processing this query. Wake up immediately to prepare for the
-                        // next
-                        *this.state = HandlerState::Idle;
-                        cx.waker().wake_by_ref();
-                        return Poll::Pending;
-                    }
-                }
-            }
-        }
-    }
-}
-
 #[tonic::async_trait]
 impl Proxy for ProxyService {
-    type StreamExecStream = StreamRequestHandler<tonic::Streaming<ExecMessage>>;
+    type StreamExecStream = StreamRequestHandler<tonic::Streaming<ExecReq>>;
 
     async fn stream_exec(
         &self,
-        req: tonic::Request<tonic::Streaming<ExecMessage>>,
+        req: tonic::Request<tonic::Streaming<ExecReq>>,
     ) -> Result<tonic::Response<Self::StreamExecStream>, tonic::Status> {
+        dbg!();
         let authenticated = if let Some(auth) = &self.auth {
             auth.authenticate_grpc(&req, self.disable_namespaces)?
         } else {
             Authenticated::from_proxy_grpc_request(&req, self.disable_namespaces)?
         };
 
+        dbg!();
         let namespace = super::extract_namespace(self.disable_namespaces, &req)?;
         let (connection_maker, _new_frame_notifier) = self
             .namespaces
@@ -721,14 +492,11 @@ impl Proxy for ProxyService {
                 }
             })?;
 
+        dbg!();
         let connection = connection_maker.create().await.unwrap();
 
-        let handler = StreamRequestHandler {
-            authenticated,
-            request_stream: req.into_inner(),
-            connection: connection.into(),
-            state: HandlerState::Idle,
-        };
+        dbg!();
+        let handler = StreamRequestHandler::new(req.into_inner(), connection, authenticated);
 
         Ok(tonic::Response::new(handler))
     }
@@ -794,7 +562,7 @@ impl Proxy for ProxyService {
         Ok(tonic::Response::new(ExecuteResults {
             current_frame_no,
             results: results.into_ret(),
-            state: rpc::execute_results::State::from(state).into(),
+            state: rpc::State::from(state).into(),
         }))
     }
 

@@ -8,6 +8,7 @@ use serde::Serialize;
 use serde_json::ser::Formatter;
 use std::sync::atomic::AtomicUsize;
 
+use crate::query_analysis::TxnStatus;
 use crate::replication::FrameNo;
 
 pub static TOTAL_RESPONSE_SIZE: AtomicUsize = AtomicUsize::new(0);
@@ -120,7 +121,11 @@ pub trait QueryResultBuilder: Send + 'static {
     /// end adding rows
     fn finish_rows(&mut self) -> Result<(), QueryResultBuilderError>;
     /// finish serialization.
-    fn finish(&mut self, last_frame_no: Option<FrameNo>) -> Result<(), QueryResultBuilderError>;
+    fn finish(
+        &mut self,
+        last_frame_no: Option<FrameNo>,
+        state: TxnStatus,
+    ) -> Result<(), QueryResultBuilderError>;
     /// returns the inner ret
     fn into_ret(self) -> Self::Ret;
     /// Returns a `QueryResultBuilder` that wraps Self and takes at most `n` steps
@@ -311,7 +316,11 @@ impl QueryResultBuilder for StepResultsBuilder {
         Ok(())
     }
 
-    fn finish(&mut self, _last_frame_no: Option<FrameNo>) -> Result<(), QueryResultBuilderError> {
+    fn finish(
+        &mut self,
+        _last_frame_no: Option<FrameNo>,
+        _state: TxnStatus,
+    ) -> Result<(), QueryResultBuilderError> {
         Ok(())
     }
 
@@ -372,7 +381,11 @@ impl QueryResultBuilder for IgnoreResult {
         Ok(())
     }
 
-    fn finish(&mut self, _last_frame_no: Option<FrameNo>) -> Result<(), QueryResultBuilderError> {
+    fn finish(
+        &mut self,
+        _last_frame_no: Option<FrameNo>,
+        _state: TxnStatus,
+    ) -> Result<(), QueryResultBuilderError> {
         Ok(())
     }
 
@@ -481,8 +494,12 @@ impl<B: QueryResultBuilder> QueryResultBuilder for Take<B> {
         }
     }
 
-    fn finish(&mut self, last_frame_no: Option<FrameNo>) -> Result<(), QueryResultBuilderError> {
-        self.inner.finish(last_frame_no)
+    fn finish(
+        &mut self,
+        last_frame_no: Option<FrameNo>,
+        state: TxnStatus,
+    ) -> Result<(), QueryResultBuilderError> {
+        self.inner.finish(last_frame_no, state)
     }
 
     fn into_ret(self) -> Self::Ret {
