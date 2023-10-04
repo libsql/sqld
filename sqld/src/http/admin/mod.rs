@@ -83,7 +83,7 @@ async fn handle_get_config<M: MakeNamespace>(
 
 async fn handle_diagnostics<M: MakeNamespace>(
     State(app_state): State<Arc<AppState<M>>>,
-) -> crate::Result<hyper::Response<hyper::Body>> {
+) -> crate::Result<Json<Vec<String>>> {
     use crate::connection::Connection;
     use hrana::http::stream;
 
@@ -105,11 +105,7 @@ async fn handle_diagnostics<M: MakeNamespace>(
     drop(stream_state);
 
     tracing::trace!("diagnostics: {diagnostics:?}");
-    Ok(hyper::Response::builder()
-        .status(hyper::StatusCode::OK)
-        .header(hyper::http::header::CONTENT_TYPE, "application/json")
-        .body(serde_json::to_string(&diagnostics)?.into())
-        .unwrap())
+    Ok(diagnostics)
 }
 
 #[derive(Debug, Deserialize)]
