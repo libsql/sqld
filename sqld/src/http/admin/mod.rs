@@ -105,7 +105,7 @@ async fn handle_diagnostics<M: MakeNamespace>(
     drop(stream_state);
 
     tracing::trace!("diagnostics: {diagnostics:?}");
-    Ok(diagnostics)
+    Ok(Json(diagnostics))
 }
 
 #[derive(Debug, Deserialize)]
