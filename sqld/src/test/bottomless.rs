@@ -5,6 +5,7 @@ use aws_sdk_s3::Client;
 use futures_core::Future;
 use itertools::Itertools;
 use libsql_client::{Connection, QueryResult, Statement, Value};
+use std::mem::forget;
 use std::net::{SocketAddr, ToSocketAddrs};
 use std::path::PathBuf;
 use tokio::time::sleep;
@@ -189,14 +190,30 @@ async fn backup_restore() {
         remove_snapshots(BUCKET).await;
 
         let cleaner = DbFileCleaner::new(PATH);
-        let db_job = start_db(4, make_server().await);
+        let db_job = start_db(5, make_server().await);
 
         sleep(Duration::from_secs(2)).await;
 
         assert_updates(&connection_addr, ROWS, OPS, "B").await;
 
+        // override existing entries, but don't wait for S3 backup to complete
+        perform_updates(&connection_addr, ROWS, OPS, "C").await;
+
         db_job.await;
-        drop(cleaner);
+        forget(cleaner); // keep the database files
+    }
+
+    {
+        tracing::info!("---STEP 6: start db with local data present ---");
+
+        let db_job = start_db(6, make_server().await);
+
+        sleep(Duration::from_secs(2)).await;
+
+        assert_updates(&connection_addr, ROWS, OPS, "C").await;
+
+        db_job.await;
+        let cleaner = DbFileCleaner::new(PATH);
     }
 }
 
@@ -432,10 +449,11 @@ async fn remove_snapshots(bucket: &str) {
 
 /// Checks if the corresponding bucket is empty (has any elements) or not.
 /// If bucket was not found, it's equivalent of an empty one.
-async fn assert_bucket_occupancy(bucket: &str, expect_empty: bool) {
+async fn assert_bucket_occupancy(bucket: &str, expect_empty: bool) -> usize {
     let client = s3_client().await.unwrap();
     if let Ok(out) = client.list_objects().bucket(bucket).send().await {
         let contents = out.contents().unwrap_or_default();
+        let len = contents.len();
         if expect_empty {
             assert!(
                 contents.is_empty(),
@@ -448,9 +466,11 @@ async fn assert_bucket_occupancy(bucket: &str, expect_empty: bool) {
                 "expected S3 bucket to be filled with backup data but it was empty"
             );
         }
+        return len;
     } else if !expect_empty {
         panic!("bucket '{}' doesn't exist", bucket);
     }
+    0
 }
 
 /// Guardian struct used for cleaning up the test data from

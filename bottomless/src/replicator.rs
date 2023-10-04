@@ -881,8 +881,14 @@ impl Replicator {
         {
             let body = response.body.collect().await?.to_vec();
             if body.len() == 8 {
-                let checksum = u64::from_be_bytes(body.as_slice().try_into());
+                let checksum = u64::from_be_bytes(body.as_slice().try_into()?);
                 return Ok(Some(checksum));
+            } else {
+                tracing::debug!(
+                    "Contents of counter for generation `{}` are not valid CRC64: {:?}",
+                    generation,
+                    body
+                );
             }
         }
         Ok(None)
@@ -1068,7 +1074,7 @@ impl Replicator {
     ) -> Result<Option<RestoreAction>> {
         // Check if the database needs to be restored by inspecting the database
         // change counter and the WAL size.
-        let local_checksum = match File::open(&self.db_path).await {
+        let db_file = match File::open(&self.db_path).await {
             Ok(mut db) => {
                 // While reading the main database file for the first time,
                 // page size from an existing database should be set.
@@ -1079,67 +1085,85 @@ impl Replicator {
                 // restoration process and calling for a new generation to be made
                 if !self.verify_crc {
                     return Ok(Some(RestoreAction::SnapshotMainDbFile));
+                } else if db.metadata().await?.len() == 0 {
+                    None
                 } else {
-                    Some(crc64(&mut db).await?)
+                    Some(db)
                 }
             }
             Err(_) => None,
         };
 
         let remote_checksum = self.get_remote_db_checksum(&generation).await?;
-        tracing::debug!("Checksums: l={:?}, r={:?}", local_checksum, remote_checksum);
 
-        let wal_pages = self.get_local_wal_page_count().await;
+        let local_frame_count = self.get_local_wal_page_count().await;
         // We impersonate as a given generation, since we're comparing against local backup at that
         // generation. This is used later in [Self::new_generation] to create a dependency between
         // this generation and a new one.
         self.generation.store(Some(Arc::new(generation)));
-        match (local_checksum, remote_checksum) {
-            (Some(l), None) => {
-                // local db exists remote doesn't
-                todo!()
-            }
-            (None, Some(r)) => {
-                // remote db snapshot exists, local doesn't
-                todo!()
-            }
-            (Some(l), Some(r)) => {
-                // both local db and S3 snapshot exists, compare checksums
-                todo!()
-            }
-            (None, None) => {
-                // neither local nor remote has db file, use WAL
-                todo!()
-            }
-        }
-
-        match local_counter.cmp(&remote_checksum) {
-            std::cmp::Ordering::Equal => {
+        match (db_file, remote_checksum) {
+            (Some(_), None) => {
                 tracing::debug!(
-                    "Consistent: {}; wal pages: {}",
-                    last_consistent_frame,
-                    wal_pages
+                    "Generation `{}` has no snapshot, while local database exists.",
+                    generation
                 );
-                match wal_pages.cmp(&last_consistent_frame) {
-                    std::cmp::Ordering::Equal => {
-                        tracing::info!(
-                            "Remote generation is up-to-date, reusing it in this session"
-                        );
-                        self.reset_frames(wal_pages + 1);
-                        Ok(Some(RestoreAction::ReuseGeneration(generation)))
-                    }
-                    std::cmp::Ordering::Greater => {
-                        tracing::info!("Local change counter matches the remote one, but local WAL contains newer data from generation {}, which needs to be replicated.", generation);
-                        Ok(Some(RestoreAction::SnapshotMainDbFile))
-                    }
-                    std::cmp::Ordering::Less => Ok(None),
-                }
-            }
-            std::cmp::Ordering::Greater => {
-                tracing::info!("Local change counter is larger than its remote counterpart - a new snapshot needs to be replicated (generation: {})", generation);
                 Ok(Some(RestoreAction::SnapshotMainDbFile))
             }
-            std::cmp::Ordering::Less => Ok(None),
+            (None, Some(_)) => {
+                tracing::debug!("Using database snapshot for generation `{}`", generation);
+                Ok(None) // recover from remote
+            }
+            (Some(mut db), Some(remote_checksum)) => {
+                let local_checksum = crc64(&mut db).await?;
+                if local_checksum == remote_checksum {
+                    tracing::debug!("Local db checksum matches remote for generation `{}`: {} vs. {}. Comparing WAL.", generation, local_checksum, remote_checksum);
+                    let action =
+                        Self::compare_wal(generation, local_frame_count, last_consistent_frame);
+                    Ok(action)
+                } else {
+                    tracing::debug!("Database checksum doesn't match db snapshot for generation `{}`: {} vs. {}. Requesting new snapshot.", generation, local_checksum, remote_checksum);
+                    Ok(Some(RestoreAction::SnapshotMainDbFile))
+                }
+            }
+            (None, None) => {
+                let action =
+                    Self::compare_wal(generation, local_frame_count, last_consistent_frame);
+                Ok(action)
+            }
+        }
+    }
+
+    fn compare_wal(
+        generation: Uuid,
+        local_frame_count: u32,
+        remote_frame_count: u32,
+    ) -> Option<RestoreAction> {
+        match local_frame_count.cmp(&remote_frame_count) {
+            std::cmp::Ordering::Equal => {
+                tracing::debug!(
+                    "Local state is identical to generation `{}`. Reusing.",
+                    generation
+                );
+                Some(RestoreAction::ReuseGeneration(generation))
+            }
+            std::cmp::Ordering::Greater => {
+                tracing::debug!(
+                "Local frame count is greater than remote in generation `{}`: {} vs. {}. Requesting new snapshot.",
+                generation,
+                local_frame_count,
+                remote_frame_count
+            );
+                Some(RestoreAction::SnapshotMainDbFile)
+            }
+            std::cmp::Ordering::Less => {
+                tracing::debug!(
+                    "Local frame count is behind remote in generation `{}`: {} vs. {}.",
+                    generation,
+                    local_frame_count,
+                    remote_frame_count
+                );
+                None
+            }
         }
     }
 
