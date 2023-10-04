@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::{fs, io};
 
 use crate::error::Error;
-use crate::Result;
+use crate::{Result, LIBSQL_PAGE_SIZE};
 
 #[derive(Debug)]
 pub struct DatabaseConfigStore {
@@ -29,7 +29,7 @@ pub struct DatabaseConfig {
 }
 
 const fn default_max_size() -> u64 {
-    bytesize::ByteSize::pb(1000).as_u64() / 4096
+    bytesize::ByteSize::pb(1000).as_u64() / LIBSQL_PAGE_SIZE
 }
 
 impl Default for DatabaseConfig {

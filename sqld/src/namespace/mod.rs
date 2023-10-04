@@ -728,7 +728,7 @@ impl Namespace<PrimaryDatabase> {
         .await?;
 
         let db_config_store = Arc::new(
-            dbg!(DatabaseConfigStore::load(&db_path)).context("Could not load database config")?,
+            DatabaseConfigStore::load(&db_path).context("Could not load database config")?,
         );
 
         let connection_maker: Arc<_> = MakeLibSqlConn::new(

@@ -12,10 +12,10 @@ use tokio_util::io::ReaderStream;
 use url::Url;
 
 use crate::database::Database;
-use crate::LIBSQL_PAGE_SIZE;
 use crate::error::LoadDumpError;
 use crate::hrana;
 use crate::namespace::{DumpStream, MakeNamespace, NamespaceName, NamespaceStore, RestoreOption};
+use crate::LIBSQL_PAGE_SIZE;
 
 pub mod stats;
 
@@ -127,11 +127,6 @@ struct HttpDatabaseConfig {
     max_db_size: Option<bytesize::ByteSize>,
 }
 
-#[derive(Debug, Deserialize)]
-struct CreateNamespaceReq {
-    dump_url: Option<Url>,
-}
-
 async fn handle_post_config<M: MakeNamespace>(
     State(app_state): State<Arc<AppState<M>>>,
     Path(namespace): Path<String>,
@@ -154,6 +149,12 @@ async fn handle_post_config<M: MakeNamespace>(
     Ok(())
 }
 
+#[derive(Debug, Deserialize)]
+struct CreateNamespaceReq {
+    dump_url: Option<Url>,
+    max_db_size: Option<bytesize::ByteSize>,
+}
+
 async fn handle_create_namespace<M: MakeNamespace>(
     State(app_state): State<Arc<AppState<M>>>,
     Path(namespace): Path<String>,
@@ -164,10 +165,16 @@ async fn handle_create_namespace<M: MakeNamespace>(
         None => RestoreOption::Latest,
     };
 
-    app_state
-        .namespaces
-        .create(NamespaceName::from_string(namespace)?, dump)
-        .await?;
+    let namespace = NamespaceName::from_string(namespace)?;
+    app_state.namespaces.create(namespace.clone(), dump).await?;
+
+    if let Some(max_db_size) = req.max_db_size {
+        let store = app_state.namespaces.config_store(namespace).await?;
+        let mut config = (*store.get()).clone();
+        config.max_db_pages = max_db_size.as_u64() / LIBSQL_PAGE_SIZE;
+        store.store(config)?;
+    }
+
     Ok(())
 }
 

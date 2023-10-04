@@ -859,14 +859,14 @@ impl ReplicationLogger {
         let data_file = File::open(&data_path)?;
         let size = data_path.metadata()?.len();
         assert!(
-            size % LIBSQL_PAGE_SIZE as u64 == 0,
+            size % LIBSQL_PAGE_SIZE == 0,
             "database file size is not a multiple of page size"
         );
         let num_page = size / LIBSQL_PAGE_SIZE;
         let mut buf = [0; LIBSQL_PAGE_SIZE as usize];
         let mut page_no = 1; // page numbering starts at 1
         for i in 0..num_page {
-            data_file.read_exact_at(&mut buf, i * LIBSQL_PAGE_SIZE as u64)?;
+            data_file.read_exact_at(&mut buf, i * LIBSQL_PAGE_SIZE)?;
             log_file.push_page(&WalPage {
                 page_no,
                 size_after: if i == num_page - 1 { num_page as _ } else { 0 },
