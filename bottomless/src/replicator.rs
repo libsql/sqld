@@ -1,4 +1,5 @@
 use crate::backup::WalCopier;
+use crate::copy::{copy_with_checksum, crc64};
 use crate::read::BatchReader;
 use crate::transaction_cache::TransactionPageCache;
 use crate::uuid_utils::decode_unix_timestamp;
@@ -12,7 +13,7 @@ use aws_sdk_s3::operation::get_object::builders::GetObjectFluentBuilder;
 use aws_sdk_s3::operation::get_object::GetObjectError;
 use aws_sdk_s3::operation::list_objects::builders::ListObjectsFluentBuilder;
 use aws_sdk_s3::operation::list_objects::ListObjectsOutput;
-use aws_sdk_s3::primitives::ByteStream;
+use aws_sdk_s3::primitives::{ByteStream, SdkBody};
 use aws_sdk_s3::{Client, Config};
 use bytes::{Buf, Bytes};
 use chrono::{NaiveDateTime, TimeZone, Utc};
@@ -620,14 +621,6 @@ impl Replicator {
         tracing::debug!("Rolled back to {}", last_valid_frame);
     }
 
-    // Tries to read the local change counter from the given database file
-    async fn read_change_counter(reader: &mut File) -> Result<[u8; 4]> {
-        let mut counter = [0u8; 4];
-        reader.seek(std::io::SeekFrom::Start(24)).await?;
-        reader.read_exact(&mut counter).await?;
-        Ok(counter)
-    }
-
     // Tries to read the local page size from the given database file
     async fn read_page_size(reader: &mut File) -> Result<usize> {
         reader.seek(SeekFrom::Start(16)).await?;
@@ -644,10 +637,17 @@ impl Replicator {
     pub async fn maybe_compress_main_db_file(
         mut reader: File,
         compression: CompressionKind,
-    ) -> Result<ByteStream> {
+    ) -> Result<(ByteStream, u64)> {
         reader.seek(SeekFrom::Start(0)).await?;
         match compression {
-            CompressionKind::None => Ok(ByteStream::read_from().file(reader).build().await?),
+            CompressionKind::None => {
+                let checksum = crc64(&mut reader).await?;
+                reader.seek(SeekFrom::Start(0)).await?;
+                Ok((
+                    ByteStream::read_from().file(reader).build().await?,
+                    checksum,
+                ))
+            }
             CompressionKind::Gzip => {
                 let compressed_file = OpenOptions::new()
                     .create(true)
@@ -657,10 +657,13 @@ impl Replicator {
                     .open("db.gz")
                     .await?;
                 let mut writer = GzipEncoder::new(compressed_file);
-                let size = tokio::io::copy(&mut reader, &mut writer).await?;
-                tracing::trace!("Compressed database file ({} bytes) into db.gz", size);
+                let checksum = copy_with_checksum(&mut reader, &mut writer).await?;
+                tracing::trace!(
+                    "Compressed database file (checksum: {}) into db.gz",
+                    checksum
+                );
                 writer.shutdown().await?;
-                Ok(ByteStream::from_path("db.gz").await?)
+                Ok((ByteStream::from_path("db.gz").await?, checksum))
             }
         }
     }
@@ -729,45 +732,36 @@ impl Replicator {
         let generation = self.generation()?;
         let start_ts = Instant::now();
         let client = self.client.clone();
-        let mut db_file = File::open(&self.db_path).await?;
-        let change_counter = Self::read_change_counter(&mut db_file).await?;
+        let db_file = File::open(&self.db_path).await?;
         let snapshot_req = client.put_object().bucket(self.bucket.clone()).key(format!(
             "{}-{}/db.{}",
             self.db_name, generation, self.use_compression
         ));
 
-        /* FIXME: we can't rely on the change counter in WAL mode:
-         ** "In WAL mode, changes to the database are detected using the wal-index and
-         ** so the change counter is not needed. Hence, the change counter might not be
-         ** incremented on each transaction in WAL mode."
-         ** Instead, we need to consult WAL checksums.
-         */
         let change_counter_key = format!("{}-{}/.changecounter", self.db_name, generation);
         let change_counter_req = self
             .client
             .put_object()
             .bucket(&self.bucket)
-            .key(change_counter_key)
-            .body(ByteStream::from(Bytes::copy_from_slice(
-                change_counter.as_ref(),
-            )));
+            .key(change_counter_key);
         let snapshot_notifier = self.snapshot_notifier.clone();
         let compression = self.use_compression;
         let handle = tokio::spawn(async move {
             tracing::trace!("Start snapshotting generation {}", generation);
             let start = Instant::now();
-            let body = match Self::maybe_compress_main_db_file(db_file, compression).await {
-                Ok(file) => file,
-                Err(e) => {
-                    tracing::error!(
-                        "Failed to compress db file (generation {}): {}",
-                        generation,
-                        e
-                    );
-                    let _ = snapshot_notifier.send(Err(e));
-                    return;
-                }
-            };
+            let (body, checksum) =
+                match Self::maybe_compress_main_db_file(db_file, compression).await {
+                    Ok(file) => file,
+                    Err(e) => {
+                        tracing::error!(
+                            "Failed to compress db file (generation {}): {}",
+                            generation,
+                            e
+                        );
+                        let _ = snapshot_notifier.send(Err(e));
+                        return;
+                    }
+                };
             let mut result = snapshot_req.body(body).send().await;
             if let Err(e) = result {
                 tracing::error!(
@@ -778,7 +772,12 @@ impl Replicator {
                 let _ = snapshot_notifier.send(Err(e.into()));
                 return;
             }
-            result = change_counter_req.send().await;
+            result = change_counter_req
+                .body(ByteStream::new(SdkBody::from(
+                    checksum.to_be_bytes().as_ref(),
+                )))
+                .send()
+                .await;
             if let Err(e) = result {
                 tracing::error!(
                     "Failed to upload change counter for generation {}: {:?}",
@@ -874,21 +873,19 @@ impl Replicator {
         None
     }
 
-    // Tries to fetch the remote database change counter from given generation
-    pub async fn get_remote_change_counter(&self, generation: &Uuid) -> Result<[u8; 4]> {
-        let mut remote_change_counter = [0u8; 4];
+    pub async fn get_remote_db_checksum(&self, generation: &Uuid) -> Result<Option<u64>> {
         if let Ok(response) = self
             .get_object(format!("{}-{}/.changecounter", self.db_name, generation))
             .send()
             .await
         {
-            response
-                .body
-                .collect()
-                .await?
-                .copy_to_slice(&mut remote_change_counter)
+            let body = response.body.collect().await?.to_vec();
+            if body.len() == 8 {
+                let checksum = u64::from_be_bytes(body.as_slice().try_into());
+                return Ok(Some(checksum));
+            }
         }
-        Ok(remote_change_counter)
+        Ok(None)
     }
 
     // Returns the number of pages stored in the local WAL file, or 0, if there aren't any.
@@ -1071,7 +1068,7 @@ impl Replicator {
     ) -> Result<Option<RestoreAction>> {
         // Check if the database needs to be restored by inspecting the database
         // change counter and the WAL size.
-        let local_counter = match File::open(&self.db_path).await {
+        let local_checksum = match File::open(&self.db_path).await {
             Ok(mut db) => {
                 // While reading the main database file for the first time,
                 // page size from an existing database should be set.
@@ -1080,20 +1077,43 @@ impl Replicator {
                 }
                 // if database file exists always treat it as new and more up to date, skipping the
                 // restoration process and calling for a new generation to be made
-                return Ok(Some(RestoreAction::SnapshotMainDbFile));
+                if !self.verify_crc {
+                    return Ok(Some(RestoreAction::SnapshotMainDbFile));
+                } else {
+                    Some(crc64(&mut db).await?)
+                }
             }
-            Err(_) => [0u8; 4],
+            Err(_) => None,
         };
 
-        let remote_counter = self.get_remote_change_counter(&generation).await?;
-        tracing::debug!("Counters: l={:?}, r={:?}", local_counter, remote_counter);
+        let remote_checksum = self.get_remote_db_checksum(&generation).await?;
+        tracing::debug!("Checksums: l={:?}, r={:?}", local_checksum, remote_checksum);
 
         let wal_pages = self.get_local_wal_page_count().await;
         // We impersonate as a given generation, since we're comparing against local backup at that
         // generation. This is used later in [Self::new_generation] to create a dependency between
         // this generation and a new one.
         self.generation.store(Some(Arc::new(generation)));
-        match local_counter.cmp(&remote_counter) {
+        match (local_checksum, remote_checksum) {
+            (Some(l), None) => {
+                // local db exists remote doesn't
+                todo!()
+            }
+            (None, Some(r)) => {
+                // remote db snapshot exists, local doesn't
+                todo!()
+            }
+            (Some(l), Some(r)) => {
+                // both local db and S3 snapshot exists, compare checksums
+                todo!()
+            }
+            (None, None) => {
+                // neither local nor remote has db file, use WAL
+                todo!()
+            }
+        }
+
+        match local_counter.cmp(&remote_checksum) {
             std::cmp::Ordering::Equal => {
                 tracing::debug!(
                     "Consistent: {}; wal pages: {}",

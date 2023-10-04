@@ -5,6 +5,7 @@
 mod ffi;
 
 mod backup;
+mod copy;
 mod read;
 pub mod replicator;
 mod transaction_cache;

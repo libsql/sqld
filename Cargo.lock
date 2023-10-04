@@ -797,7 +797,7 @@ dependencies = [
  "aws-sdk-s3",
  "bytes",
  "chrono",
- "crc",
+ "crc64fast",
  "futures",
  "rand",
  "sqld-libsql-bindings",
@@ -1284,6 +1284,12 @@ checksum = "b540bd8bc810d3885c6ea91e2018302f68baba2129ab3e88f32389ee9370880d"
 dependencies = [
  "cfg-if",
 ]
+
+[[package]]
+name = "crc64fast"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bd3d10c557924c719a61e583165e31a0d8131b20415d6858983e67d1eb8a82bd"
 
 [[package]]
 name = "crossbeam"

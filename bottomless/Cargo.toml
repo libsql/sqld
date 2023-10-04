@@ -14,7 +14,7 @@ async-compression = { version = "0.3.15", features = ["tokio", "gzip"] }
 aws-config = { version = "0.55" }
 aws-sdk-s3 = { version = "0.28" }
 bytes = "1"
-crc = "3.0.0"
+crc64fast = "1"
 futures = { version = "0.3.25" }
 sqld-libsql-bindings = { version = "0", path = "../sqld-libsql-bindings" }
 tokio = { version = "1.22.2", features = ["rt-multi-thread", "net", "io-std", "io-util", "time", "macros", "sync", "fs"] }
