@@ -13,7 +13,7 @@ use crate::connection::{Connection, MakeConnection};
 mod proto;
 mod protobuf;
 mod request;
-mod stream;
+pub(crate) mod stream;
 
 pub struct Server<C> {
     self_url: Option<String>,
@@ -25,7 +25,6 @@ pub struct Server<C> {
 pub enum Endpoint {
     Pipeline,
     Cursor,
-    Diagnostics,
 }
 
 impl<C: Connection> Server<C> {
@@ -99,7 +98,6 @@ async fn handle_request<C: Connection>(
         Endpoint::Cursor => {
             handle_cursor(server, connection_maker, auth, req, version, encoding).await
         }
-        Endpoint::Diagnostics => handle_diagnostics(server, auth).await,
     }
 }
 
@@ -167,34 +165,6 @@ async fn handle_cursor<C: Connection>(
         .status(hyper::StatusCode::OK)
         .header(hyper::http::header::CONTENT_TYPE, content_type)
         .body(body)
-        .unwrap())
-}
-
-async fn handle_diagnostics<C: Connection>(
-    server: &Server<C>,
-    _auth: Authenticated,
-) -> Result<hyper::Response<hyper::Body>> {
-    let stream_state = server.stream_state().lock();
-    let handles = stream_state.handles();
-    let mut diagnostics: Vec<String> = Vec::with_capacity(handles.len());
-    for handle in handles.values() {
-        let handle_info: String = match handle {
-            stream::Handle::Available(stream) => match &stream.db {
-                Some(db) => db.diagnostics(),
-                None => "[BUG] available-but-closed".into(),
-            },
-            stream::Handle::Acquired => "acquired".into(),
-            stream::Handle::Expired => "expired".into(),
-        };
-        diagnostics.push(handle_info);
-    }
-    drop(stream_state);
-
-    tracing::trace!("diagnostics: {diagnostics:?}");
-    Ok(hyper::Response::builder()
-        .status(hyper::StatusCode::OK)
-        .header(hyper::http::header::CONTENT_TYPE, "application/json")
-        .body(serde_json::to_string(&diagnostics)?.into())
         .unwrap())
 }
 
