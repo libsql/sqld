@@ -642,7 +642,7 @@ impl Replicator {
     // Returns the compressed database file path and its change counter, extracted
     // from the header of page1 at offset 24..27 (as per SQLite documentation).
     pub async fn maybe_compress_main_db_file(
-        db_path: &PathBuf,
+        db_path: &Path,
         compression: CompressionKind,
     ) -> Result<ByteStream> {
         match compression {
@@ -670,8 +670,8 @@ impl Replicator {
         }
     }
 
-    fn db_gzip_path(db_path: &PathBuf) -> PathBuf {
-        let mut gzip_path = db_path.clone();
+    fn db_gzip_path(db_path: &Path) -> PathBuf {
+        let mut gzip_path = db_path.to_path_buf();
         gzip_path.pop();
         gzip_path.join("db.gz")
     }
