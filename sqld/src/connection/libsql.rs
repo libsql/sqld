@@ -208,7 +208,8 @@ where
                 current_frame_no_receiver,
                 state,
             )?;
-            conn.conn.pragma_update(None, "max_page_count", max_db_size)?;
+            conn.conn
+                .pragma_update(None, "max_page_count", max_db_size)?;
             Ok(conn)
         })
         .await

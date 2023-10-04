@@ -17,7 +17,6 @@ use crate::{BLOCKING_RT, LIBSQL_PAGE_SIZE};
 
 use super::{MakeNamespace, NamespaceName, ResetCb, RestoreOption};
 
-
 type Result<T> = crate::Result<T, ForkError>;
 
 #[derive(Debug, thiserror::Error)]

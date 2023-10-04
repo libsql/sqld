@@ -43,7 +43,6 @@ impl Default for DatabaseConfig {
     }
 }
 
-
 impl DatabaseConfigStore {
     pub fn load(db_path: &Path) -> Result<Self> {
         let config_path = db_path.join("config.json");
