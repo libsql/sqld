@@ -5,6 +5,7 @@ use std::task::{ready, Context, Poll};
 use futures_core::Stream;
 use rusqlite::types::ValueRef;
 use tokio::sync::mpsc;
+use tonic::{Code, Status};
 
 use crate::auth::Authenticated;
 use crate::connection::Connection;
@@ -23,7 +24,7 @@ pin_project_lite::pin_project! {
         #[pin]
         request_stream: S,
         connection: Arc<PrimaryConnection>,
-        state: HandlerState,
+        state: State,
         authenticated: Authenticated,
     }
 }
@@ -37,7 +38,7 @@ impl<S> StreamRequestHandler<S> {
         Self {
             request_stream,
             connection: connection.into(),
-            state: HandlerState::Idle,
+            state: State::Idle,
             authenticated,
         }
     }
@@ -57,7 +58,7 @@ impl StreamResponseBuilder {
         })
     }
 
-    fn push(&mut self, payload: Payload) {
+    fn push(&mut self, payload: Payload) -> Result<(), QueryResultBuilderError> {
         const MAX_RESPONSE_MESSAGES: usize = 10;
 
         let current = self.current();
@@ -66,14 +67,19 @@ impl StreamResponseBuilder {
         });
 
         if current.messages.len() > MAX_RESPONSE_MESSAGES {
-            self.flush()
+            self.flush()?;
         }
+
+        Ok(())
     }
 
-    fn flush(&mut self) {
+    fn flush(&mut self) -> Result<(), QueryResultBuilderError> {
         if let Some(current) = self.current.take() {
-            self.sender.blocking_send(current).unwrap();
+            self.sender.blocking_send(current)
+                .map_err(|_| QueryResultBuilderError::Internal(anyhow::anyhow!("stream closed")))?;
         }
+
+        Ok(())
     }
 }
 
@@ -81,12 +87,12 @@ impl QueryResultBuilder for StreamResponseBuilder {
     type Ret = ();
 
     fn init(&mut self, _config: &QueryBuilderConfig) -> Result<(), QueryResultBuilderError> {
-        self.push(Payload::Init(rpc::Init {}));
+        self.push(Payload::Init(rpc::Init {}))?;
         Ok(())
     }
 
     fn begin_step(&mut self) -> Result<(), QueryResultBuilderError> {
-        self.push(Payload::BeginStep(rpc::BeginStep {}));
+        self.push(Payload::BeginStep(rpc::BeginStep {}))?;
         Ok(())
     }
 
@@ -98,14 +104,14 @@ impl QueryResultBuilder for StreamResponseBuilder {
         self.push(Payload::FinishStep(rpc::FinishStep {
             affected_row_count,
             last_insert_rowid,
-        }));
+        }))?;
         Ok(())
     }
 
     fn step_error(&mut self, error: crate::error::Error) -> Result<(), QueryResultBuilderError> {
         self.push(Payload::StepError(rpc::StepError {
             error: Some(error.into()),
-        }));
+        }))?;
         Ok(())
     }
 
@@ -122,17 +128,17 @@ impl QueryResultBuilder for StreamResponseBuilder {
                     decltype: c.decl_ty.map(Into::into),
                 })
                 .collect::<Vec<_>>(),
-        }));
+        }))?;
         Ok(())
     }
 
     fn begin_rows(&mut self) -> Result<(), QueryResultBuilderError> {
-        self.push(Payload::BeginRows(rpc::BeginRows {}));
+        self.push(Payload::BeginRows(rpc::BeginRows {}))?;
         Ok(())
     }
 
     fn begin_row(&mut self) -> Result<(), QueryResultBuilderError> {
-        self.push(Payload::BeginRow(rpc::BeginRow {}));
+        self.push(Payload::BeginRow(rpc::BeginRow {}))?;
         Ok(())
     }
 
@@ -144,17 +150,17 @@ impl QueryResultBuilder for StreamResponseBuilder {
 
         let val = Some(rpc::Value { data });
 
-        self.push(Payload::AddRowValue(rpc::AddRowValue { val }));
+        self.push(Payload::AddRowValue(rpc::AddRowValue { val }))?;
         Ok(())
     }
 
     fn finish_row(&mut self) -> Result<(), QueryResultBuilderError> {
-        self.push(Payload::FinishRow(rpc::FinishRow {}));
+        self.push(Payload::FinishRow(rpc::FinishRow {}))?;
         Ok(())
     }
 
     fn finish_rows(&mut self) -> Result<(), QueryResultBuilderError> {
-        self.push(Payload::FinishRows(rpc::FinishRows {}));
+        self.push(Payload::FinishRows(rpc::FinishRows {}))?;
         Ok(())
     }
 
@@ -166,8 +172,8 @@ impl QueryResultBuilder for StreamResponseBuilder {
         self.push(Payload::Finish(rpc::Finish {
             last_frame_no,
             state: rpc::State::from(state).into(),
-        }));
-        self.flush();
+        }))?;
+        self.flush()?;
         Ok(())
     }
 
@@ -176,7 +182,7 @@ impl QueryResultBuilder for StreamResponseBuilder {
     }
 }
 
-enum HandlerState {
+enum State {
     Execute(Pin<Box<dyn Stream<Item = ExecResp> + Send>>),
     Idle,
     Fused,
@@ -184,34 +190,31 @@ enum HandlerState {
 
 impl<S> Stream for StreamRequestHandler<S>
 where
-    S: Stream<Item = Result<ExecReq, tonic::Status>>,
+    S: Stream<Item = Result<ExecReq, Status>>,
 {
-    type Item = Result<ExecResp, tonic::Status>;
+    type Item = Result<ExecResp, Status>;
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = self.project();
 
-        dbg!();
         match this.state {
-            HandlerState::Idle => {
-                dbg!();
+            State::Idle => {
                 match ready!(this.request_stream.poll_next(cx)) {
                     Some(Err(e)) => {
-                        dbg!();
-                        *this.state = HandlerState::Fused;
+                        *this.state = State::Fused;
                         return Poll::Ready(Some(Err(e)));
                     }
                     Some(Ok(req)) => {
-                        dbg!(&req);
                         let request_id = req.request_id;
-                        match req.request.unwrap() {
-                            Request::Execute(pgm) => {
-                                dbg!();
-                                let pgm =
-                                    crate::connection::program::Program::try_from(pgm).unwrap();
+                        match req.request {
+                            Some(Request::Execute(pgm)) => {
+                                let Ok(pgm) =
+                                    crate::connection::program::Program::try_from(pgm) else {
+                                        *this.state = State::Fused;
+                                        return Poll::Ready(Some(Err(Status::new(Code::InvalidArgument, "invalid program"))));
+                                    };
                                 let conn = this.connection.clone();
                                 let authenticated = this.authenticated.clone();
-                                dbg!();
 
                                 let s = async_stream::stream! {
                                     let (sender, mut receiver) = mpsc::channel(1);
@@ -223,23 +226,23 @@ where
                                     let mut fut = conn.execute_program(pgm, authenticated, builder, None);
                                     loop {
                                         tokio::select! {
-                                            _res = &mut fut => {
-                                                dbg!();
-                                                if let Err(e) = _res {
-                                                    dbg!(e);
-                                                }
-
+                                            res = &mut fut => {
                                                 // drain the receiver
                                                 while let Ok(msg) = receiver.try_recv() {
                                                     yield msg;
+                                                }
+
+                                                if let Err(e) = res {
+                                                    yield ExecResp {
+                                                        request_id,
+                                                        messages: vec![rpc::Message { payload: Some(Payload::Error(e.into()))}],
+                                                    }
                                                 }
                                                 // todo check result?
                                                 break
                                             }
                                             msg = receiver.recv() => {
-                                                dbg!(&msg);
                                                 if let Some(msg) = msg {
-                                                    dbg!();
                                                     yield msg;
                                                 }
                                             }
@@ -247,9 +250,13 @@ where
                                     }
                                 };
                                 dbg!();
-                                *this.state = HandlerState::Execute(Box::pin(s));
+                                *this.state = State::Execute(Box::pin(s));
                             }
-                            Request::Describe(_) => todo!(),
+                            Some(Request::Describe(_)) => todo!(),
+                            None => {
+                                *this.state = State::Fused;
+                                return Poll::Ready(Some(Err(Status::new(Code::InvalidArgument, "invalid ExecReq: missing request"))));
+                            }
                         }
                         // we have placed the request, poll immediately
                         cx.waker().wake_by_ref();
@@ -257,13 +264,13 @@ where
                     }
                     None => {
                         // this would easier if tokio_stream re-exported combinators
-                        *this.state = HandlerState::Fused;
+                        *this.state = State::Fused;
                         Poll::Ready(None)
                     }
                 }
             }
-            HandlerState::Fused => Poll::Ready(None),
-            HandlerState::Execute(stream) => {
+            State::Fused => Poll::Ready(None),
+            State::Execute(stream) => {
                 dbg!();
                 let resp = ready!(stream.as_mut().poll_next(cx));
                 match resp {
@@ -272,7 +279,7 @@ where
                         dbg!();
                         // finished processing this query. Wake up immediately to prepare for the
                         // next
-                        *this.state = HandlerState::Idle;
+                        *this.state = State::Idle;
                         cx.waker().wake_by_ref();
                         return Poll::Pending;
                     }

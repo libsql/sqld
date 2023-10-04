@@ -79,6 +79,8 @@ pub enum Error {
     ConflictingRestoreParameters,
     #[error("failed to fork database: {0}")]
     Fork(#[from] ForkError),
+    #[error("Connection with primary broken")]
+    StreamDisconnect,
 }
 
 trait ResponseError: std::error::Error {

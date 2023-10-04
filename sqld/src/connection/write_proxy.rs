@@ -187,11 +187,22 @@ impl WriteProxyConnection {
     ) -> Result<(B, TxnStatus)> {
         self.stats.inc_write_requests_delegated();
         *status = TxnStatus::Invalid;
-        let (builder, new_status, new_frame_no) = self
+        let res = self
             .with_remote_conn(auth, self.builder_config, |conn| {
                 Box::pin(conn.execute(pgm, builder))
             })
-            .await?;
+            .await;
+
+        let (builder, new_status, new_frame_no) = match res {
+            Ok(res) => res,
+            Err(e @ Error::StreamDisconnect) => {
+                // drop the connection
+                self.remote_conn.lock().await.take();
+                return Err(e);
+            }
+            Err(e) => return Err(e),
+        };
+
         *status = new_status;
         if let Some(current_frame_no) = new_frame_no {
             self.update_last_write_frame_no(current_frame_no);
@@ -251,9 +262,7 @@ impl RemoteConnection {
         req.metadata_mut()
             .insert_bin(NAMESPACE_METADATA_KEY, namespace);
         auth.upgrade_grpc_request(&mut req);
-        dbg!();
         let response_stream = client.stream_exec(req).await.unwrap().into_inner();
-        dbg!();
 
         Ok(Self {
             response_stream,
@@ -276,14 +285,11 @@ impl RemoteConnection {
             request: Some(rpc::exec_req::Request::Execute(program.into())),
         };
 
-        dbg!();
         self.request_sender.send(req).await.unwrap(); // TODO: the stream was close!
-        dbg!();
         let mut txn_status = TxnStatus::Invalid;
         let mut new_frame_no = None;
 
         'outer: while let Some(resp) = self.response_stream.next().await {
-            dbg!(&resp);
             match resp {
                 Ok(resp) => {
                     if resp.request_id != request_id {
@@ -314,7 +320,6 @@ impl RemoteConnection {
                             Payload::BeginRow(_) => builder.begin_row()?,
                             Payload::AddRowValue(AddRowValue { val }) => {
                                 let value: Value = bincode::deserialize(&val.unwrap().data)
-                                    // something is wrong, better stop right here
                                     .map_err(QueryResultBuilderError::from_any)?;
                                 builder.add_row_value(ValueRef::from(&value))?;
                             }
@@ -324,7 +329,6 @@ impl RemoteConnection {
                                 txn_status = TxnStatus::from(f.state());
                                 new_frame_no = last_frame_no;
                                 builder.finish(last_frame_no, txn_status)?;
-                                dbg!();
                                 break 'outer;
                             }
                             Payload::Error(error) => {
@@ -333,7 +337,10 @@ impl RemoteConnection {
                         }
                     }
                 }
-                Err(_e) => todo!("handle stream error"),
+                Err(e) => {
+                    tracing::error!("received error from connection stream: {e}");
+                    return Err(Error::StreamDisconnect)
+                },
             }
         }
 
@@ -426,7 +433,7 @@ pub mod test {
     use rand::Fill;
 
     use super::*;
-    use crate::query_result_builder::test::test_driver;
+    use crate::{query_result_builder::test::test_driver, rpc::proxy::rpc::{ExecuteResults, query_result::RowResult}};
 
     /// generate an arbitraty rpc value. see build.rs for usage.
     pub fn arbitrary_rpc_value(u: &mut Unstructured) -> arbitrary::Result<Vec<u8>> {
@@ -442,10 +449,55 @@ pub mod test {
         Ok(v.into())
     }
 
+    fn execute_results_to_builder<B: QueryResultBuilder>(
+        execute_result: ExecuteResults,
+        mut builder: B,
+        config: &QueryBuilderConfig,
+    ) -> Result<B> {
+        builder.init(config)?;
+        for result in execute_result.results {
+            match result.row_result {
+                Some(RowResult::Row(rows)) => {
+                    builder.begin_step()?;
+                    builder.cols_description(rows.column_descriptions.iter().map(|c| Column {
+                        name: &c.name,
+                        decl_ty: c.decltype.as_deref(),
+                    }))?;
+
+                    builder.begin_rows()?;
+                    for row in rows.rows {
+                        builder.begin_row()?;
+                        for value in row.values {
+                            let value: Value = bincode::deserialize(&value.data)
+                                // something is wrong, better stop right here
+                                .map_err(QueryResultBuilderError::from_any)?;
+                            builder.add_row_value(ValueRef::from(&value))?;
+                        }
+                        builder.finish_row()?;
+                    }
+
+                    builder.finish_rows()?;
+
+                    builder.finish_step(rows.affected_row_count, rows.last_insert_rowid)?;
+                }
+                Some(RowResult::Error(err)) => {
+                    builder.begin_step()?;
+                    builder.step_error(Error::RpcQueryError(err))?;
+                    builder.finish_step(0, None)?;
+                }
+                None => (),
+            }
+        }
+
+        builder.finish(execute_result.current_frame_no, TxnStatus::Init)?;
+
+        Ok(builder)
+    }
+
     /// In this test, we generate random ExecuteResults, and ensures that the `execute_results_to_builder` drives the builder FSM correctly.
     #[test]
     fn test_execute_results_to_builder() {
-        test_driver(1000, |b| {
+        test_driver(1000, |b| -> std::result::Result<crate::query_result_builder::test::FsmQueryBuilder, Error> {
             let mut data = [0; 10_000];
             data.try_fill(&mut rand::thread_rng()).unwrap();
             let mut un = Unstructured::new(&data);

@@ -15,6 +15,7 @@ pub static TOTAL_RESPONSE_SIZE: AtomicUsize = AtomicUsize::new(0);
 
 #[derive(Debug)]
 pub enum QueryResultBuilderError {
+    /// The response payload is too large
     ResponseTooLarge(u64),
     Internal(anyhow::Error),
 }
@@ -616,6 +617,7 @@ pub mod test {
         fn finish(
             &mut self,
             _last_frame_no: Option<FrameNo>,
+            _txn_status: TxnStatus,
         ) -> Result<(), QueryResultBuilderError> {
             Ok(())
         }
@@ -751,7 +753,7 @@ pub mod test {
                 FinishRow => b.finish_row().unwrap(),
                 FinishRows => b.finish_rows().unwrap(),
                 Finish => {
-                    b.finish(Some(0)).unwrap();
+                    b.finish(Some(0), TxnStatus::Init).unwrap();
                     break;
                 }
                 BuilderError => return b,
@@ -899,6 +901,7 @@ pub mod test {
         fn finish(
             &mut self,
             _last_frame_no: Option<FrameNo>,
+            _txn_status: TxnStatus,
         ) -> Result<(), QueryResultBuilderError> {
             self.maybe_inject_error()?;
             self.transition(Finish)
@@ -947,7 +950,7 @@ pub mod test {
         builder.finish_rows().unwrap();
         builder.finish_step(0, None).unwrap();
 
-        builder.finish(Some(0)).unwrap();
+        builder.finish(Some(0), TxnStatus::Init).unwrap();
     }
 
     #[test]

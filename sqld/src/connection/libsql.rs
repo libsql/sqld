@@ -858,7 +858,7 @@ mod test {
             TestBuilder::default(),
         )
         .unwrap();
-        assert_eq!(state, State::Txn);
+        assert_eq!(state, TxnStatus::Txn);
 
         tokio::time::advance(TXN_TIMEOUT * 2).await;
 
@@ -868,7 +868,7 @@ mod test {
             TestBuilder::default(),
         )
         .unwrap();
-        assert_eq!(state, State::Init);
+        assert_eq!(state, TxnStatus::Init);
         assert!(matches!(builder.into_ret()[0], Err(Error::LibSqlTxTimeout)));
     }
 
@@ -902,7 +902,7 @@ mod test {
                     TestBuilder::default(),
                 )
                 .unwrap();
-                assert_eq!(state, State::Txn);
+                assert_eq!(state, TxnStatus::Txn);
                 assert!(builder.into_ret()[0].is_ok());
             });
         }
@@ -945,7 +945,7 @@ mod test {
                     TestBuilder::default(),
                 )
                 .unwrap();
-                assert_eq!(state, State::Txn);
+                assert_eq!(state, TxnStatus::Txn);
                 assert!(builder.into_ret()[0].is_ok());
             }
         })
@@ -963,7 +963,7 @@ mod test {
                     TestBuilder::default(),
                 )
                 .unwrap();
-                assert_eq!(state, State::Txn);
+                assert_eq!(state, TxnStatus::Txn);
                 assert!(builder.into_ret()[0].is_ok());
                 before.elapsed()
             }
@@ -978,7 +978,7 @@ mod test {
                 let (builder, state) =
                     Connection::run(conn, Program::seq(&["COMMIT"]), TestBuilder::default())
                         .unwrap();
-                assert_eq!(state, State::Init);
+                assert_eq!(state, TxnStatus::Init);
                 assert!(builder.into_ret()[0].is_ok());
             }
         })
