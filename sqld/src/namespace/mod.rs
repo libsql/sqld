@@ -913,7 +913,7 @@ pub async fn init_bottomless_replicator(
     match action {
         bottomless::replicator::RestoreAction::SnapshotMainDbFile => {
             replicator.new_generation();
-            replicator.snapshot(true).await?;
+            replicator.snapshot().await?;
             // Restoration process only leaves the local WAL file if it was
             // detected to be newer than its remote counterpart.
             replicator.maybe_replicate_wal().await?

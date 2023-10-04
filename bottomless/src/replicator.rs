@@ -672,18 +672,19 @@ impl Replicator {
         let _ = self.snapshot_notifier.send(Ok(generation));
     }
 
-    async fn snapshot_interval_passed(&self, generation: &Uuid) -> bool {
+    async fn snapshot_interval_passed(&self) -> bool {
         if let Some(snapshot_interval) = self.snapshot_interval {
             if let Some(snapshot_gen) = self.get_last_snapshot().await {
                 if let Some(snapshot_time) = snapshot_gen.date_time() {
-                    tracing::trace!(
-                        "last known snapshot: {} ({:?})",
-                        snapshot_gen,
-                        snapshot_time
-                    );
                     let next_snapshot_date = snapshot_time + snapshot_interval;
+                    tracing::trace!(
+                        "Last known snapshot: {} ({:?}) - next one after {}",
+                        snapshot_gen,
+                        snapshot_time,
+                        next_snapshot_date
+                    );
                     let now = Utc::now().naive_utc();
-                    if snapshot_gen == *generation || next_snapshot_date > now {
+                    if next_snapshot_date > now {
                         return false;
                     }
                 }
@@ -697,14 +698,14 @@ impl Replicator {
     ///
     /// If snapshot process was started, an awaiter will be returned - it can be used to wait for
     /// snapshot completion.
-    pub async fn snapshot(&mut self, force: bool) -> Result<Option<JoinHandle<()>>> {
+    pub async fn snapshot(&mut self) -> Result<Option<JoinHandle<()>>> {
         let generation = self.generation()?;
         if !self.db_file_has_data().await {
             tracing::debug!("Not snapshotting, the main db file does not exist or is empty");
             let _ = self.snapshot_notifier.send(Ok(Some(generation)));
             return Ok(None);
         }
-        if !(force || self.snapshot_interval_passed(&generation).await) {
+        if !self.snapshot_interval_passed().await {
             tracing::trace!("Not snapshotting, snapshot interval is still in progress");
             let _ = self.snapshot_notifier.send(Ok(Some(generation)));
             return Ok(None);
