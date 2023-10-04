@@ -190,7 +190,7 @@ async fn handle_diagnostics<C: Connection>(
     }
     drop(stream_state);
 
-    tracing::warn!("diagnostics test: {diagnostics:?}");
+    tracing::trace!("diagnostics: {diagnostics:?}");
     Ok(hyper::Response::builder()
         .status(hyper::StatusCode::OK)
         .header(hyper::http::header::CONTENT_TYPE, "application/json")

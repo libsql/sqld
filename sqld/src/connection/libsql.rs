@@ -144,9 +144,20 @@ where
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct LibSqlConnection<W: WalHook> {
     inner: Arc<Mutex<Connection<W>>>,
+}
+
+impl<W: WalHook> std::fmt::Debug for LibSqlConnection<W> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.inner.try_lock() {
+            Some(conn) => {
+                write!(f, "{conn:?}")
+            }
+            None => write!(f, "<locked>"),
+        }
+    }
 }
 
 pub fn open_conn<W>(
@@ -206,7 +217,6 @@ where
     }
 }
 
-#[derive(Debug)]
 struct Connection<W: WalHook = TransparentMethods> {
     conn: sqld_libsql_bindings::Connection<W>,
     stats: Arc<Stats>,
@@ -217,6 +227,14 @@ struct Connection<W: WalHook = TransparentMethods> {
     state: Arc<TxnState<W>>,
     // current txn slot if any
     slot: Option<Arc<TxnSlot<W>>>,
+}
+
+impl<W: WalHook> std::fmt::Debug for Connection<W> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Connection")
+            .field("slot", &self.slot)
+            .finish()
+    }
 }
 
 /// A slot for holding the state of a transaction lock permit
@@ -733,7 +751,7 @@ where
         match self.inner.try_lock() {
             Some(conn) => match conn.slot {
                 Some(ref slot) => format!("{slot:?}"),
-                None => "[BUG] connection closed".to_string(),
+                None => "<no-transaction>".to_string(),
             },
             None => "[BUG] connection busy".to_string(),
         }

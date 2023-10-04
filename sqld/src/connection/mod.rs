@@ -24,7 +24,7 @@ pub mod write_proxy;
 const TXN_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[async_trait::async_trait]
-pub trait Connection: std::fmt::Debug + Send + Sync + 'static {
+pub trait Connection: Send + Sync + 'static {
     /// Executes a query program
     async fn execute_program<B: QueryResultBuilder>(
         &self,

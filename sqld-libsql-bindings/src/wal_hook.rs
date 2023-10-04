@@ -46,8 +46,8 @@ macro_rules! init_static_wal_method {
 ///
 /// # Safety
 /// The implementer is responsible for calling the orig method with valid arguments.
-pub unsafe trait WalHook: std::fmt::Debug {
-    type Context: std::fmt::Debug;
+pub unsafe trait WalHook {
+    type Context;
 
     fn name() -> &'static CStr;
     /// Intercept `xFrame` call. `orig` is the function pointer to the underlying wal method.
