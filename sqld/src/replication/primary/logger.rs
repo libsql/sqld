@@ -20,8 +20,7 @@ use crate::libsql_bindings::ffi::SQLITE_IOERR_WRITE;
 use crate::libsql_bindings::ffi::{
     sqlite3,
     types::{XWalCheckpointFn, XWalFrameFn, XWalSavePointUndoFn, XWalUndoFn},
-    PageHdrIter, PgHdr, Wal, SQLITE_CHECKPOINT_PASSIVE, SQLITE_CHECKPOINT_TRUNCATE, SQLITE_IOERR,
-    SQLITE_OK,
+    PageHdrIter, PgHdr, Wal, SQLITE_CHECKPOINT_TRUNCATE, SQLITE_IOERR, SQLITE_OK,
 };
 use crate::libsql_bindings::wal_hook::WalHook;
 use crate::replication::frame::{Frame, FrameHeader};
@@ -201,9 +200,6 @@ unsafe impl WalHook for ReplicationLoggerHook {
                     "Ignoring a checkpoint request weaker than TRUNCATE: {}",
                     emode
                 );
-                if emode == SQLITE_CHECKPOINT_PASSIVE {
-                    return SQLITE_OK;
-                }
                 // Return an error to signal to sqlite that the WAL was not checkpointed, and it is
                 // therefore not safe to delete it.
                 return SQLITE_BUSY;
