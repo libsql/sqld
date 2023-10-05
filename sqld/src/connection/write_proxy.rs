@@ -195,7 +195,7 @@ impl WriteProxyConnection {
 
         let (builder, new_status, new_frame_no) = match res {
             Ok(res) => res,
-            Err(e @ Error::StreamDisconnect) => {
+            Err(e @ (Error::PrimaryStreamDisconnect | Error::PrimaryStreamMisuse)) => {
                 // drop the connection
                 self.remote_conn.lock().await.take();
                 return Err(e);
@@ -290,23 +290,28 @@ impl RemoteConnection {
         self.request_sender
             .send(req)
             .await
-            .map_err(|_| Error::StreamDisconnect)?;
+            .map_err(|_| Error::PrimaryStreamDisconnect)?;
 
-        'outer: while let Some(resp) = self.response_stream.next().await {
+        while let Some(resp) = self.response_stream.next().await {
             match resp {
                 Ok(resp) => {
-                    // todo: handle interuption
-                    if resp.request_id != request_id {
-                        todo!("stream misuse: connection should be serialized");
+                    // there was an interuption, and we moved to the next query
+                    if resp.request_id > request_id {
+                        return Err(Error::PrimaryStreamInterupted)
                     }
 
-                    if !response_cb(resp.response.unwrap())? {
-                        break 'outer;
+                    // we can ignore response for previously interupted requests
+                    if resp.request_id < request_id {
+                        continue;
+                    }
+
+                    if !response_cb(resp.response.ok_or(Error::PrimaryStreamMisuse)?)? {
+                        break;
                     }
                 }
                 Err(e) => {
-                    tracing::error!("received error from connection stream: {e}");
-                    return Err(Error::StreamDisconnect);
+                    tracing::error!("received an error from connection stream: {e}");
+                    return Err(Error::PrimaryStreamDisconnect);
                 }
             }
         }
@@ -326,7 +331,7 @@ impl RemoteConnection {
             match response {
                 exec_resp::Response::ProgramResp(resp) => {
                     for step in resp.steps {
-                        let Some(step) = step.step else {panic!("invalid pgm")};
+                        let Some(step) = step.step else { return Err(Error::PrimaryStreamMisuse) };
                         match step {
                             Step::Init(_) => builder.init(&builder_config)?,
                             Step::BeginStep(_) => builder.begin_step()?,
@@ -334,8 +339,8 @@ impl RemoteConnection {
                                 affected_row_count,
                                 last_insert_rowid,
                             }) => builder.finish_step(affected_row_count, last_insert_rowid)?,
-                            Step::StepError(StepError { error }) => builder
-                                .step_error(crate::error::Error::RpcQueryError(error.unwrap()))?,
+                            Step::StepError(StepError { error: Some(err) }) => builder
+                                .step_error(crate::error::Error::RpcQueryError(err))?,
                             Step::ColsDescription(ColsDescription { columns }) => {
                                 let cols = columns.iter().map(|c| Column {
                                     name: &c.name,
@@ -365,12 +370,12 @@ impl RemoteConnection {
                                 builder.finish(last_frame_no, txn_status)?;
                                 return Ok(false);
                             }
-                            _ => todo!("invalid request"),
+                            _ => return Err(Error::PrimaryStreamMisuse),
                         }
                     }
                 }
-                exec_resp::Response::DescribeResp(_) => todo!("invalid resp"),
-                exec_resp::Response::Error(_) => todo!(),
+                exec_resp::Response::DescribeResp(_) => return Err(Error::PrimaryStreamMisuse),
+                exec_resp::Response::Error(e) => return Err(Error::RpcQueryError(e)),
             }
 
             Ok(true)
@@ -410,12 +415,12 @@ impl RemoteConnection {
                         is_explain: resp.is_explain,
                         is_readonly: resp.is_readonly,
                     });
-                }
-                exec_resp::Response::Error(_) => todo!(),
-                exec_resp::Response::ProgramResp(_) => todo!(),
-            }
 
-            Ok(false)
+                    Ok(false)
+                }
+                exec_resp::Response::Error(e) => Err(Error::RpcQueryError(e)),
+                exec_resp::Response::ProgramResp(_) => Err(Error::PrimaryStreamMisuse),
+            }
         };
 
         self.make_request(
@@ -424,7 +429,7 @@ impl RemoteConnection {
         )
         .await?;
 
-        Ok(out.unwrap())
+        out.ok_or(Error::PrimaryStreamMisuse)
     }
 }
 
