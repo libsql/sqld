@@ -137,6 +137,8 @@ impl IntoResponse for Error {
             ConflictingRestoreParameters => self.format_err(StatusCode::BAD_REQUEST),
             Fork(e) => e.into_response(),
             PrimaryStreamDisconnect => self.format_err(StatusCode::INTERNAL_SERVER_ERROR),
+            PrimaryStreamMisuse => self.format_err(StatusCode::INTERNAL_SERVER_ERROR),
+            PrimaryStreamInterupted => self.format_err(StatusCode::INTERNAL_SERVER_ERROR),
         }
     }
 }

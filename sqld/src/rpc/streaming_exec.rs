@@ -209,79 +209,79 @@ where
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = self.project();
 
-        match this.state {
-            State::Idle => {
-                match ready!(this.request_stream.poll_next(cx)) {
-                    Some(Err(e)) => {
-                        *this.state = State::Fused;
-                        Poll::Ready(Some(Err(e)))
-                    }
-                    Some(Ok(req)) => {
-                        let request_id = req.request_id;
-                        match req.request {
-                            Some(Request::Execute(pgm)) => {
-                                let Ok(pgm) =
-                                    crate::connection::program::Program::try_from(pgm.pgm.unwrap()) else {
-                                        *this.state = State::Fused;
-                                        return Poll::Ready(Some(Err(Status::new(Code::InvalidArgument, "invalid program"))));
-                                    };
-                                let conn = this.connection.clone();
-                                let authenticated = this.authenticated.clone();
+        // we always poll from the request stream. If a new request arrive, we interupt the current
+        // one, and move to the next.
+        if let Poll::Ready(maybe_req) = this.request_stream.poll_next(cx) {
+            match maybe_req {
+                Some(Err(e)) => {
+                    *this.state = State::Fused;
+                    return Poll::Ready(Some(Err(e)))
+                }
+                Some(Ok(req)) => {
+                    let request_id = req.request_id;
+                    match req.request {
+                        Some(Request::Execute(pgm)) => {
+                            let Ok(pgm) =
+                                crate::connection::program::Program::try_from(pgm.pgm.unwrap()) else {
+                                    *this.state = State::Fused;
+                                    return Poll::Ready(Some(Err(Status::new(Code::InvalidArgument, "invalid program"))));
+                                };
+                            let conn = this.connection.clone();
+                            let authenticated = this.authenticated.clone();
 
-                                let s = async_stream::stream! {
-                                    let (sender, mut receiver) = mpsc::channel(1);
-                                    let builder = StreamResponseBuilder {
-                                        request_id,
-                                        sender,
-                                        current: None,
-                                    };
-                                    let mut fut = conn.execute_program(pgm, authenticated, builder, None);
-                                    loop {
-                                        tokio::select! {
-                                            res = &mut fut => {
-                                                // drain the receiver
-                                                while let Ok(msg) = receiver.try_recv() {
-                                                    yield msg;
-                                                }
-
-                                                if let Err(e) = res {
-                                                    yield ExecResp {
-                                                        request_id,
-                                                        response: Some(exec_resp::Response::Error(e.into()))
-                                                    }
-                                                }
-                                                break
+                            let s = async_stream::stream! {
+                                let (sender, mut receiver) = mpsc::channel(1);
+                                let builder = StreamResponseBuilder {
+                                    request_id,
+                                    sender,
+                                    current: None,
+                                };
+                                let mut fut = conn.execute_program(pgm, authenticated, builder, None);
+                                loop {
+                                    tokio::select! {
+                                        res = &mut fut => {
+                                            // drain the receiver
+                                            while let Ok(msg) = receiver.try_recv() {
+                                                yield msg;
                                             }
-                                            msg = receiver.recv() => {
-                                                if let Some(msg) = msg {
-                                                    yield msg;
+
+                                            if let Err(e) = res {
+                                                yield ExecResp {
+                                                    request_id,
+                                                    response: Some(exec_resp::Response::Error(e.into()))
                                                 }
+                                            }
+                                            break
+                                        }
+                                        msg = receiver.recv() => {
+                                            if let Some(msg) = msg {
+                                                yield msg;
                                             }
                                         }
                                     }
-                                };
-                                *this.state = State::Execute(Box::pin(s));
-                            }
-                            Some(Request::Describe(_)) => todo!(),
-                            None => {
-                                *this.state = State::Fused;
-                                return Poll::Ready(Some(Err(Status::new(
-                                    Code::InvalidArgument,
-                                    "invalid ExecReq: missing request",
-                                ))));
-                            }
+                                }
+                            };
+                            *this.state = State::Execute(Box::pin(s));
                         }
-                        // we have placed the request, poll immediately
-                        cx.waker().wake_by_ref();
-                        Poll::Pending
-                    }
-                    None => {
-                        // this would easier if tokio_stream re-exported combinators
-                        *this.state = State::Fused;
-                        Poll::Ready(None)
+                        Some(Request::Describe(_)) => todo!(),
+                        None => {
+                            *this.state = State::Fused;
+                            return Poll::Ready(Some(Err(Status::new(
+                                            Code::InvalidArgument,
+                                            "invalid ExecReq: missing request",
+                            ))));
+                        }
                     }
                 }
+                None => {
+                    *this.state = State::Fused;
+                    return Poll::Ready(None)
+                }
             }
+        }
+
+        match this.state {
+            State::Idle => Poll::Pending,
             State::Fused => Poll::Ready(None),
             State::Execute(stream) => {
                 let resp = ready!(stream.as_mut().poll_next(cx));
