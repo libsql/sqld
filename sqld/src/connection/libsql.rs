@@ -20,7 +20,7 @@ use crate::stats::Stats;
 use crate::Result;
 
 use super::config::DatabaseConfigStore;
-use super::program::{Cond, DescribeCol, DescribeParam, DescribeResponse, DescribeResult};
+use super::program::{Cond, DescribeCol, DescribeParam, DescribeResponse};
 use super::{MakeConnection, Program, Step, TXN_TIMEOUT};
 
 pub struct MakeLibSqlConn<W: WalHook + 'static> {
@@ -161,7 +161,9 @@ impl<W: WalHook> std::fmt::Debug for LibSqlConnection<W> {
 
 impl<W: WalHook> Clone for LibSqlConnection<W> {
     fn clone(&self) -> Self {
-        Self { inner: self.inner.clone() }
+        Self {
+            inner: self.inner.clone(),
+        }
     }
 }
 
@@ -650,7 +652,7 @@ impl<W: WalHook> Connection<W> {
         self.stats.inc_rows_written(rows_written as u64);
     }
 
-    fn describe(&self, sql: &str) -> DescribeResult {
+    fn describe(&self, sql: &str) -> crate::Result<DescribeResponse> {
         let stmt = self.conn.prepare(sql)?;
 
         let params = (1..=stmt.parameter_count())
@@ -768,7 +770,7 @@ where
         sql: String,
         auth: Authenticated,
         _replication_index: Option<FrameNo>,
-    ) -> Result<DescribeResult> {
+    ) -> Result<crate::Result<DescribeResponse>> {
         check_describe_auth(auth)?;
         let conn = self.inner.clone();
         let res = tokio::task::spawn_blocking(move || conn.lock().describe(&sql))
@@ -994,9 +996,12 @@ mod test {
         tokio::task::spawn_blocking({
             let conn = conn1.clone();
             move || {
-                let builder =
-                    Connection::run(conn.inner.clone(), Program::seq(&["COMMIT"]), TestBuilder::default())
-                        .unwrap();
+                let builder = Connection::run(
+                    conn.inner.clone(),
+                    Program::seq(&["COMMIT"]),
+                    TestBuilder::default(),
+                )
+                .unwrap();
                 assert_eq!(conn.txn_status().unwrap(), TxnStatus::Init);
                 assert!(builder.into_ret()[0].is_ok());
             }

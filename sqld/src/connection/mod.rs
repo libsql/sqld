@@ -13,7 +13,7 @@ use crate::query_result_builder::{IgnoreResult, QueryResultBuilder};
 use crate::replication::FrameNo;
 use crate::Result;
 
-use self::program::{Cond, DescribeResult, Program, Step};
+use self::program::{Cond, DescribeResponse, Program, Step};
 
 pub mod config;
 pub mod dump;
@@ -111,7 +111,7 @@ pub trait Connection: Send + Sync + 'static {
         sql: String,
         auth: Authenticated,
         replication_index: Option<FrameNo>,
-    ) -> Result<DescribeResult>;
+    ) -> Result<Result<DescribeResponse>>;
 
     /// Check whether the connection is in autocommit mode.
     async fn is_autocommit(&self) -> Result<bool>;
@@ -325,7 +325,7 @@ impl<DB: Connection> Connection for TrackedConnection<DB> {
         sql: String,
         auth: Authenticated,
         replication_index: Option<FrameNo>,
-    ) -> crate::Result<DescribeResult> {
+    ) -> crate::Result<crate::Result<DescribeResponse>> {
         self.atime.store(now_millis(), Ordering::Relaxed);
         self.inner.describe(sql, auth, replication_index).await
     }
@@ -376,7 +376,7 @@ mod test {
             _sql: String,
             _auth: Authenticated,
             _replication_index: Option<FrameNo>,
-        ) -> crate::Result<DescribeResult> {
+        ) -> crate::Result<crate::Result<DescribeResponse>> {
             unreachable!()
         }
 

@@ -13,18 +13,18 @@ use tonic::{Request, Streaming};
 use uuid::Uuid;
 
 use crate::auth::Authenticated;
+use crate::connection::program::{DescribeCol, DescribeParam};
 use crate::error::Error;
 use crate::namespace::NamespaceName;
-use crate::query::Value;
 use crate::query_analysis::TxnStatus;
-use crate::query_result_builder::{
-    Column, QueryBuilderConfig, QueryResultBuilder, QueryResultBuilderError,
-};
+use crate::query_result_builder::{Column, QueryBuilderConfig, QueryResultBuilder};
 use crate::replication::FrameNo;
 use crate::rpc::proxy::rpc::proxy_client::ProxyClient;
+use crate::rpc::proxy::rpc::resp_step::Step;
+use crate::rpc::proxy::rpc::row_value::Value;
 use crate::rpc::proxy::rpc::{
-    self, AddRowValue, ColsDescription, DisconnectMessage, ExecReq, ExecResp, Finish, FinishStep,
-    StepError,
+    self, exec_req, exec_resp, AddRowValue, ColsDescription, DisconnectMessage, ExecReq, ExecResp,
+    Finish, FinishStep, RowValue, StepError,
 };
 use crate::rpc::NAMESPACE_METADATA_KEY;
 use crate::stats::Stats;
@@ -32,7 +32,7 @@ use crate::{Result, DEFAULT_AUTO_CHECKPOINT};
 
 use super::config::DatabaseConfigStore;
 use super::libsql::{LibSqlConnection, MakeLibSqlConn};
-use super::program::DescribeResult;
+use super::program::DescribeResponse;
 use super::Connection;
 use super::{MakeConnection, Program};
 
@@ -272,69 +272,36 @@ impl RemoteConnection {
         })
     }
 
-    async fn execute<B: QueryResultBuilder>(
+    /// Perform a request on to the remote peer, and call message_cb for every message received for
+    /// that request. message cb should return whether to expect more message for that request.
+    async fn make_request(
         &mut self,
-        program: Program,
-        mut builder: B,
-    ) -> crate::Result<(B, TxnStatus, Option<FrameNo>)> {
+        req: exec_req::Request,
+        mut response_cb: impl FnMut(exec_resp::Response) -> crate::Result<bool>,
+    ) -> crate::Result<()> {
         let request_id = self.current_request_id;
         self.current_request_id += 1;
 
         let req = ExecReq {
             request_id,
-            request: Some(rpc::exec_req::Request::Execute(program.into())),
+            request: Some(req),
         };
 
-        self.request_sender.send(req).await.unwrap(); // TODO: the stream was close!
-        let mut txn_status = TxnStatus::Invalid;
-        let mut new_frame_no = None;
+        self.request_sender
+            .send(req)
+            .await
+            .map_err(|_| Error::StreamDisconnect)?;
 
         'outer: while let Some(resp) = self.response_stream.next().await {
             match resp {
                 Ok(resp) => {
+                    // todo: handle interuption
                     if resp.request_id != request_id {
                         todo!("stream misuse: connection should be serialized");
                     }
-                    for message in resp.messages {
-                        use rpc::message::Payload;
 
-                        match message.payload.unwrap() {
-                            Payload::DescribeResult(_) => todo!("invalid response"),
-
-                            Payload::Init(_) => builder.init(&self.builder_config)?,
-                            Payload::BeginStep(_) => builder.begin_step()?,
-                            Payload::FinishStep(FinishStep {
-                                affected_row_count,
-                                last_insert_rowid,
-                            }) => builder.finish_step(affected_row_count, last_insert_rowid)?,
-                            Payload::StepError(StepError { error }) => builder
-                                .step_error(crate::error::Error::RpcQueryError(error.unwrap()))?,
-                            Payload::ColsDescription(ColsDescription { columns }) => {
-                                let cols = columns.iter().map(|c| Column {
-                                    name: &c.name,
-                                    decl_ty: c.decltype.as_deref(),
-                                });
-                                builder.cols_description(cols)?
-                            }
-                            Payload::BeginRows(_) => builder.begin_rows()?,
-                            Payload::BeginRow(_) => builder.begin_row()?,
-                            Payload::AddRowValue(AddRowValue { val }) => {
-                                let value: Value = bincode::deserialize(&val.unwrap().data)
-                                    .map_err(QueryResultBuilderError::from_any)?;
-                                builder.add_row_value(ValueRef::from(&value))?;
-                            }
-                            Payload::FinishRow(_) => builder.finish_row()?,
-                            Payload::FinishRows(_) => builder.finish_rows()?,
-                            Payload::Finish(f @ Finish { last_frame_no, .. }) => {
-                                txn_status = TxnStatus::from(f.state());
-                                new_frame_no = last_frame_no;
-                                builder.finish(last_frame_no, txn_status)?;
-                                break 'outer;
-                            }
-                            Payload::Error(error) => {
-                                return Err(crate::error::Error::RpcQueryError(error))
-                            }
-                        }
+                    if !response_cb(resp.response.unwrap())? {
+                        break 'outer;
                     }
                 }
                 Err(e) => {
@@ -344,7 +311,120 @@ impl RemoteConnection {
             }
         }
 
+        Ok(())
+    }
+
+    async fn execute<B: QueryResultBuilder>(
+        &mut self,
+        program: Program,
+        mut builder: B,
+    ) -> crate::Result<(B, TxnStatus, Option<FrameNo>)> {
+        let mut txn_status = TxnStatus::Invalid;
+        let mut new_frame_no = None;
+        let builder_config = self.builder_config;
+        let cb = |response: exec_resp::Response| {
+            match response {
+                exec_resp::Response::ProgramResp(resp) => {
+                    for step in resp.steps {
+                        let Some(step) = step.step else {panic!("invalid pgm")};
+                        match step {
+                            Step::Init(_) => builder.init(&builder_config)?,
+                            Step::BeginStep(_) => builder.begin_step()?,
+                            Step::FinishStep(FinishStep {
+                                affected_row_count,
+                                last_insert_rowid,
+                            }) => builder.finish_step(affected_row_count, last_insert_rowid)?,
+                            Step::StepError(StepError { error }) => builder
+                                .step_error(crate::error::Error::RpcQueryError(error.unwrap()))?,
+                            Step::ColsDescription(ColsDescription { columns }) => {
+                                let cols = columns.iter().map(|c| Column {
+                                    name: &c.name,
+                                    decl_ty: c.decltype.as_deref(),
+                                });
+                                builder.cols_description(cols)?
+                            }
+                            Step::BeginRows(_) => builder.begin_rows()?,
+                            Step::BeginRow(_) => builder.begin_row()?,
+                            Step::AddRowValue(AddRowValue {
+                                val: Some(RowValue { value: Some(val) }),
+                            }) => {
+                                let val = match &val {
+                                    Value::Text(s) => ValueRef::Text(s.as_bytes()),
+                                    Value::Integer(i) => ValueRef::Integer(*i),
+                                    Value::Real(x) => ValueRef::Real(*x),
+                                    Value::Blob(b) => ValueRef::Blob(b.as_slice()),
+                                    Value::Null(_) => ValueRef::Null,
+                                };
+                                builder.add_row_value(val)?;
+                            }
+                            Step::FinishRow(_) => builder.finish_row()?,
+                            Step::FinishRows(_) => builder.finish_rows()?,
+                            Step::Finish(f @ Finish { last_frame_no, .. }) => {
+                                txn_status = TxnStatus::from(f.state());
+                                new_frame_no = last_frame_no;
+                                builder.finish(last_frame_no, txn_status)?;
+                                return Ok(false);
+                            }
+                            _ => todo!("invalid request"),
+                        }
+                    }
+                }
+                exec_resp::Response::DescribeResp(_) => todo!("invalid resp"),
+                exec_resp::Response::Error(_) => todo!(),
+            }
+
+            Ok(true)
+        };
+
+        self.make_request(
+            exec_req::Request::Execute(rpc::StreamProgramReq {
+                pgm: Some(program.into()),
+            }),
+            cb,
+        )
+        .await?;
+
         Ok((builder, txn_status, new_frame_no))
+    }
+
+    #[allow(dead_code)] // reference implementation
+    async fn describe(&mut self, stmt: String) -> crate::Result<DescribeResponse> {
+        let mut out = None;
+        let cb = |response: exec_resp::Response| {
+            match response {
+                exec_resp::Response::DescribeResp(resp) => {
+                    out = Some(DescribeResponse {
+                        params: resp
+                            .params
+                            .into_iter()
+                            .map(|p| DescribeParam { name: p.name })
+                            .collect(),
+                        cols: resp
+                            .cols
+                            .into_iter()
+                            .map(|c| DescribeCol {
+                                name: c.name,
+                                decltype: c.decltype,
+                            })
+                            .collect(),
+                        is_explain: resp.is_explain,
+                        is_readonly: resp.is_readonly,
+                    });
+                }
+                exec_resp::Response::Error(_) => todo!(),
+                exec_resp::Response::ProgramResp(_) => todo!(),
+            }
+
+            Ok(false)
+        };
+
+        self.make_request(
+            exec_req::Request::Describe(rpc::StreamDescribeReq { stmt }),
+            cb,
+        )
+        .await?;
+
+        Ok(out.unwrap())
     }
 }
 
@@ -391,7 +471,7 @@ impl Connection for WriteProxyConnection {
         sql: String,
         auth: Authenticated,
         replication_index: Option<FrameNo>,
-    ) -> Result<DescribeResult> {
+    ) -> Result<Result<DescribeResponse>> {
         self.wait_replication_sync(replication_index).await?;
         self.read_conn.describe(sql, auth, replication_index).await
     }
@@ -438,7 +518,7 @@ pub mod test {
 
     use super::*;
     use crate::{
-        query_result_builder::test::test_driver,
+        query_result_builder::{test::test_driver, QueryResultBuilderError},
         rpc::proxy::rpc::{query_result::RowResult, ExecuteResults},
     };
 
@@ -475,7 +555,7 @@ pub mod test {
                     for row in rows.rows {
                         builder.begin_row()?;
                         for value in row.values {
-                            let value: Value = bincode::deserialize(&value.data)
+                            let value: crate::query::Value = bincode::deserialize(&value.data)
                                 // something is wrong, better stop right here
                                 .map_err(QueryResultBuilderError::from_any)?;
                             builder.add_row_value(ValueRef::from(&value))?;

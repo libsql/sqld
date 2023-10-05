@@ -15,9 +15,11 @@ use crate::query_result_builder::{
     Column, QueryBuilderConfig, QueryResultBuilder, QueryResultBuilderError,
 };
 use crate::replication::FrameNo;
-use crate::rpc::proxy::rpc::{exec_req::Request, Message};
+use crate::rpc::proxy::rpc::exec_req::Request;
+use crate::rpc::proxy::rpc::exec_resp;
 
-use super::proxy::rpc::{self, message::Payload, ExecReq, ExecResp};
+use super::proxy::rpc::resp_step::Step;
+use super::proxy::rpc::{self, ExecReq, ExecResp, ProgramResp, RespStep, RowValue};
 
 pin_project_lite::pin_project! {
     pub struct StreamRequestHandler<S> {
@@ -47,26 +49,22 @@ impl<S> StreamRequestHandler<S> {
 struct StreamResponseBuilder {
     request_id: u32,
     sender: mpsc::Sender<ExecResp>,
-    current: Option<ExecResp>,
+    current: Option<ProgramResp>,
 }
 
 impl StreamResponseBuilder {
-    fn current(&mut self) -> &mut ExecResp {
-        self.current.get_or_insert_with(|| ExecResp {
-            messages: Vec::new(),
-            request_id: self.request_id,
-        })
+    fn current(&mut self) -> &mut ProgramResp {
+        self.current
+            .get_or_insert_with(|| ProgramResp { steps: Vec::new() })
     }
 
-    fn push(&mut self, payload: Payload) -> Result<(), QueryResultBuilderError> {
-        const MAX_RESPONSE_MESSAGES: usize = 10;
+    fn push(&mut self, step: Step) -> Result<(), QueryResultBuilderError> {
+        const MAX_RESPONSE_STEPS: usize = 10;
 
         let current = self.current();
-        current.messages.push(Message {
-            payload: Some(payload),
-        });
+        current.steps.push(RespStep { step: Some(step) });
 
-        if current.messages.len() > MAX_RESPONSE_MESSAGES {
+        if current.steps.len() > MAX_RESPONSE_STEPS {
             self.flush()?;
         }
 
@@ -75,8 +73,12 @@ impl StreamResponseBuilder {
 
     fn flush(&mut self) -> Result<(), QueryResultBuilderError> {
         if let Some(current) = self.current.take() {
+            let resp = ExecResp {
+                request_id: self.request_id,
+                response: Some(exec_resp::Response::ProgramResp(current)),
+            };
             self.sender
-                .blocking_send(current)
+                .blocking_send(resp)
                 .map_err(|_| QueryResultBuilderError::Internal(anyhow::anyhow!("stream closed")))?;
         }
 
@@ -88,12 +90,12 @@ impl QueryResultBuilder for StreamResponseBuilder {
     type Ret = ();
 
     fn init(&mut self, _config: &QueryBuilderConfig) -> Result<(), QueryResultBuilderError> {
-        self.push(Payload::Init(rpc::Init {}))?;
+        self.push(Step::Init(rpc::Init {}))?;
         Ok(())
     }
 
     fn begin_step(&mut self) -> Result<(), QueryResultBuilderError> {
-        self.push(Payload::BeginStep(rpc::BeginStep {}))?;
+        self.push(Step::BeginStep(rpc::BeginStep {}))?;
         Ok(())
     }
 
@@ -102,7 +104,7 @@ impl QueryResultBuilder for StreamResponseBuilder {
         affected_row_count: u64,
         last_insert_rowid: Option<i64>,
     ) -> Result<(), QueryResultBuilderError> {
-        self.push(Payload::FinishStep(rpc::FinishStep {
+        self.push(Step::FinishStep(rpc::FinishStep {
             affected_row_count,
             last_insert_rowid,
         }))?;
@@ -110,7 +112,7 @@ impl QueryResultBuilder for StreamResponseBuilder {
     }
 
     fn step_error(&mut self, error: crate::error::Error) -> Result<(), QueryResultBuilderError> {
-        self.push(Payload::StepError(rpc::StepError {
+        self.push(Step::StepError(rpc::StepError {
             error: Some(error.into()),
         }))?;
         Ok(())
@@ -120,7 +122,7 @@ impl QueryResultBuilder for StreamResponseBuilder {
         &mut self,
         cols: impl IntoIterator<Item = impl Into<Column<'a>>>,
     ) -> Result<(), QueryResultBuilderError> {
-        self.push(Payload::ColsDescription(rpc::ColsDescription {
+        self.push(Step::ColsDescription(rpc::ColsDescription {
             columns: cols
                 .into_iter()
                 .map(Into::into)
@@ -134,34 +136,29 @@ impl QueryResultBuilder for StreamResponseBuilder {
     }
 
     fn begin_rows(&mut self) -> Result<(), QueryResultBuilderError> {
-        self.push(Payload::BeginRows(rpc::BeginRows {}))?;
+        self.push(Step::BeginRows(rpc::BeginRows {}))?;
         Ok(())
     }
 
     fn begin_row(&mut self) -> Result<(), QueryResultBuilderError> {
-        self.push(Payload::BeginRow(rpc::BeginRow {}))?;
+        self.push(Step::BeginRow(rpc::BeginRow {}))?;
         Ok(())
     }
 
     fn add_row_value(&mut self, v: ValueRef) -> Result<(), QueryResultBuilderError> {
-        let data = bincode::serialize(
-            &crate::query::Value::try_from(v).map_err(QueryResultBuilderError::from_any)?,
-        )
-        .map_err(QueryResultBuilderError::from_any)?;
-
-        let val = Some(rpc::Value { data });
-
-        self.push(Payload::AddRowValue(rpc::AddRowValue { val }))?;
+        self.push(Step::AddRowValue(rpc::AddRowValue {
+            val: Some(v.into()),
+        }))?;
         Ok(())
     }
 
     fn finish_row(&mut self) -> Result<(), QueryResultBuilderError> {
-        self.push(Payload::FinishRow(rpc::FinishRow {}))?;
+        self.push(Step::FinishRow(rpc::FinishRow {}))?;
         Ok(())
     }
 
     fn finish_rows(&mut self) -> Result<(), QueryResultBuilderError> {
-        self.push(Payload::FinishRows(rpc::FinishRows {}))?;
+        self.push(Step::FinishRows(rpc::FinishRows {}))?;
         Ok(())
     }
 
@@ -170,7 +167,7 @@ impl QueryResultBuilder for StreamResponseBuilder {
         last_frame_no: Option<FrameNo>,
         state: TxnStatus,
     ) -> Result<(), QueryResultBuilderError> {
-        self.push(Payload::Finish(rpc::Finish {
+        self.push(Step::Finish(rpc::Finish {
             last_frame_no,
             state: rpc::State::from(state).into(),
         }))?;
@@ -178,8 +175,22 @@ impl QueryResultBuilder for StreamResponseBuilder {
         Ok(())
     }
 
-    fn into_ret(self) -> Self::Ret {
-        ()
+    fn into_ret(self) -> Self::Ret { }
+}
+
+impl From<ValueRef<'_>> for RowValue {
+    fn from(value: ValueRef<'_>) -> Self {
+        use rpc::row_value::Value;
+
+        let value = Some(match value {
+            ValueRef::Null => Value::Null(true),
+            ValueRef::Integer(i) => Value::Integer(i),
+            ValueRef::Real(x) => Value::Real(x),
+            ValueRef::Text(s) => Value::Text(String::from_utf8(s.to_vec()).unwrap()),
+            ValueRef::Blob(b) => Value::Blob(b.to_vec()),
+        });
+
+        RowValue { value }
     }
 }
 
@@ -203,14 +214,14 @@ where
                 match ready!(this.request_stream.poll_next(cx)) {
                     Some(Err(e)) => {
                         *this.state = State::Fused;
-                        return Poll::Ready(Some(Err(e)));
+                        Poll::Ready(Some(Err(e)))
                     }
                     Some(Ok(req)) => {
                         let request_id = req.request_id;
                         match req.request {
                             Some(Request::Execute(pgm)) => {
                                 let Ok(pgm) =
-                                    crate::connection::program::Program::try_from(pgm) else {
+                                    crate::connection::program::Program::try_from(pgm.pgm.unwrap()) else {
                                         *this.state = State::Fused;
                                         return Poll::Ready(Some(Err(Status::new(Code::InvalidArgument, "invalid program"))));
                                     };
@@ -236,10 +247,9 @@ where
                                                 if let Err(e) = res {
                                                     yield ExecResp {
                                                         request_id,
-                                                        messages: vec![rpc::Message { payload: Some(Payload::Error(e.into()))}],
+                                                        response: Some(exec_resp::Response::Error(e.into()))
                                                     }
                                                 }
-                                                // todo check result?
                                                 break
                                             }
                                             msg = receiver.recv() => {
@@ -250,7 +260,6 @@ where
                                         }
                                     }
                                 };
-                                dbg!();
                                 *this.state = State::Execute(Box::pin(s));
                             }
                             Some(Request::Describe(_)) => todo!(),
@@ -264,7 +273,7 @@ where
                         }
                         // we have placed the request, poll immediately
                         cx.waker().wake_by_ref();
-                        return Poll::Pending;
+                        Poll::Pending
                     }
                     None => {
                         // this would easier if tokio_stream re-exported combinators
@@ -275,17 +284,15 @@ where
             }
             State::Fused => Poll::Ready(None),
             State::Execute(stream) => {
-                dbg!();
                 let resp = ready!(stream.as_mut().poll_next(cx));
                 match resp {
-                    Some(resp) => return Poll::Ready(Some(Ok(dbg!(resp)))),
+                    Some(resp) => Poll::Ready(Some(Ok(resp))),
                     None => {
-                        dbg!();
                         // finished processing this query. Wake up immediately to prepare for the
                         // next
                         *this.state = State::Idle;
                         cx.waker().wake_by_ref();
-                        return Poll::Pending;
+                        Poll::Pending
                     }
                 }
             }
