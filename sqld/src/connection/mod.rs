@@ -8,7 +8,7 @@ use tokio::{sync::Semaphore, time::timeout};
 use crate::auth::Authenticated;
 use crate::error::Error;
 use crate::query::{Params, Query};
-use crate::query_analysis::{Statement, TxnStatus};
+use crate::query_analysis::Statement;
 use crate::query_result_builder::{IgnoreResult, QueryResultBuilder};
 use crate::replication::FrameNo;
 use crate::Result;
@@ -32,7 +32,7 @@ pub trait Connection: Send + Sync + 'static {
         auth: Authenticated,
         response_builder: B,
         replication_index: Option<FrameNo>,
-    ) -> Result<(B, TxnStatus)>;
+    ) -> Result<B>;
 
     /// Execute all the queries in the batch sequentially.
     /// If an query in the batch fails, the remaining queries are ignores, and the batch current
@@ -43,7 +43,7 @@ pub trait Connection: Send + Sync + 'static {
         auth: Authenticated,
         result_builder: B,
         replication_index: Option<FrameNo>,
-    ) -> Result<(B, TxnStatus)> {
+    ) -> Result<B> {
         let batch_len = batch.len();
         let mut steps = make_batch_program(batch);
 
@@ -67,11 +67,11 @@ pub trait Connection: Send + Sync + 'static {
 
         // ignore the rollback result
         let builder = result_builder.take(batch_len);
-        let (builder, state) = self
+        let builder = self
             .execute_program(pgm, auth, builder, replication_index)
             .await?;
 
-        Ok((builder.into_inner(), state))
+        Ok(builder.into_inner())
     }
 
     /// Execute all the queries in the batch sequentially.
@@ -82,7 +82,7 @@ pub trait Connection: Send + Sync + 'static {
         auth: Authenticated,
         result_builder: B,
         replication_index: Option<FrameNo>,
-    ) -> Result<(B, TxnStatus)> {
+    ) -> Result<B> {
         let steps = make_batch_program(batch);
         let pgm = Program::new(steps);
         self.execute_program(pgm, auth, result_builder, replication_index)
@@ -312,7 +312,7 @@ impl<DB: Connection> Connection for TrackedConnection<DB> {
         auth: Authenticated,
         builder: B,
         replication_index: Option<FrameNo>,
-    ) -> crate::Result<(B, TxnStatus)> {
+    ) -> crate::Result<B> {
         self.atime.store(now_millis(), Ordering::Relaxed);
         self.inner
             .execute_program(pgm, auth, builder, replication_index)
@@ -367,7 +367,7 @@ mod test {
             _auth: Authenticated,
             _builder: B,
             _replication_index: Option<FrameNo>,
-        ) -> crate::Result<(B, TxnStatus)> {
+        ) -> crate::Result<B> {
             unreachable!()
         }
 

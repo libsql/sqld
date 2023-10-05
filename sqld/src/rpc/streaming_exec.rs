@@ -75,7 +75,8 @@ impl StreamResponseBuilder {
 
     fn flush(&mut self) -> Result<(), QueryResultBuilderError> {
         if let Some(current) = self.current.take() {
-            self.sender.blocking_send(current)
+            self.sender
+                .blocking_send(current)
                 .map_err(|_| QueryResultBuilderError::Internal(anyhow::anyhow!("stream closed")))?;
         }
 
@@ -255,7 +256,10 @@ where
                             Some(Request::Describe(_)) => todo!(),
                             None => {
                                 *this.state = State::Fused;
-                                return Poll::Ready(Some(Err(Status::new(Code::InvalidArgument, "invalid ExecReq: missing request"))));
+                                return Poll::Ready(Some(Err(Status::new(
+                                    Code::InvalidArgument,
+                                    "invalid ExecReq: missing request",
+                                ))));
                             }
                         }
                         // we have placed the request, poll immediately

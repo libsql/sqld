@@ -184,7 +184,7 @@ impl WriteProxyConnection {
         status: &mut TxnStatus,
         auth: Authenticated,
         builder: B,
-    ) -> Result<(B, TxnStatus)> {
+    ) -> Result<B> {
         self.stats.inc_write_requests_delegated();
         *status = TxnStatus::Invalid;
         let res = self
@@ -208,7 +208,7 @@ impl WriteProxyConnection {
             self.update_last_write_frame_no(current_frame_no);
         }
 
-        Ok((builder, new_status))
+        Ok(builder)
     }
 
     fn update_last_write_frame_no(&self, new_frame_no: FrameNo) {
@@ -339,8 +339,8 @@ impl RemoteConnection {
                 }
                 Err(e) => {
                     tracing::error!("received error from connection stream: {e}");
-                    return Err(Error::StreamDisconnect)
-                },
+                    return Err(Error::StreamDisconnect);
+                }
             }
         }
 
@@ -356,26 +356,30 @@ impl Connection for WriteProxyConnection {
         auth: Authenticated,
         builder: B,
         replication_index: Option<FrameNo>,
-    ) -> Result<(B, TxnStatus)> {
+    ) -> Result<B> {
         let mut state = self.state.lock().await;
 
         // This is a fresh namespace, and it is not replicated yet, proxy the first request.
         if self.applied_frame_no_receiver.borrow().is_none() {
             self.execute_remote(pgm, &mut state, auth, builder).await
         } else if *state == TxnStatus::Init && pgm.is_read_only() {
+            // set the state to invalid before doing anything, and set it to a valid state after.
+            *state = TxnStatus::Invalid;
             self.wait_replication_sync(replication_index).await?;
             // We know that this program won't perform any writes. We attempt to run it on the
             // replica. If it leaves an open transaction, then this program is an interactive
             // transaction, so we rollback the replica, and execute again on the primary.
-            let (builder, new_state) = self
+            let builder = self
                 .read_conn
                 .execute_program(pgm.clone(), auth.clone(), builder, replication_index)
                 .await?;
+            let new_state = self.read_conn.txn_status()?;
             if new_state != TxnStatus::Init {
                 self.read_conn.rollback(auth.clone()).await?;
                 self.execute_remote(pgm, &mut state, auth, builder).await
             } else {
-                Ok((builder, new_state))
+                *state = new_state;
+                Ok(builder)
             }
         } else {
             self.execute_remote(pgm, &mut state, auth, builder).await
@@ -433,7 +437,10 @@ pub mod test {
     use rand::Fill;
 
     use super::*;
-    use crate::{query_result_builder::test::test_driver, rpc::proxy::rpc::{ExecuteResults, query_result::RowResult}};
+    use crate::{
+        query_result_builder::test::test_driver,
+        rpc::proxy::rpc::{query_result::RowResult, ExecuteResults},
+    };
 
     /// generate an arbitraty rpc value. see build.rs for usage.
     pub fn arbitrary_rpc_value(u: &mut Unstructured) -> arbitrary::Result<Vec<u8>> {
@@ -497,12 +504,15 @@ pub mod test {
     /// In this test, we generate random ExecuteResults, and ensures that the `execute_results_to_builder` drives the builder FSM correctly.
     #[test]
     fn test_execute_results_to_builder() {
-        test_driver(1000, |b| -> std::result::Result<crate::query_result_builder::test::FsmQueryBuilder, Error> {
-            let mut data = [0; 10_000];
-            data.try_fill(&mut rand::thread_rng()).unwrap();
-            let mut un = Unstructured::new(&data);
-            let res = ExecuteResults::arbitrary(&mut un).unwrap();
-            execute_results_to_builder(res, b, &QueryBuilderConfig::default())
-        });
+        test_driver(
+            1000,
+            |b| -> std::result::Result<crate::query_result_builder::test::FsmQueryBuilder, Error> {
+                let mut data = [0; 10_000];
+                data.try_fill(&mut rand::thread_rng()).unwrap();
+                let mut un = Unstructured::new(&data);
+                let res = ExecuteResults::arbitrary(&mut un).unwrap();
+                execute_results_to_builder(res, b, &QueryBuilderConfig::default())
+            },
+        );
     }
 }

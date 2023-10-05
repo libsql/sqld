@@ -293,7 +293,8 @@ impl ProxyService {
 }
 
 #[derive(Debug, Default)]
-struct ExecuteResultBuilder {
+struct ExecuteResultsBuilder {
+    output: Option<ExecuteResults>,
     results: Vec<QueryResult>,
     current_rows: Vec<Row>,
     current_row: rpc::Row,
@@ -304,8 +305,8 @@ struct ExecuteResultBuilder {
     current_step_size: u64,
 }
 
-impl QueryResultBuilder for ExecuteResultBuilder {
-    type Ret = Vec<QueryResult>;
+impl QueryResultBuilder for ExecuteResultsBuilder {
+    type Ret = ExecuteResults;
 
     fn init(&mut self, config: &QueryBuilderConfig) -> Result<(), QueryResultBuilderError> {
         *self = Self {
@@ -437,14 +438,19 @@ impl QueryResultBuilder for ExecuteResultBuilder {
 
     fn finish(
         &mut self,
-        _last_frame_no: Option<FrameNo>,
-        _state: TxnStatus,
+        last_frame_no: Option<FrameNo>,
+        txn_status: TxnStatus,
     ) -> Result<(), QueryResultBuilderError> {
+        self.output = Some(ExecuteResults {
+            results: std::mem::take(&mut self.results),
+            state: rpc::State::from(txn_status).into(),
+            current_frame_no: last_frame_no,
+        });
         Ok(())
     }
 
     fn into_ret(self) -> Self::Ret {
-        self.results
+        self.output.unwrap()
     }
 }
 
@@ -516,13 +522,9 @@ impl Proxy for ProxyService {
             .map_err(|e| tonic::Status::new(tonic::Code::InvalidArgument, e.to_string()))?;
         let client_id = Uuid::from_str(&req.client_id).unwrap();
 
-        let (connection_maker, new_frame_notifier) = self
+        let connection_maker = self
             .namespaces
-            .with(namespace, |ns| {
-                let connection_maker = ns.db.connection_maker();
-                let notifier = ns.db.logger.new_frame_notifier.subscribe();
-                (connection_maker, notifier)
-            })
+            .with(namespace, |ns| ns.db.connection_maker())
             .await
             .map_err(|e| {
                 if let crate::error::Error::NamespaceDoesntExist(_) = e {
@@ -551,19 +553,14 @@ impl Proxy for ProxyService {
 
         tracing::debug!("executing request for {client_id}");
 
-        let builder = ExecuteResultBuilder::default();
-        let (results, state) = db
+        let builder = ExecuteResultsBuilder::default();
+        let builder = db
             .execute_program(pgm, auth, builder, None)
             .await
             // TODO: this is no necessarily a permission denied error!
             .map_err(|e| tonic::Status::new(tonic::Code::PermissionDenied, e.to_string()))?;
 
-        let current_frame_no = *new_frame_notifier.borrow();
-        Ok(tonic::Response::new(ExecuteResults {
-            current_frame_no,
-            results: results.into_ret(),
-            state: rpc::State::from(state).into(),
-        }))
+        Ok(tonic::Response::new(builder.into_ret()))
     }
 
     //TODO: also handle cleanup on peer disconnect
