@@ -3,6 +3,7 @@ use std::sync::Arc;
 use std::task::{ready, Context, Poll};
 
 use futures_core::Stream;
+use prost::Message;
 use rusqlite::types::ValueRef;
 use tokio::sync::mpsc;
 use tonic::{Code, Status};
@@ -50,6 +51,7 @@ struct StreamResponseBuilder {
     request_id: u32,
     sender: mpsc::Sender<ExecResp>,
     current: Option<ProgramResp>,
+    current_size: usize,
 }
 
 impl StreamResponseBuilder {
@@ -59,12 +61,15 @@ impl StreamResponseBuilder {
     }
 
     fn push(&mut self, step: Step) -> Result<(), QueryResultBuilderError> {
-        const MAX_RESPONSE_STEPS: usize = 10;
+        const MAX_RESPONSE_SIZE: usize = bytesize::ByteSize::mb(1).as_u64() as usize;
 
         let current = self.current();
-        current.steps.push(RespStep { step: Some(step) });
+        let step = RespStep { step: Some(step) };
+        let size = step.encoded_len();
+        current.steps.push(step);
+        self.current_size += size;
 
-        if current.steps.len() > MAX_RESPONSE_STEPS {
+        if self.current_size >= MAX_RESPONSE_SIZE {
             self.flush()?;
         }
 
@@ -77,6 +82,7 @@ impl StreamResponseBuilder {
                 request_id: self.request_id,
                 response: Some(exec_resp::Response::ProgramResp(current)),
             };
+            self.current_size = 0;
             self.sender
                 .blocking_send(resp)
                 .map_err(|_| QueryResultBuilderError::Internal(anyhow::anyhow!("stream closed")))?;
@@ -235,6 +241,7 @@ where
                                     request_id,
                                     sender,
                                     current: None,
+                                    current_size: 0,
                                 };
                                 let mut fut = conn.execute_program(pgm, authenticated, builder, None);
                                 loop {

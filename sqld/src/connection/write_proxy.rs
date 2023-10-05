@@ -108,7 +108,6 @@ impl MakeConnection for MakeWriteProxyConn {
     }
 }
 
-#[derive(Debug)]
 pub struct WriteProxyConnection {
     /// Lazily initialized read connection
     read_conn: LibSqlConnection<TransparentMethods>,
@@ -196,8 +195,9 @@ impl WriteProxyConnection {
         let (builder, new_status, new_frame_no) = match res {
             Ok(res) => res,
             Err(e @ (Error::PrimaryStreamDisconnect | Error::PrimaryStreamMisuse)) => {
-                // drop the connection
+                // drop the connection, and reset the state.
                 self.remote_conn.lock().await.take();
+                *status = TxnStatus::Init;
                 return Err(e);
             }
             Err(e) => return Err(e),
