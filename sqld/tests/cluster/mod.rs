@@ -2,7 +2,8 @@
 
 use super::common;
 
-use libsql::{hrana::HranaError, Database, Value};
+use insta::assert_snapshot;
+use libsql::{Database, Value};
 use serde_json::json;
 use sqld::config::{AdminApiConfig, RpcClientConfig, RpcServerConfig, UserApiConfig};
 use tempfile::tempdir;
@@ -91,14 +92,13 @@ fn proxy_write() {
         conn.execute("insert into test values (12)", ()).await?;
 
         // assert that the primary got the write
-        let db =
-            Database::open_remote_with_connector("http://primary:8080", "", TurmoilConnector)?;
+        let db = Database::open_remote_with_connector("http://primary:8080", "", TurmoilConnector)?;
         let conn = db.connect()?;
         let mut rows = conn.query("select count(*) from test", ()).await?;
 
         assert!(matches!(
-                rows.next().unwrap().unwrap().get_value(0).unwrap(),
-                Value::Integer(1)
+            rows.next().unwrap().unwrap().get_value(0).unwrap(),
+            Value::Integer(1)
         ));
 
         Ok(())
@@ -123,8 +123,8 @@ fn replica_read_write() {
         let mut rows = conn.query("select count(*) from test", ()).await?;
 
         assert!(matches!(
-                rows.next().unwrap().unwrap().get_value(0).unwrap(),
-                Value::Integer(1)
+            rows.next().unwrap().unwrap().get_value(0).unwrap(),
+            Value::Integer(1)
         ));
 
         Ok(())
@@ -139,8 +139,7 @@ fn sync_many_replica() {
     let mut sim = Builder::new().build();
     make_cluster(&mut sim, NUM_REPLICA, true);
     sim.client("client", async {
-        let db =
-            Database::open_remote_with_connector("http://primary:8080", "", TurmoilConnector)?;
+        let db = Database::open_remote_with_connector("http://primary:8080", "", TurmoilConnector)?;
         let conn = db.connect()?;
 
         conn.execute("create table test (x)", ()).await?;
@@ -148,20 +147,23 @@ fn sync_many_replica() {
 
         async fn get_frame_no(url: &str) -> Option<u64> {
             let client = Client::new();
-            Some(client
-                .get(url)
-                .await
-                .unwrap()
-                .json::<serde_json::Value>()
-                .await
-                .unwrap()
-                .get("replication_index")?
-                .as_u64()
-                .unwrap())
+            Some(
+                client
+                    .get(url)
+                    .await
+                    .unwrap()
+                    .json::<serde_json::Value>()
+                    .await
+                    .unwrap()
+                    .get("replication_index")?
+                    .as_u64()
+                    .unwrap(),
+            )
         }
 
         let primary_fno = loop {
-            if let Some(fno) = get_frame_no("http://primary:9090/v1/namespaces/default/stats").await {
+            if let Some(fno) = get_frame_no("http://primary:9090/v1/namespaces/default/stats").await
+            {
                 break fno;
             }
         };
@@ -193,8 +195,8 @@ fn sync_many_replica() {
             let conn = db.connect()?;
             let mut rows = conn.query("select count(*) from test", ()).await?;
             assert!(matches!(
-                    rows.next().unwrap().unwrap().get_value(0).unwrap(),
-                    Value::Integer(1)
+                rows.next().unwrap().unwrap().get_value(0).unwrap(),
+                Value::Integer(1)
             ));
         }
 
@@ -210,16 +212,14 @@ fn create_namespace() {
     make_cluster(&mut sim, 0, false);
 
     sim.client("client", async {
-        let db = Database::open_remote_with_connector(
-            "http://foo.primary:8080",
-            "",
-            TurmoilConnector,
-        )?;
+        let db =
+            Database::open_remote_with_connector("http://foo.primary:8080", "", TurmoilConnector)?;
         let conn = db.connect()?;
 
-        let Err(e) = conn.execute("create table test (x)", ()).await else { panic!() };
-        let libsql::Error::Hrana(HranaError::Api(msg)) = e else { panic!() };
-        assert_eq!(msg, "{\"error\":\"Namespace `foo` doesn't exist\"}");
+        let Err(e) = conn.execute("create table test (x)", ()).await else {
+            panic!()
+        };
+        assert_snapshot!(e.to_string());
 
         let client = Client::new();
         let resp = client
@@ -233,8 +233,8 @@ fn create_namespace() {
         conn.execute("create table test (x)", ()).await.unwrap();
         let mut rows = conn.query("select count(*) from test", ()).await.unwrap();
         assert!(matches!(
-                rows.next().unwrap().unwrap().get_value(0).unwrap(),
-                Value::Integer(0)
+            rows.next().unwrap().unwrap().get_value(0).unwrap(),
+            Value::Integer(0)
         ));
 
         Ok(())

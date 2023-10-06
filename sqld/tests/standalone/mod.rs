@@ -37,8 +37,7 @@ fn basic_query() {
     sim.host("primary", make_standalone_server);
 
     sim.client("test", async {
-        let db =
-            Database::open_remote_with_connector("http://primary:8080", "", TurmoilConnector)?;
+        let db = Database::open_remote_with_connector("http://primary:8080", "", TurmoilConnector)?;
         let conn = db.connect()?;
 
         conn.execute("create table test (x)", ()).await?;
@@ -47,8 +46,8 @@ fn basic_query() {
         let mut rows = conn.query("select count(*) from test", ()).await?;
 
         assert!(matches!(
-                rows.next().unwrap().unwrap().get_value(0).unwrap(),
-                libsql::Value::Integer(1)
+            rows.next().unwrap().unwrap().get_value(0).unwrap(),
+            libsql::Value::Integer(1)
         ));
 
         Ok(())
@@ -67,11 +66,8 @@ fn primary_serializability() {
     sim.client("writer", {
         let notify = notify.clone();
         async move {
-            let db = Database::open_remote_with_connector(
-                "http://primary:8080",
-                "",
-                TurmoilConnector,
-            )?;
+            let db =
+                Database::open_remote_with_connector("http://primary:8080", "", TurmoilConnector)?;
             let conn = db.connect()?;
             conn.execute("create table test (x)", ()).await?;
             conn.execute("insert into test values (12)", ()).await?;
@@ -84,11 +80,8 @@ fn primary_serializability() {
 
     sim.client("reader", {
         async move {
-            let db = Database::open_remote_with_connector(
-                "http://primary:8080",
-                "",
-                TurmoilConnector,
-            )?;
+            let db =
+                Database::open_remote_with_connector("http://primary:8080", "", TurmoilConnector)?;
             let conn = db.connect()?;
 
             notify.notified().await;
@@ -96,8 +89,8 @@ fn primary_serializability() {
             let mut rows = conn.query("select count(*) from test", ()).await?;
 
             assert!(matches!(
-                    rows.next().unwrap().unwrap().get_value(0).unwrap(),
-                    Value::Integer(1)
+                rows.next().unwrap().unwrap().get_value(0).unwrap(),
+                Value::Integer(1)
             ));
 
             Ok(())
@@ -118,11 +111,8 @@ fn execute_transaction() {
     sim.client("writer", {
         let notify = notify.clone();
         async move {
-            let db = Database::open_remote_with_connector(
-                "http://primary:8080",
-                "",
-                TurmoilConnector,
-            )?;
+            let db =
+                Database::open_remote_with_connector("http://primary:8080", "", TurmoilConnector)?;
             let conn = db.connect()?;
 
             conn.execute("create table test (x)", ()).await?;
@@ -135,8 +125,8 @@ fn execute_transaction() {
             // we can read our write:
             let mut rows = txn.query("select count(*) from test", ()).await?;
             assert!(matches!(
-                    rows.next().unwrap().unwrap().get_value(0).unwrap(),
-                    Value::Integer(1)
+                rows.next().unwrap().unwrap().get_value(0).unwrap(),
+                Value::Integer(1)
             ));
             txn.commit().await?;
             notify.notify_waiters();
@@ -147,19 +137,16 @@ fn execute_transaction() {
 
     sim.client("reader", {
         async move {
-            let db = Database::open_remote_with_connector(
-                "http://primary:8080",
-                "",
-                TurmoilConnector,
-            )?;
+            let db =
+                Database::open_remote_with_connector("http://primary:8080", "", TurmoilConnector)?;
             let conn = db.connect()?;
 
             notify.notified().await;
             // at this point we should not see the written row.
             let mut rows = conn.query("select count(*) from test", ()).await?;
             assert!(matches!(
-                    rows.next().unwrap().unwrap().get_value(0).unwrap(),
-                    Value::Integer(0)
+                rows.next().unwrap().unwrap().get_value(0).unwrap(),
+                Value::Integer(0)
             ));
             notify.notify_waiters();
 
@@ -172,8 +159,8 @@ fn execute_transaction() {
             // now we can read the inserted row
             let mut rows = conn.query("select count(*) from test", ()).await?;
             assert!(matches!(
-                    rows.next().unwrap().unwrap().get_value(0).unwrap(),
-                    Value::Integer(1)
+                rows.next().unwrap().unwrap().get_value(0).unwrap(),
+                Value::Integer(1)
             ));
             notify.notify_waiters();
 

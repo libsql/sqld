@@ -1,6 +1,7 @@
 #![cfg(feature = "sim-tests")]
+#![allow(clippy::disallowed_names)]
 
 mod cluster;
-mod standalone;
-mod namespaces;
 mod common;
+mod namespaces;
+mod standalone;
