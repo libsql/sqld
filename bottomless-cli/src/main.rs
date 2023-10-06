@@ -125,7 +125,8 @@ async fn run() -> Result<()> {
             }
         }
     };
-    let database = database + "/dbs/" + namespace.strip_prefix("ns-").unwrap() + "/data";
+    let database_dir = database + "/dbs/" + namespace.strip_prefix("ns-").unwrap();
+    let database = database_dir.clone() + "/data";
     tracing::info!("Database: '{}' (namespace: {})", database, namespace);
 
     let mut client = Replicator::new(database.clone()).await?;
@@ -149,7 +150,7 @@ async fn run() -> Result<()> {
             generation,
             utc_time,
         } => {
-            tokio::fs::create_dir_all(&database).await?;
+            tokio::fs::create_dir_all(&database_dir).await?;
             client.restore(generation, utc_time).await?;
         }
         Commands::Rm {
