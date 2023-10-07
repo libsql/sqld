@@ -1,8 +1,10 @@
 use std::collections::HashMap;
+use std::pin::Pin;
 use std::str::FromStr;
 use std::sync::Arc;
 
 use async_lock::{RwLock, RwLockUpgradableReadGuard};
+use futures_core::Stream;
 use rusqlite::types::ValueRef;
 use uuid::Uuid;
 
@@ -15,14 +17,14 @@ use crate::query_result_builder::{
     Column, QueryBuilderConfig, QueryResultBuilder, QueryResultBuilderError,
 };
 use crate::replication::FrameNo;
+use crate::rpc::streaming_exec::make_proxy_stream;
 
 use self::rpc::proxy_server::Proxy;
 use self::rpc::query_result::RowResult;
 use self::rpc::{
     describe_result, Ack, DescribeRequest, DescribeResult, Description, DisconnectMessage, ExecReq,
-    ExecuteResults, QueryResult, ResultRows, Row,
+    ExecuteResults, QueryResult, ResultRows, Row, ExecResp,
 };
-use super::streaming_exec::StreamRequestHandler;
 use super::NAMESPACE_DOESNT_EXIST;
 
 pub mod rpc {
@@ -467,20 +469,18 @@ pub async fn garbage_collect(clients: &mut HashMap<Uuid, Arc<PrimaryConnection>>
 
 #[tonic::async_trait]
 impl Proxy for ProxyService {
-    type StreamExecStream = StreamRequestHandler<tonic::Streaming<ExecReq>>;
+    type StreamExecStream = Pin<Box<dyn Stream<Item = Result<ExecResp, tonic::Status>> + Send>>;
 
     async fn stream_exec(
         &self,
         req: tonic::Request<tonic::Streaming<ExecReq>>,
     ) -> Result<tonic::Response<Self::StreamExecStream>, tonic::Status> {
-        dbg!();
-        let authenticated = if let Some(auth) = &self.auth {
+        let auth= if let Some(auth) = &self.auth {
             auth.authenticate_grpc(&req, self.disable_namespaces)?
         } else {
             Authenticated::from_proxy_grpc_request(&req, self.disable_namespaces)?
         };
 
-        dbg!();
         let namespace = super::extract_namespace(self.disable_namespaces, &req)?;
         let (connection_maker, _new_frame_notifier) = self
             .namespaces
@@ -498,13 +498,11 @@ impl Proxy for ProxyService {
                 }
             })?;
 
-        dbg!();
-        let connection = connection_maker.create().await.unwrap();
+        let conn = connection_maker.create().await.unwrap();
 
-        dbg!();
-        let handler = StreamRequestHandler::new(req.into_inner(), connection, authenticated);
+        let stream = make_proxy_stream(conn, auth, req.into_inner());
 
-        Ok(tonic::Response::new(handler))
+        Ok(tonic::Response::new(Box::pin(stream)))
     }
 
     async fn execute(

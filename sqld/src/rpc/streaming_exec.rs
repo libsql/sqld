@@ -1,11 +1,12 @@
-use std::pin::Pin;
 use std::sync::Arc;
-use std::task::{ready, Context, Poll};
 
 use futures_core::Stream;
+use futures_option::OptionExt;
 use prost::Message;
 use rusqlite::types::ValueRef;
+use tokio::pin;
 use tokio::sync::mpsc;
+use tokio_stream::StreamExt;
 use tonic::{Code, Status};
 
 use crate::auth::Authenticated;
@@ -17,32 +18,76 @@ use crate::query_result_builder::{
 };
 use crate::replication::FrameNo;
 use crate::rpc::proxy::rpc::exec_req::Request;
-use crate::rpc::proxy::rpc::exec_resp;
+use crate::rpc::proxy::rpc::exec_resp::{self, Response};
 
 use super::proxy::rpc::resp_step::Step;
 use super::proxy::rpc::{self, ExecReq, ExecResp, ProgramResp, RespStep, RowValue};
 
-pin_project_lite::pin_project! {
-    pub struct StreamRequestHandler<S> {
-        #[pin]
-        request_stream: S,
-        connection: Arc<PrimaryConnection>,
-        state: State,
-        authenticated: Authenticated,
-    }
-}
+pub fn make_proxy_stream<S>(conn: PrimaryConnection, auth: Authenticated, request_stream: S) -> impl Stream<Item = Result<ExecResp, Status>> 
+where
+    S: Stream<Item = Result<ExecReq, Status>>,
+{
+    async_stream::stream! {
+        let mut current_request_fut = None;
+        let (snd, mut recv) = mpsc::channel(1);
+        let conn = Arc::new(conn);
+        pin!(request_stream);
 
-impl<S> StreamRequestHandler<S> {
-    pub fn new(
-        request_stream: S,
-        connection: PrimaryConnection,
-        authenticated: Authenticated,
-    ) -> Self {
-        Self {
-            request_stream,
-            connection: connection.into(),
-            state: State::Idle,
-            authenticated,
+        loop {
+            tokio::select! {
+                biased;
+                Some(maybe_req) = request_stream.next() => {
+                    match maybe_req {
+                        Err(e) => {
+                            tracing::error!("stream error: {e}");
+                            break
+                        }
+                        Ok(req) => {
+                            let request_id = req.request_id;
+                            match req.request {
+                                Some(Request::Execute(pgm)) => {
+                                    let Ok(pgm) =
+                                        crate::connection::program::Program::try_from(pgm.pgm.unwrap()) else {
+                                            yield Err(Status::new(Code::InvalidArgument, "invalid program"));
+                                            break
+                                        };
+                                    let conn = conn.clone();
+                                    let auth = auth.clone();
+                                    let sender = snd.clone();
+
+                                    let fut = async move {
+                                        let builder = StreamResponseBuilder {
+                                            request_id,
+                                            sender,
+                                            current: None,
+                                            current_size: 0,
+                                        };
+
+                                        let ret = conn.execute_program(pgm, auth, builder, None).await;
+                                        (ret, request_id)
+                                    };
+
+                                    current_request_fut.replace(Box::pin(fut));
+                                }
+                                Some(Request::Describe(_)) => todo!(),
+                                None => {
+                                    yield Err(Status::new(Code::InvalidArgument, "invalid request"));
+                                    break
+                                }
+                            }
+                        }
+                    }
+                },
+                Some(res) = recv.recv() => {
+                    yield Ok(res);
+                },
+                (ret, request_id) = current_request_fut.current(), if current_request_fut.is_some() => {
+                    if let Err(e) = ret {
+                        yield Ok(ExecResp { request_id, response: Some(Response::Error(e.into())) })
+                    }
+                },
+                else => break,
+            }
         }
     }
 }
@@ -197,112 +242,5 @@ impl From<ValueRef<'_>> for RowValue {
         });
 
         RowValue { value }
-    }
-}
-
-enum State {
-    Execute(Pin<Box<dyn Stream<Item = ExecResp> + Send>>),
-    Idle,
-    Fused,
-}
-
-impl<S> Stream for StreamRequestHandler<S>
-where
-    S: Stream<Item = Result<ExecReq, Status>>,
-{
-    type Item = Result<ExecResp, Status>;
-
-    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        let this = self.project();
-
-        // we always poll from the request stream. If a new request arrive, we interupt the current
-        // one, and move to the next.
-        if let Poll::Ready(maybe_req) = this.request_stream.poll_next(cx) {
-            match maybe_req {
-                Some(Err(e)) => {
-                    *this.state = State::Fused;
-                    return Poll::Ready(Some(Err(e)))
-                }
-                Some(Ok(req)) => {
-                    let request_id = req.request_id;
-                    match req.request {
-                        Some(Request::Execute(pgm)) => {
-                            let Ok(pgm) =
-                                crate::connection::program::Program::try_from(pgm.pgm.unwrap()) else {
-                                    *this.state = State::Fused;
-                                    return Poll::Ready(Some(Err(Status::new(Code::InvalidArgument, "invalid program"))));
-                                };
-                            let conn = this.connection.clone();
-                            let authenticated = this.authenticated.clone();
-
-                            let s = async_stream::stream! {
-                                let (sender, mut receiver) = mpsc::channel(1);
-                                let builder = StreamResponseBuilder {
-                                    request_id,
-                                    sender,
-                                    current: None,
-                                    current_size: 0,
-                                };
-                                let mut fut = conn.execute_program(pgm, authenticated, builder, None);
-                                loop {
-                                    tokio::select! {
-                                        res = &mut fut => {
-                                            // drain the receiver
-                                            while let Ok(msg) = receiver.try_recv() {
-                                                yield msg;
-                                            }
-
-                                            if let Err(e) = res {
-                                                yield ExecResp {
-                                                    request_id,
-                                                    response: Some(exec_resp::Response::Error(e.into()))
-                                                }
-                                            }
-                                            break
-                                        }
-                                        msg = receiver.recv() => {
-                                            if let Some(msg) = msg {
-                                                yield msg;
-                                            }
-                                        }
-                                    }
-                                }
-                            };
-                            *this.state = State::Execute(Box::pin(s));
-                        }
-                        Some(Request::Describe(_)) => todo!(),
-                        None => {
-                            *this.state = State::Fused;
-                            return Poll::Ready(Some(Err(Status::new(
-                                            Code::InvalidArgument,
-                                            "invalid ExecReq: missing request",
-                            ))));
-                        }
-                    }
-                }
-                None => {
-                    *this.state = State::Fused;
-                    return Poll::Ready(None)
-                }
-            }
-        }
-
-        match this.state {
-            State::Idle => Poll::Pending,
-            State::Fused => Poll::Ready(None),
-            State::Execute(stream) => {
-                let resp = ready!(stream.as_mut().poll_next(cx));
-                match resp {
-                    Some(resp) => Poll::Ready(Some(Ok(resp))),
-                    None => {
-                        // finished processing this query. Wake up immediately to prepare for the
-                        // next
-                        *this.state = State::Idle;
-                        cx.waker().wake_by_ref();
-                        Poll::Pending
-                    }
-                }
-            }
-        }
     }
 }
