@@ -39,8 +39,20 @@ impl Proxy for ReplicaProxyService {
         &self,
         req: tonic::Request<tonic::Streaming<ExecReq>>,
     ) -> Result<tonic::Response<Self::StreamExecStream>, tonic::Status> {
-        let (meta, ext, stream) = req.into_parts();
-        let mut req = tonic::Request::from_parts(meta, ext, stream.map(|r| r.unwrap())); // TODO: handle mapping error
+        let (meta, ext, mut stream) = req.into_parts();
+        let stream = async_stream::stream! {
+            while let Some(it) = stream.next().await {
+                match it {
+                    Ok(it) => yield it,
+                    Err(e) => {
+                        // close the stream on error
+                        tracing::error!("error proxying stream request: {e}");
+                        break
+                    },
+                }
+            }
+        };
+        let mut req = tonic::Request::from_parts(meta, ext, stream);
         self.do_auth(&mut req)?;
         let mut client = self.client.clone();
         client.stream_exec(req).await

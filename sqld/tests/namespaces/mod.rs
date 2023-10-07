@@ -4,6 +4,7 @@ use std::path::PathBuf;
 
 use crate::common::http::Client;
 use crate::common::net::{init_tracing, TestServer, TurmoilAcceptor, TurmoilConnector};
+use insta::assert_snapshot;
 use libsql::{Database, Value};
 use serde_json::json;
 use sqld::config::{AdminApiConfig, RpcServerConfig, UserApiConfig};
@@ -44,7 +45,8 @@ fn make_primary(sim: &mut Sim, path: PathBuf) {
 #[test]
 fn create_namespace() {
     let mut sim = Builder::new().build();
-    make_cluster(&mut sim, 0, false);
+    let tmp = tempdir().unwrap();
+    make_primary(&mut sim, tmp.path().into());
 
     sim.client("client", async {
         let db =

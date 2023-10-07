@@ -2,9 +2,7 @@
 
 use super::common;
 
-use insta::assert_snapshot;
 use libsql::{Database, Value};
-use serde_json::json;
 use sqld::config::{AdminApiConfig, RpcClientConfig, RpcServerConfig, UserApiConfig};
 use tempfile::tempdir;
 use tokio::{task::JoinSet, time::Duration};
