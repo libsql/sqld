@@ -12,7 +12,6 @@ use tonic::{Code, Status};
 
 use crate::auth::Authenticated;
 use crate::connection::Connection;
-use crate::connection::program::Program;
 use crate::error::Error;
 use crate::query_analysis::TxnStatus;
 use crate::query_result_builder::{
@@ -21,7 +20,7 @@ use crate::query_result_builder::{
 use crate::replication::FrameNo;
 use crate::rpc::proxy::rpc::exec_req::Request;
 use crate::rpc::proxy::rpc::exec_resp::{self, Response};
-use crate::rpc::proxy::rpc::{DescribeResp, StreamDescribeReq, DescribeCol, DescribeParam};
+use crate::rpc::proxy::rpc::{DescribeCol, DescribeParam, DescribeResp, StreamDescribeReq};
 
 use super::proxy::rpc::resp_step::Step;
 use super::proxy::rpc::row_value::Value;
@@ -106,10 +105,10 @@ where
                                     let fut = async move {
                                         let do_describe = || async move {
                                             let ret = conn.describe(stmt, auth, None).await??;
-                                            Ok(DescribeResp { 
+                                            Ok(DescribeResp {
                                                 cols: ret.cols.into_iter().map(|c| DescribeCol { name: c.name, decltype: c.decltype }).collect(),
                                                 params: ret.params.into_iter().map(|p| DescribeParam { name: p.name }).collect(),
-                                                is_explain: ret.is_explain, 
+                                                is_explain: ret.is_explain,
                                                 is_readonly: ret.is_readonly
                                             })
                                         };
@@ -358,7 +357,7 @@ impl From<ValueRef<'_>> for RowValue {
 }
 
 #[cfg(test)]
-mod test {
+pub mod test {
     use insta::{assert_debug_snapshot, assert_snapshot};
     use tempfile::tempdir;
     use tokio_stream::wrappers::ReceiverStream;
@@ -366,7 +365,7 @@ mod test {
     use crate::auth::{Authorized, Permission};
     use crate::connection::libsql::LibSqlConnection;
     use crate::connection::program::Program;
-    use crate::query_result_builder::test::TestBuilder;
+    use crate::query_result_builder::test::{TestBuilder, ValidateTraceBuilder, random_transition, fsm_builder_driver};
     use crate::rpc::proxy::rpc::StreamProgramReq;
 
     use super::*;
@@ -584,13 +583,38 @@ mod test {
         pin!(stream);
 
         // request 0 should be dropped, and request 1 should be processed instead
-        let req = ExecReq { 
+        let req = ExecReq {
             request_id: 0,
-            request: Some(Request::Describe(StreamDescribeReq { stmt: "select $hello".into() })),
+            request: Some(Request::Describe(StreamDescribeReq {
+                stmt: "select $hello".into(),
+            })),
         };
 
         snd.send(Ok(req)).await.unwrap();
 
         assert_debug_snapshot!(stream.next().await.unwrap().unwrap());
+    }
+
+    /// This fuction returns a random, valid, program resp for use in other tests
+    pub fn random_valid_program_resp(
+        size: usize,
+        max_resp_size: usize,
+    ) -> (impl Stream<Item = ExecResp>, ValidateTraceBuilder) {
+        let (sender, receiver) = mpsc::channel(1);
+        let builder = StreamResponseBuilder {
+            request_id: 0,
+            sender,
+            current: None,
+            current_size: 0,
+            max_program_resp_size: max_resp_size,
+        };
+
+        let trace = random_transition(size);
+        tokio::task::spawn_blocking({
+            let trace = trace.clone();
+            move || fsm_builder_driver(&trace, builder)
+        });
+
+        (ReceiverStream::new(receiver), ValidateTraceBuilder::new(trace))
     }
 }

@@ -311,7 +311,8 @@ impl QueryResultBuilder for JsonHttpPayloadBuilder {
 
 #[cfg(test)]
 mod test {
-    use crate::query_result_builder::test::random_builder_driver;
+
+    use crate::query_result_builder::test::{random_transition, fsm_builder_driver};
 
     use super::*;
 
@@ -319,7 +320,8 @@ mod test {
     fn test_json_builder() {
         for _ in 0..1000 {
             let builder = JsonHttpPayloadBuilder::new();
-            let ret = random_builder_driver(100, builder).into_ret();
+            let trace = random_transition(100);
+            let ret = fsm_builder_driver(&trace, builder).into_ret();
             println!("{}", std::str::from_utf8(&ret).unwrap());
             // we produce valid json
             serde_json::from_slice::<Vec<serde_json::Value>>(&ret).unwrap();

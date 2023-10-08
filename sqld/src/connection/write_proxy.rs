@@ -2,6 +2,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use futures_core::future::BoxFuture;
+use futures_core::Stream;
 use parking_lot::Mutex as PMutex;
 use sqld_libsql_bindings::wal_hook::{TransparentMethods, TRANSPARENT_METHODS};
 use tokio::sync::{mpsc, watch, Mutex};
@@ -9,7 +10,6 @@ use tokio_stream::StreamExt;
 use tonic::metadata::BinaryMetadataValue;
 use tonic::transport::Channel;
 use tonic::{Request, Streaming};
-use uuid::Uuid;
 
 use crate::auth::Authenticated;
 use crate::connection::program::{DescribeCol, DescribeParam};
@@ -19,7 +19,7 @@ use crate::query_analysis::TxnStatus;
 use crate::query_result_builder::{QueryBuilderConfig, QueryResultBuilder};
 use crate::replication::FrameNo;
 use crate::rpc::proxy::rpc::proxy_client::ProxyClient;
-use crate::rpc::proxy::rpc::{self, exec_req, exec_resp, DisconnectMessage, ExecReq, ExecResp};
+use crate::rpc::proxy::rpc::{self, exec_req, exec_resp, ExecReq, ExecResp};
 use crate::rpc::NAMESPACE_METADATA_KEY;
 use crate::stats::Stats;
 use crate::{Result, DEFAULT_AUTO_CHECKPOINT};
@@ -102,12 +102,11 @@ impl MakeConnection for MakeWriteProxyConn {
     }
 }
 
-pub struct WriteProxyConnection {
+pub struct WriteProxyConnection<R = Streaming<ExecResp>> {
     /// Lazily initialized read connection
     read_conn: LibSqlConnection<TransparentMethods>,
     write_proxy: ProxyClient<Channel>,
     state: Mutex<TxnStatus>,
-    client_id: Uuid,
     /// FrameNo of the last write performed by this connection on the primary.
     /// any subsequent read on this connection must wait for the replicator to catch up with this
     /// frame_no
@@ -118,7 +117,7 @@ pub struct WriteProxyConnection {
     stats: Arc<Stats>,
     namespace: NamespaceName,
 
-    remote_conn: Mutex<Option<RemoteConnection>>,
+    remote_conn: Mutex<Option<RemoteConnection<R>>>,
 }
 
 impl WriteProxyConnection {
@@ -135,7 +134,6 @@ impl WriteProxyConnection {
             read_conn,
             write_proxy,
             state: Mutex::new(TxnStatus::Init),
-            client_id: Uuid::new_v4(),
             last_write_frame_no: Default::default(),
             applied_frame_no_receiver,
             builder_config,
@@ -234,8 +232,8 @@ impl WriteProxyConnection {
     }
 }
 
-struct RemoteConnection {
-    response_stream: Streaming<ExecResp>,
+struct RemoteConnection<R = Streaming<ExecResp>> {
+    response_stream: R,
     request_sender: mpsc::Sender<ExecReq>,
     current_request_id: u32,
     builder_config: QueryBuilderConfig,
@@ -265,7 +263,12 @@ impl RemoteConnection {
             builder_config,
         })
     }
+}
 
+impl<R> RemoteConnection<R>
+where
+    R: Stream<Item = Result<ExecResp, tonic::Status>> + Unpin,
+{
     /// Perform a request on to the remote peer, and call message_cb for every message received for
     /// that request. message cb should return whether to expect more message for that request.
     async fn make_request(
@@ -458,17 +461,6 @@ impl Connection for WriteProxyConnection {
     }
 }
 
-impl Drop for WriteProxyConnection {
-    fn drop(&mut self) {
-        // best effort attempt to disconnect
-        let mut remote = self.write_proxy.clone();
-        let client_id = self.client_id.to_string();
-        tokio::spawn(async move {
-            let _ = remote.disconnect(DisconnectMessage { client_id }).await;
-        });
-    }
-}
-
 #[cfg(test)]
 pub mod test {
     use arbitrary::{Arbitrary, Unstructured};
@@ -479,7 +471,7 @@ pub mod test {
     use super::*;
     use crate::{
         query_result_builder::{test::test_driver, Column, QueryResultBuilderError},
-        rpc::proxy::rpc::{query_result::RowResult, ExecuteResults},
+        rpc::{proxy::rpc::{query_result::RowResult, ExecuteResults}, streaming_exec::test::random_valid_program_resp},
     };
 
     /// generate an arbitraty rpc value. see build.rs for usage.
@@ -554,5 +546,22 @@ pub mod test {
                 execute_results_to_builder(res, b, &QueryBuilderConfig::default())
             },
         );
+    }
+
+    #[tokio::test]
+    // in this test we do a roundtrip: generate a random valid program, stream it to
+    // RemoteConnection, and make sure that the remote connection drives the builder with the same
+    // state transitions.
+    async fn validate_random_stream_response() {
+        let (response_stream, validator) = random_valid_program_resp(500, 150);
+        let (request_sender, _request_recver) = mpsc::channel(1);
+        let mut remote = RemoteConnection {
+            response_stream: response_stream.map(Ok),
+            request_sender,
+            current_request_id: 0,
+            builder_config: QueryBuilderConfig::default(),
+        };
+
+        remote.execute(Program::seq(&[]), validator).await.unwrap().0.into_ret();
     }
 }
