@@ -153,7 +153,6 @@ impl WriteProxyConnection {
         F: FnOnce(&mut RemoteConnection) -> BoxFuture<'_, crate::Result<Ret>>,
     {
         let mut remote_conn = self.remote_conn.lock().await;
-        // TODO: catch broken connection, and reset it to None.
         if remote_conn.is_some() {
             cb(remote_conn.as_mut().unwrap()).await
         } else {
@@ -471,7 +470,10 @@ pub mod test {
     use super::*;
     use crate::{
         query_result_builder::{test::test_driver, Column, QueryResultBuilderError},
-        rpc::{proxy::rpc::{query_result::RowResult, ExecuteResults}, streaming_exec::test::random_valid_program_resp},
+        rpc::{
+            proxy::rpc::{query_result::RowResult, ExecuteResults},
+            streaming_exec::test::random_valid_program_resp,
+        },
     };
 
     /// generate an arbitraty rpc value. see build.rs for usage.
@@ -562,6 +564,11 @@ pub mod test {
             builder_config: QueryBuilderConfig::default(),
         };
 
-        remote.execute(Program::seq(&[]), validator).await.unwrap().0.into_ret();
+        remote
+            .execute(Program::seq(&[]), validator)
+            .await
+            .unwrap()
+            .0
+            .into_ret();
     }
 }

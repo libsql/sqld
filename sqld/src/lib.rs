@@ -500,6 +500,8 @@ where
             let proxy_service =
                 ProxyService::new(namespaces.clone(), None, self.disable_namespaces);
             // Garbage collect proxy clients every 30 seconds
+            // TODO: this will no longer be necessary once client have adopted the streaming proxy
+            // protocol
             self.join_set.spawn({
                 let clients = proxy_service.clients();
                 async move {

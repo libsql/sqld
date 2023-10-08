@@ -312,7 +312,7 @@ impl QueryResultBuilder for JsonHttpPayloadBuilder {
 #[cfg(test)]
 mod test {
 
-    use crate::query_result_builder::test::{random_transition, fsm_builder_driver};
+    use crate::query_result_builder::test::{fsm_builder_driver, random_transition};
 
     use super::*;
 

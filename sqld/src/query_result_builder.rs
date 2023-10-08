@@ -715,7 +715,7 @@ pub mod test {
 
             trace.push(state);
             if state == FsmState::Finish {
-                break
+                break;
             }
 
             max_steps = max_steps.saturating_sub(1);
@@ -818,7 +818,10 @@ pub mod test {
             Ok(())
         }
 
-        fn step_error(&mut self, _error: crate::error::Error) -> Result<(), QueryResultBuilderError> {
+        fn step_error(
+            &mut self,
+            _error: crate::error::Error,
+        ) -> Result<(), QueryResultBuilderError> {
             assert_eq!(self.trace[self.current], FsmState::StepError);
             self.current += 1;
             Ok(())

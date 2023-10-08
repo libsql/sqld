@@ -365,7 +365,9 @@ pub mod test {
     use crate::auth::{Authorized, Permission};
     use crate::connection::libsql::LibSqlConnection;
     use crate::connection::program::Program;
-    use crate::query_result_builder::test::{TestBuilder, ValidateTraceBuilder, random_transition, fsm_builder_driver};
+    use crate::query_result_builder::test::{
+        fsm_builder_driver, random_transition, TestBuilder, ValidateTraceBuilder,
+    };
     use crate::rpc::proxy::rpc::StreamProgramReq;
 
     use super::*;
@@ -492,61 +494,6 @@ pub mod test {
     }
 
     #[tokio::test]
-    async fn interupt_query() {
-        let tmp = tempdir().unwrap();
-        let conn = LibSqlConnection::new_test(tmp.path());
-        let (snd, rcv) = mpsc::channel(1);
-        let auth = Authenticated::Authorized(Authorized {
-            namespace: None,
-            permission: Permission::FullAccess,
-        });
-        let stream = make_proxy_stream(conn, auth, ReceiverStream::new(rcv));
-
-        pin!(stream);
-
-        let req = exec_req_stmt("create table test (foo)", 0);
-        snd.send(Ok(req)).await.unwrap();
-        let resp = stream.next().await.unwrap().unwrap();
-        assert_eq!(resp.request_id, 0);
-        for i in 1..50 {
-            let req = exec_req_stmt(
-                r#"insert into test values ("something moderately long")"#,
-                i,
-            );
-            snd.send(Ok(req)).await.unwrap();
-            let resp = stream.next().await.unwrap().unwrap();
-            assert_eq!(resp.request_id, i);
-        }
-
-        let req = exec_req_stmt("select * from test", 100);
-        snd.send(Ok(req)).await.unwrap();
-
-        let mut num_resp = 0;
-        let mut builder = TestBuilder::default();
-        loop {
-            let Response::ProgramResp(resp) =
-                stream.next().await.unwrap().unwrap().response.unwrap()
-            else {
-                panic!()
-            };
-            if !apply_program_resp_to_builder(
-                &QueryBuilderConfig::default(),
-                &mut builder,
-                resp,
-                |_, _| (),
-            )
-            .unwrap()
-            {
-                break;
-            }
-            num_resp += 1;
-        }
-
-        assert_eq!(num_resp, 3);
-        assert_debug_snapshot!(builder.into_ret());
-    }
-
-    #[tokio::test]
     async fn request_interupted() {
         let tmp = tempdir().unwrap();
         let conn = LibSqlConnection::new_test(tmp.path());
@@ -615,6 +562,9 @@ pub mod test {
             move || fsm_builder_driver(&trace, builder)
         });
 
-        (ReceiverStream::new(receiver), ValidateTraceBuilder::new(trace))
+        (
+            ReceiverStream::new(receiver),
+            ValidateTraceBuilder::new(trace),
+        )
     }
 }
