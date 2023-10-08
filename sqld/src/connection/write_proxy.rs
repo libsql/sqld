@@ -478,7 +478,7 @@ pub mod test {
 
     use super::*;
     use crate::{
-        query_result_builder::{test::test_driver, QueryResultBuilderError, Column},
+        query_result_builder::{test::test_driver, Column, QueryResultBuilderError},
         rpc::proxy::rpc::{query_result::RowResult, ExecuteResults},
     };
 

@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use parking_lot::{Mutex, RwLock};
 use rusqlite::{DatabaseName, ErrorCode, OpenFlags, StatementStatus, TransactionState};
-use sqld_libsql_bindings::wal_hook::{TransparentMethods, WalMethodsHook, };
+use sqld_libsql_bindings::wal_hook::{TransparentMethods, WalMethodsHook};
 use tokio::sync::{watch, Notify};
 use tokio::time::{Duration, Instant};
 
