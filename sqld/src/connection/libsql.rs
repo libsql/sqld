@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use parking_lot::{Mutex, RwLock};
 use rusqlite::{DatabaseName, ErrorCode, OpenFlags, StatementStatus, TransactionState};
-use sqld_libsql_bindings::wal_hook::{TransparentMethods, WalMethodsHook};
+use sqld_libsql_bindings::wal_hook::{TransparentMethods, WalMethodsHook, };
 use tokio::sync::{watch, Notify};
 use tokio::time::{Duration, Instant};
 
@@ -234,6 +234,29 @@ where
             .conn
             .transaction_state(Some(DatabaseName::Main))?
             .into())
+    }
+}
+
+#[cfg(test)]
+impl LibSqlConnection<TransparentMethods> {
+    pub fn new_test(path: &Path) -> Self {
+        let (_snd, rcv) = watch::channel(None);
+        let conn = Connection::new(
+            path,
+            Arc::new([]),
+            &crate::libsql_bindings::wal_hook::TRANSPARENT_METHODS,
+            (),
+            Default::default(),
+            DatabaseConfigStore::new_test().into(),
+            QueryBuilderConfig::default(),
+            rcv,
+            Default::default(),
+        )
+        .unwrap();
+
+        Self {
+            inner: Arc::new(Mutex::new(conn)),
+        }
     }
 }
 

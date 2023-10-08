@@ -353,7 +353,7 @@ impl<DB: Connection> Connection for TrackedConnection<DB> {
 }
 
 #[cfg(test)]
-mod test {
+pub mod test {
     use super::*;
 
     #[derive(Debug)]

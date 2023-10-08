@@ -11,7 +11,7 @@ use tonic::{Code, Status};
 
 use crate::auth::Authenticated;
 use crate::connection::Connection;
-use crate::database::PrimaryConnection;
+use crate::error::Error;
 use crate::query_analysis::TxnStatus;
 use crate::query_result_builder::{
     Column, QueryBuilderConfig, QueryResultBuilder, QueryResultBuilderError,
@@ -21,22 +21,48 @@ use crate::rpc::proxy::rpc::exec_req::Request;
 use crate::rpc::proxy::rpc::exec_resp::{self, Response};
 
 use super::proxy::rpc::resp_step::Step;
-use super::proxy::rpc::{self, ExecReq, ExecResp, ProgramResp, RespStep, RowValue};
+use super::proxy::rpc::row_value::Value;
+use super::proxy::rpc::{
+    self, AddRowValue, ColsDescription, ExecReq, ExecResp, Finish, FinishStep, ProgramResp,
+    RespStep, RowValue, StepError,
+};
 
-pub fn make_proxy_stream<S>(conn: PrimaryConnection, auth: Authenticated, request_stream: S) -> impl Stream<Item = Result<ExecResp, Status>> 
+const MAX_RESPONSE_SIZE: usize = bytesize::ByteSize::mb(1).as_u64() as usize;
+
+pub fn make_proxy_stream<S, C>(
+    conn: C,
+    auth: Authenticated,
+    request_stream: S,
+) -> impl Stream<Item = Result<ExecResp, Status>>
 where
     S: Stream<Item = Result<ExecReq, Status>>,
+    C: Connection,
+{
+    make_proxy_stream_inner(conn, auth, request_stream, MAX_RESPONSE_SIZE)
+}
+
+fn make_proxy_stream_inner<S, C>(
+    conn: C,
+    auth: Authenticated,
+    request_stream: S,
+    max_program_resp_size: usize,
+) -> impl Stream<Item = Result<ExecResp, Status>>
+where
+    S: Stream<Item = Result<ExecReq, Status>>,
+    C: Connection,
 {
     async_stream::stream! {
         let mut current_request_fut = None;
         let (snd, mut recv) = mpsc::channel(1);
         let conn = Arc::new(conn);
+
         pin!(request_stream);
 
         loop {
             tokio::select! {
                 biased;
-                Some(maybe_req) = request_stream.next() => {
+                maybe_req = request_stream.next() => {
+                    let Some(maybe_req) = maybe_req else { break };
                     match maybe_req {
                         Err(e) => {
                             tracing::error!("stream error: {e}");
@@ -61,6 +87,7 @@ where
                                             sender,
                                             current: None,
                                             current_size: 0,
+                                            max_program_resp_size,
                                         };
 
                                         let ret = conn.execute_program(pgm, auth, builder, None).await;
@@ -97,6 +124,7 @@ struct StreamResponseBuilder {
     sender: mpsc::Sender<ExecResp>,
     current: Option<ProgramResp>,
     current_size: usize,
+    max_program_resp_size: usize,
 }
 
 impl StreamResponseBuilder {
@@ -106,15 +134,13 @@ impl StreamResponseBuilder {
     }
 
     fn push(&mut self, step: Step) -> Result<(), QueryResultBuilderError> {
-        const MAX_RESPONSE_SIZE: usize = bytesize::ByteSize::mb(1).as_u64() as usize;
-
         let current = self.current();
         let step = RespStep { step: Some(step) };
         let size = step.encoded_len();
         current.steps.push(step);
         self.current_size += size;
 
-        if self.current_size >= MAX_RESPONSE_SIZE {
+        if self.current_size >= self.max_program_resp_size {
             self.flush()?;
         }
 
@@ -135,6 +161,63 @@ impl StreamResponseBuilder {
 
         Ok(())
     }
+}
+
+/// Apply the response to the the builder, and return whether the builder need more steps
+pub fn apply_program_resp_to_builder<B: QueryResultBuilder>(
+    config: &QueryBuilderConfig,
+    builder: &mut B,
+    resp: ProgramResp,
+    mut on_finish: impl FnMut(Option<FrameNo>, TxnStatus),
+) -> crate::Result<bool> {
+    for step in resp.steps {
+        let Some(step) = step.step else {
+            return Err(Error::PrimaryStreamMisuse);
+        };
+        match step {
+            Step::Init(_) => builder.init(config)?,
+            Step::BeginStep(_) => builder.begin_step()?,
+            Step::FinishStep(FinishStep {
+                affected_row_count,
+                last_insert_rowid,
+            }) => builder.finish_step(affected_row_count, last_insert_rowid)?,
+            Step::StepError(StepError { error: Some(err) }) => {
+                builder.step_error(crate::error::Error::RpcQueryError(err))?
+            }
+            Step::ColsDescription(ColsDescription { columns }) => {
+                let cols = columns.iter().map(|c| Column {
+                    name: &c.name,
+                    decl_ty: c.decltype.as_deref(),
+                });
+                builder.cols_description(cols)?
+            }
+            Step::BeginRows(_) => builder.begin_rows()?,
+            Step::BeginRow(_) => builder.begin_row()?,
+            Step::AddRowValue(AddRowValue {
+                val: Some(RowValue { value: Some(val) }),
+            }) => {
+                let val = match &val {
+                    Value::Text(s) => ValueRef::Text(s.as_bytes()),
+                    Value::Integer(i) => ValueRef::Integer(*i),
+                    Value::Real(x) => ValueRef::Real(*x),
+                    Value::Blob(b) => ValueRef::Blob(b.as_slice()),
+                    Value::Null(_) => ValueRef::Null,
+                };
+                builder.add_row_value(val)?;
+            }
+            Step::FinishRow(_) => builder.finish_row()?,
+            Step::FinishRows(_) => builder.finish_rows()?,
+            Step::Finish(f @ Finish { last_frame_no, .. }) => {
+                let txn_status = TxnStatus::from(f.state());
+                on_finish(last_frame_no, txn_status);
+                builder.finish(last_frame_no, txn_status)?;
+                return Ok(false);
+            }
+            _ => return Err(Error::PrimaryStreamMisuse),
+        }
+    }
+
+    Ok(true)
 }
 
 impl QueryResultBuilder for StreamResponseBuilder {
@@ -226,13 +309,11 @@ impl QueryResultBuilder for StreamResponseBuilder {
         Ok(())
     }
 
-    fn into_ret(self) -> Self::Ret { }
+    fn into_ret(self) -> Self::Ret {}
 }
 
 impl From<ValueRef<'_>> for RowValue {
     fn from(value: ValueRef<'_>) -> Self {
-        use rpc::row_value::Value;
-
         let value = Some(match value {
             ValueRef::Null => Value::Null(true),
             ValueRef::Integer(i) => Value::Integer(i),
@@ -242,5 +323,221 @@ impl From<ValueRef<'_>> for RowValue {
         });
 
         RowValue { value }
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use insta::{assert_debug_snapshot, assert_snapshot};
+    use tempfile::tempdir;
+    use tokio_stream::wrappers::ReceiverStream;
+
+    use crate::auth::{Authorized, Permission};
+    use crate::connection::libsql::LibSqlConnection;
+    use crate::connection::program::Program;
+    use crate::query_result_builder::test::TestBuilder;
+    use crate::rpc::proxy::rpc::StreamProgramReq;
+
+    use super::*;
+
+    fn exec_req_stmt(s: &str, id: u32) -> ExecReq {
+        ExecReq {
+            request_id: id,
+            request: Some(Request::Execute(StreamProgramReq {
+                pgm: Some(Program::seq(&[s]).into()),
+            })),
+        }
+    }
+
+    #[tokio::test]
+    async fn invalid_request() {
+        let tmp = tempdir().unwrap();
+        let conn = LibSqlConnection::new_test(tmp.path());
+        let (snd, rcv) = mpsc::channel(1);
+        let stream = make_proxy_stream(conn, Authenticated::Anonymous, ReceiverStream::new(rcv));
+        pin!(stream);
+
+        let req = ExecReq {
+            request_id: 0,
+            request: None,
+        };
+
+        snd.send(Ok(req)).await.unwrap();
+
+        assert_snapshot!(stream.next().await.unwrap().unwrap_err().to_string());
+    }
+
+    #[tokio::test]
+    async fn request_stream_dropped() {
+        let tmp = tempdir().unwrap();
+        let conn = LibSqlConnection::new_test(tmp.path());
+        let (snd, rcv) = mpsc::channel(1);
+        let auth = Authenticated::Authorized(Authorized {
+            namespace: None,
+            permission: Permission::FullAccess,
+        });
+        let stream = make_proxy_stream(conn, auth, ReceiverStream::new(rcv));
+
+        pin!(stream);
+
+        drop(snd);
+
+        assert!(stream.next().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn perform_query_simple() {
+        let tmp = tempdir().unwrap();
+        let conn = LibSqlConnection::new_test(tmp.path());
+        let (snd, rcv) = mpsc::channel(1);
+        let auth = Authenticated::Authorized(Authorized {
+            namespace: None,
+            permission: Permission::FullAccess,
+        });
+        let stream = make_proxy_stream(conn, auth, ReceiverStream::new(rcv));
+
+        pin!(stream);
+
+        let req = exec_req_stmt("create table test (foo)", 0);
+
+        snd.send(Ok(req)).await.unwrap();
+
+        assert_debug_snapshot!(stream.next().await.unwrap().unwrap());
+    }
+
+    #[tokio::test]
+    async fn single_query_split_response() {
+        let tmp = tempdir().unwrap();
+        let conn = LibSqlConnection::new_test(tmp.path());
+        let (snd, rcv) = mpsc::channel(1);
+        let auth = Authenticated::Authorized(Authorized {
+            namespace: None,
+            permission: Permission::FullAccess,
+        });
+        // limit the size of the response for force a split
+        let stream = make_proxy_stream_inner(conn, auth, ReceiverStream::new(rcv), 500);
+
+        pin!(stream);
+
+        let req = exec_req_stmt("create table test (foo)", 0);
+        snd.send(Ok(req)).await.unwrap();
+        let resp = stream.next().await.unwrap().unwrap();
+        assert_eq!(resp.request_id, 0);
+        for i in 1..50 {
+            let req = exec_req_stmt(
+                r#"insert into test values ("something moderately long")"#,
+                i,
+            );
+            snd.send(Ok(req)).await.unwrap();
+            let resp = stream.next().await.unwrap().unwrap();
+            assert_eq!(resp.request_id, i);
+        }
+
+        let req = exec_req_stmt("select * from test", 100);
+        snd.send(Ok(req)).await.unwrap();
+
+        let mut num_resp = 0;
+        let mut builder = TestBuilder::default();
+        loop {
+            let Response::ProgramResp(resp) =
+                stream.next().await.unwrap().unwrap().response.unwrap()
+            else {
+                panic!()
+            };
+            if !apply_program_resp_to_builder(
+                &QueryBuilderConfig::default(),
+                &mut builder,
+                resp,
+                |_, _| (),
+            )
+            .unwrap()
+            {
+                break;
+            }
+            num_resp += 1;
+        }
+
+        assert_eq!(num_resp, 3);
+        assert_debug_snapshot!(builder.into_ret());
+    }
+
+    #[tokio::test]
+    async fn interupt_query() {
+        let tmp = tempdir().unwrap();
+        let conn = LibSqlConnection::new_test(tmp.path());
+        let (snd, rcv) = mpsc::channel(1);
+        let auth = Authenticated::Authorized(Authorized {
+            namespace: None,
+            permission: Permission::FullAccess,
+        });
+        // limit the size of the response for force a split
+        let stream = make_proxy_stream_inner(conn, auth, ReceiverStream::new(rcv), 500);
+
+        pin!(stream);
+
+        let req = exec_req_stmt("create table test (foo)", 0);
+        snd.send(Ok(req)).await.unwrap();
+        let resp = stream.next().await.unwrap().unwrap();
+        assert_eq!(resp.request_id, 0);
+        for i in 1..50 {
+            let req = exec_req_stmt(
+                r#"insert into test values ("something moderately long")"#,
+                i,
+            );
+            snd.send(Ok(req)).await.unwrap();
+            let resp = stream.next().await.unwrap().unwrap();
+            assert_eq!(resp.request_id, i);
+        }
+
+        let req = exec_req_stmt("select * from test", 100);
+        snd.send(Ok(req)).await.unwrap();
+
+        let mut num_resp = 0;
+        let mut builder = TestBuilder::default();
+        loop {
+            let Response::ProgramResp(resp) =
+                stream.next().await.unwrap().unwrap().response.unwrap()
+            else {
+                panic!()
+            };
+            if !apply_program_resp_to_builder(
+                &QueryBuilderConfig::default(),
+                &mut builder,
+                resp,
+                |_, _| (),
+            )
+            .unwrap()
+            {
+                break;
+            }
+            num_resp += 1;
+        }
+
+        assert_eq!(num_resp, 3);
+        assert_debug_snapshot!(builder.into_ret());
+    }
+
+    #[tokio::test]
+    async fn request_interupted() {
+        let tmp = tempdir().unwrap();
+        let conn = LibSqlConnection::new_test(tmp.path());
+        let (snd, rcv) = mpsc::channel(2);
+        let auth = Authenticated::Authorized(Authorized {
+            namespace: None,
+            permission: Permission::FullAccess,
+        });
+        // limit the size of the response for force a split
+        let stream = make_proxy_stream_inner(conn, auth, ReceiverStream::new(rcv), 500);
+
+        pin!(stream);
+
+        // request 0 should be dropped, and request 1 should be processed instead
+        let req1 = exec_req_stmt("create table test (foo)", 0);
+        let req2 = exec_req_stmt("create table test (foo)", 1);
+        snd.send(Ok(req1)).await.unwrap();
+        snd.send(Ok(req2)).await.unwrap();
+
+        let resp = stream.next().await.unwrap().unwrap();
+        assert_eq!(resp.request_id, 1);
     }
 }

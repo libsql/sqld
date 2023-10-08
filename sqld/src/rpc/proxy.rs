@@ -23,7 +23,7 @@ use self::rpc::proxy_server::Proxy;
 use self::rpc::query_result::RowResult;
 use self::rpc::{
     describe_result, Ack, DescribeRequest, DescribeResult, Description, DisconnectMessage, ExecReq,
-    ExecuteResults, QueryResult, ResultRows, Row, ExecResp,
+    ExecResp, ExecuteResults, QueryResult, ResultRows, Row,
 };
 use super::NAMESPACE_DOESNT_EXIST;
 
@@ -475,7 +475,7 @@ impl Proxy for ProxyService {
         &self,
         req: tonic::Request<tonic::Streaming<ExecReq>>,
     ) -> Result<tonic::Response<Self::StreamExecStream>, tonic::Status> {
-        let auth= if let Some(auth) = &self.auth {
+        let auth = if let Some(auth) = &self.auth {
             auth.authenticate_grpc(&req, self.disable_namespaces)?
         } else {
             Authenticated::from_proxy_grpc_request(&req, self.disable_namespaces)?

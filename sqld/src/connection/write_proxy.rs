@@ -3,7 +3,6 @@ use std::sync::Arc;
 
 use futures_core::future::BoxFuture;
 use parking_lot::Mutex as PMutex;
-use rusqlite::types::ValueRef;
 use sqld_libsql_bindings::wal_hook::{TransparentMethods, TRANSPARENT_METHODS};
 use tokio::sync::{mpsc, watch, Mutex};
 use tokio_stream::StreamExt;
@@ -17,15 +16,10 @@ use crate::connection::program::{DescribeCol, DescribeParam};
 use crate::error::Error;
 use crate::namespace::NamespaceName;
 use crate::query_analysis::TxnStatus;
-use crate::query_result_builder::{Column, QueryBuilderConfig, QueryResultBuilder};
+use crate::query_result_builder::{QueryBuilderConfig, QueryResultBuilder};
 use crate::replication::FrameNo;
 use crate::rpc::proxy::rpc::proxy_client::ProxyClient;
-use crate::rpc::proxy::rpc::resp_step::Step;
-use crate::rpc::proxy::rpc::row_value::Value;
-use crate::rpc::proxy::rpc::{
-    self, exec_req, exec_resp, AddRowValue, ColsDescription, DisconnectMessage, ExecReq, ExecResp,
-    Finish, FinishStep, RowValue, StepError,
-};
+use crate::rpc::proxy::rpc::{self, exec_req, exec_resp, DisconnectMessage, ExecReq, ExecResp};
 use crate::rpc::NAMESPACE_METADATA_KEY;
 use crate::stats::Stats;
 use crate::{Result, DEFAULT_AUTO_CHECKPOINT};
@@ -297,7 +291,7 @@ impl RemoteConnection {
                 Ok(resp) => {
                     // there was an interuption, and we moved to the next query
                     if resp.request_id > request_id {
-                        return Err(Error::PrimaryStreamInterupted)
+                        return Err(Error::PrimaryStreamInterupted);
                     }
 
                     // we can ignore response for previously interupted requests
@@ -327,58 +321,20 @@ impl RemoteConnection {
         let mut txn_status = TxnStatus::Invalid;
         let mut new_frame_no = None;
         let builder_config = self.builder_config;
-        let cb = |response: exec_resp::Response| {
-            match response {
-                exec_resp::Response::ProgramResp(resp) => {
-                    for step in resp.steps {
-                        let Some(step) = step.step else { return Err(Error::PrimaryStreamMisuse) };
-                        match step {
-                            Step::Init(_) => builder.init(&builder_config)?,
-                            Step::BeginStep(_) => builder.begin_step()?,
-                            Step::FinishStep(FinishStep {
-                                affected_row_count,
-                                last_insert_rowid,
-                            }) => builder.finish_step(affected_row_count, last_insert_rowid)?,
-                            Step::StepError(StepError { error: Some(err) }) => builder
-                                .step_error(crate::error::Error::RpcQueryError(err))?,
-                            Step::ColsDescription(ColsDescription { columns }) => {
-                                let cols = columns.iter().map(|c| Column {
-                                    name: &c.name,
-                                    decl_ty: c.decltype.as_deref(),
-                                });
-                                builder.cols_description(cols)?
-                            }
-                            Step::BeginRows(_) => builder.begin_rows()?,
-                            Step::BeginRow(_) => builder.begin_row()?,
-                            Step::AddRowValue(AddRowValue {
-                                val: Some(RowValue { value: Some(val) }),
-                            }) => {
-                                let val = match &val {
-                                    Value::Text(s) => ValueRef::Text(s.as_bytes()),
-                                    Value::Integer(i) => ValueRef::Integer(*i),
-                                    Value::Real(x) => ValueRef::Real(*x),
-                                    Value::Blob(b) => ValueRef::Blob(b.as_slice()),
-                                    Value::Null(_) => ValueRef::Null,
-                                };
-                                builder.add_row_value(val)?;
-                            }
-                            Step::FinishRow(_) => builder.finish_row()?,
-                            Step::FinishRows(_) => builder.finish_rows()?,
-                            Step::Finish(f @ Finish { last_frame_no, .. }) => {
-                                txn_status = TxnStatus::from(f.state());
-                                new_frame_no = last_frame_no;
-                                builder.finish(last_frame_no, txn_status)?;
-                                return Ok(false);
-                            }
-                            _ => return Err(Error::PrimaryStreamMisuse),
-                        }
-                    }
-                }
-                exec_resp::Response::DescribeResp(_) => return Err(Error::PrimaryStreamMisuse),
-                exec_resp::Response::Error(e) => return Err(Error::RpcQueryError(e)),
+        let cb = |response: exec_resp::Response| match response {
+            exec_resp::Response::ProgramResp(resp) => {
+                crate::rpc::streaming_exec::apply_program_resp_to_builder(
+                    &builder_config,
+                    &mut builder,
+                    resp,
+                    |last_frame_no, status| {
+                        txn_status = status;
+                        new_frame_no = last_frame_no;
+                    },
+                )
             }
-
-            Ok(true)
+            exec_resp::Response::DescribeResp(_) => Err(Error::PrimaryStreamMisuse),
+            exec_resp::Response::Error(e) => Err(Error::RpcQueryError(e)),
         };
 
         self.make_request(
@@ -395,32 +351,30 @@ impl RemoteConnection {
     #[allow(dead_code)] // reference implementation
     async fn describe(&mut self, stmt: String) -> crate::Result<DescribeResponse> {
         let mut out = None;
-        let cb = |response: exec_resp::Response| {
-            match response {
-                exec_resp::Response::DescribeResp(resp) => {
-                    out = Some(DescribeResponse {
-                        params: resp
-                            .params
-                            .into_iter()
-                            .map(|p| DescribeParam { name: p.name })
-                            .collect(),
-                        cols: resp
-                            .cols
-                            .into_iter()
-                            .map(|c| DescribeCol {
-                                name: c.name,
-                                decltype: c.decltype,
-                            })
-                            .collect(),
-                        is_explain: resp.is_explain,
-                        is_readonly: resp.is_readonly,
-                    });
+        let cb = |response: exec_resp::Response| match response {
+            exec_resp::Response::DescribeResp(resp) => {
+                out = Some(DescribeResponse {
+                    params: resp
+                        .params
+                        .into_iter()
+                        .map(|p| DescribeParam { name: p.name })
+                        .collect(),
+                    cols: resp
+                        .cols
+                        .into_iter()
+                        .map(|c| DescribeCol {
+                            name: c.name,
+                            decltype: c.decltype,
+                        })
+                        .collect(),
+                    is_explain: resp.is_explain,
+                    is_readonly: resp.is_readonly,
+                });
 
-                    Ok(false)
-                }
-                exec_resp::Response::Error(e) => Err(Error::RpcQueryError(e)),
-                exec_resp::Response::ProgramResp(_) => Err(Error::PrimaryStreamMisuse),
+                Ok(false)
             }
+            exec_resp::Response::Error(e) => Err(Error::RpcQueryError(e)),
+            exec_resp::Response::ProgramResp(_) => Err(Error::PrimaryStreamMisuse),
         };
 
         self.make_request(
@@ -520,10 +474,11 @@ pub mod test {
     use arbitrary::{Arbitrary, Unstructured};
     use bytes::Bytes;
     use rand::Fill;
+    use rusqlite::types::ValueRef;
 
     use super::*;
     use crate::{
-        query_result_builder::{test::test_driver, QueryResultBuilderError},
+        query_result_builder::{test::test_driver, QueryResultBuilderError, Column},
         rpc::proxy::rpc::{query_result::RowResult, ExecuteResults},
     };
 

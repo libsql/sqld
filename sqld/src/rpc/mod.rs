@@ -19,7 +19,7 @@ pub mod proxy;
 pub mod replica_proxy;
 pub mod replication_log;
 pub mod replication_log_proxy;
-mod streaming_exec;
+pub mod streaming_exec;
 
 /// A tonic error code to signify that a namespace doesn't exist.
 pub const NAMESPACE_DOESNT_EXIST: &str = "NAMESPACE_DOESNT_EXIST";
