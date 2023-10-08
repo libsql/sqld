@@ -4,6 +4,7 @@ use std::path::PathBuf;
 
 use crate::common::http::Client;
 use crate::common::net::{init_tracing, TestServer, TurmoilAcceptor, TurmoilConnector};
+use insta::assert_snapshot;
 use libsql::{Database, Value};
 use serde_json::json;
 use sqld::config::{AdminApiConfig, RpcServerConfig, UserApiConfig};
@@ -39,6 +40,44 @@ fn make_primary(sim: &mut Sim, path: PathBuf) {
             Ok(())
         }
     });
+}
+
+#[test]
+fn create_namespace() {
+    let mut sim = Builder::new().build();
+    let tmp = tempdir().unwrap();
+    make_primary(&mut sim, tmp.path().into());
+
+    sim.client("client", async {
+        let db =
+            Database::open_remote_with_connector("http://foo.primary:8080", "", TurmoilConnector)?;
+        let conn = db.connect()?;
+
+        let Err(e) = conn.execute("create table test (x)", ()).await else {
+            panic!()
+        };
+        assert_snapshot!(e.to_string());
+
+        let client = Client::new();
+        let resp = client
+            .post(
+                "http://foo.primary:9090/v1/namespaces/foo/create",
+                json!({}),
+            )
+            .await?;
+        assert_eq!(resp.status(), 200);
+
+        conn.execute("create table test (x)", ()).await.unwrap();
+        let mut rows = conn.query("select count(*) from test", ()).await.unwrap();
+        assert!(matches!(
+            rows.next().unwrap().unwrap().get_value(0).unwrap(),
+            Value::Integer(0)
+        ));
+
+        Ok(())
+    });
+
+    sim.run().unwrap();
 }
 
 #[test]

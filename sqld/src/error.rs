@@ -79,6 +79,13 @@ pub enum Error {
     ConflictingRestoreParameters,
     #[error("failed to fork database: {0}")]
     Fork(#[from] ForkError),
+
+    #[error("Connection with primary broken")]
+    PrimaryStreamDisconnect,
+    #[error("Proxy protocal misuse")]
+    PrimaryStreamMisuse,
+    #[error("Proxy request interupted")]
+    PrimaryStreamInterupted,
 }
 
 trait ResponseError: std::error::Error {
@@ -129,6 +136,9 @@ impl IntoResponse for Error {
             LoadDumpExistingDb => self.format_err(StatusCode::BAD_REQUEST),
             ConflictingRestoreParameters => self.format_err(StatusCode::BAD_REQUEST),
             Fork(e) => e.into_response(),
+            PrimaryStreamDisconnect => self.format_err(StatusCode::INTERNAL_SERVER_ERROR),
+            PrimaryStreamMisuse => self.format_err(StatusCode::INTERNAL_SERVER_ERROR),
+            PrimaryStreamInterupted => self.format_err(StatusCode::INTERNAL_SERVER_ERROR),
         }
     }
 }
