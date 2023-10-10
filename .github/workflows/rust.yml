@@ -19,43 +19,34 @@ jobs:
       RUSTFLAGS: -D warnings --cfg=uuid_unstable
     steps:
       - uses: hecrj/setup-rust-action@v1
+
       - name: Checkout
         uses: actions/checkout@v3
         with:
           submodules: recursive
-      - name: Check format
+
+      - name: Cargo fmt
+        uses: actions-rs/cargo@v1
+        with:
+          command: fmt
+          args: --check
+
+      - name: Cargo check
         uses: actions-rs/cargo@v1
         with:
           command: check
           args: --all-targets --all-features
-  clippy:
-    runs-on: ubuntu-latest
-    name: Run Clippy
-    steps:
-      - uses: hecrj/setup-rust-action@v1
-      - name: Checkout
-        uses: actions/checkout@v3
-        with:
-          submodules: recursive
+
+      - name: Test openssl
+        shell: bash {0}
+        run: cargo tree -p sqld -i openssl; [ $? = 101 ]
+
       - name: Clippy
         uses: actions-rs/clippy-check@v1
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           args: --all-targets --all-features -- -D warnings
-  rust-fmt:
-    runs-on: ubuntu-latest
-    name: Run Rustfmt
-    steps:
-      - uses: hecrj/setup-rust-action@v1
-      - name: Checkout
-        uses: actions/checkout@v3
-        with:
-          submodules: recursive
-      - name: Check format
-        uses: actions-rs/cargo@v1
-        with:
-          command: fmt
-          args: --check
+
   test:
     runs-on: ubuntu-latest
     name: Run Tests
@@ -96,16 +87,3 @@ jobs:
         LIBSQL_BOTTOMLESS_AWS_DEFAULT_REGION: eu-central-2
         LIBSQL_BOTTOMLESS_BUCKET: bottomless
         LIBSQL_BOTTOMLESS_ENDPOINT: http://localhost:9000
-
-  check-openssl:
-    runs-on: ubuntu-latest
-    name: Check that we don't depend on openssl
-    steps:
-    - uses: hecrj/setup-rust-action@v1
-    - name: Checkout
-      uses: actions/checkout@v3
-      with:
-        submodules: recursive
-    - name: Test openssl
-      shell: bash {0}
-      run: cargo tree -p sqld -i openssl; [ $? = 101 ]
