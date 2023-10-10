@@ -63,6 +63,8 @@ jobs:
   test:
     runs-on: ubuntu-latest
     name: Run Tests
+    env:
+      RUSTFLAGS: -D warnings --cfg=uuid_unstable
     services:
       minio:
         image: lazybit/minio
@@ -76,9 +78,6 @@ jobs:
           - /data
         options: --name=minio --health-cmd "curl http://localhost:9000/minio/health/live"
     steps:
-    - name: Make some room available
-      run: "sudo rm -rf /usr/local/lib/android && sudo rm -rf /usr/share/dotnet"
-
     - uses: hecrj/setup-rust-action@v1
 
     - uses: actions/checkout@v3
