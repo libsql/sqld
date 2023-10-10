@@ -208,6 +208,7 @@ impl Cli {
     #[rustfmt::skip]
     fn print_welcome_message(&self) {
         // no welcome :'(
+        // are you sure?
         if self.no_welcome { return }
 
         eprintln!(r#"           _     _ "#);
@@ -369,6 +370,7 @@ async fn make_admin_api_config(config: &Cli) -> anyhow::Result<Option<AdminApiCo
 async fn make_rpc_server_config(config: &Cli) -> anyhow::Result<Option<RpcServerConfig>> {
     match config.grpc_listen_addr {
         Some(addr) => {
+            // more changes
             let acceptor = AddrIncoming::new(tokio::net::TcpListener::bind(addr).await?);
 
             tracing::info!("listening for incoming gRPC connection on {}", addr);

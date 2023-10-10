@@ -3,37 +3,40 @@ FROM rust:slim-bullseye as builder
 RUN apt update
 
 RUN apt install -y libclang-dev clang \
-        build-essential tcl protobuf-compiler file \
-        libssl-dev pkg-config
+    build-essential tcl protobuf-compiler file \
+    libssl-dev pkg-config
 
 RUN apt clean
 RUN update-ca-certificates
 
 WORKDIR /sqld
 COPY . .
-RUN --mount=type=cache,target=/usr/local/cargo/registry \
-    --mount=type=cache,target=/usr/local/cargo/git \
+RUN --mount=type=cache,target=/usr/local/cargo/registry/index \
+    --mount=type=cache,target=/usr/local/cargo/registry/cache \
+    --mount=type=cache,target=/usr/local/cargo/git/db \
     --mount=type=cache,target=/sqld/target \
-    cargo build -p sqld --release && \
+    cargo build -p sqld && \
     cp target/release/sqld /sqld/bin
 
 
 # runtime
 FROM debian:bullseye-slim
-RUN apt update
 
-COPY --from=builder /sqld/bin /bin/sqld
-COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
-COPY docker-entrypoint.sh /usr/local/bin
-
+EXPOSE 5001 8080
 VOLUME [ "/var/lib/sqld" ]
 
 RUN groupadd --system --gid 666 sqld
 RUN adduser --system --home /var/lib/sqld --uid 666 --gid 666 sqld
-USER sqld
 WORKDIR /var/lib/sqld
 
-EXPOSE 5001 8080
+COPY docker-entrypoint.sh /usr/local/bin
+
+RUN apt update
+
+COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
+COPY --from=builder /sqld/bin /bin/sqld
+
+USER sqld
 
 ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
 CMD ["/bin/sqld"]
