@@ -35,7 +35,6 @@ pub struct Replicator {
     meta: WalIndexMeta,
     injector: Arc<Mutex<Injector>>,
     pub current_frame_no_notifier: watch::Sender<Option<FrameNo>>,
-    /// hard reset channel: send the namespace there, to reset it
     reset: ResetCb,
 }
 
@@ -204,12 +203,20 @@ impl Replicator {
 
     async fn inject_frame(&mut self, frame: Frame) -> anyhow::Result<()> {
         let injector = self.injector.clone();
-        if let Some(commit_fno) =
-            spawn_blocking(move || injector.lock().inject_frame(frame)).await??
+        match spawn_blocking(move || injector.lock().inject_frame(frame)).await?
         {
-            self.meta.set_commit_frame_no(commit_fno).await?;
-            self.current_frame_no_notifier
-                .send_replace(Some(commit_fno));
+            Ok(Some(commit_fno)) => {
+                self.meta.set_commit_frame_no(commit_fno).await?;
+                self.current_frame_no_notifier
+                    .send_replace(Some(commit_fno));
+            }
+            Ok(None) => (),
+            Err(e @ crate::Error::FatalReplicationError) => {
+                // we conservatively nuke the replica and start replicating from scractch
+                (self.reset)(ResetOp::Destroy(self.namespace.clone()));
+                Err(e)?
+            }
+            Err(e) => Err(e)?,
         }
 
         Ok(())

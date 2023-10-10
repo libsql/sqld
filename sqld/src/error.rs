@@ -79,6 +79,8 @@ pub enum Error {
     ConflictingRestoreParameters,
     #[error("failed to fork database: {0}")]
     Fork(#[from] ForkError),
+    #[error("fatal replication error")]
+    FatalReplicationError,
 }
 
 trait ResponseError: std::error::Error {

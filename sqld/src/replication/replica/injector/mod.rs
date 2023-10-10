@@ -5,6 +5,7 @@ use std::sync::Arc;
 use parking_lot::Mutex;
 use rusqlite::OpenFlags;
 
+use crate::error::Error;
 use crate::replication::frame::Frame;
 use crate::{replication::FrameNo, DEFAULT_AUTO_CHECKPOINT};
 
@@ -114,11 +115,11 @@ impl Injector {
                         assert!(self.buffer.lock().is_empty());
                         return Ok(None);
                     } else if e.extended_code == LIBSQL_INJECT_FATAL {
-                        todo!("handle fatal error");
+                        return Err(Error::FatalReplicationError);
                     }
                 }
 
-                todo!("handle fatal error");
+                return Err(Error::FatalReplicationError);
             }
         }
     }
