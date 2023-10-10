@@ -50,6 +50,8 @@ jobs:
   test:
     runs-on: ubuntu-latest
     name: Run Tests
+    env:
+      RUSTFLAGS: -D warnings --cfg=uuid_unstable
     services:
       minio:
         image: lazybit/minio
@@ -63,16 +65,8 @@ jobs:
           - /data
         options: --name=minio --health-cmd "curl http://localhost:9000/minio/health/live"
     steps:
-    - name: Make some room available
-      run: "sudo rm -rf /usr/local/lib/android && sudo rm -rf /usr/share/dotnet"
-    - name: Install Ruby
-      uses: ruby/setup-ruby@v1
-      with:
-        ruby-version: 2.6
-        bundler-cache: true
     - uses: hecrj/setup-rust-action@v1
-    - name: Install foundationdb-clients
-      run: wget https://github.com/apple/foundationdb/releases/download/7.1.25/foundationdb-clients_7.1.25-1_amd64.deb && sudo dpkg -i foundationdb-clients_7.1.25-1_amd64.deb
+
     - uses: actions/checkout@v3
       with:
         submodules: recursive
