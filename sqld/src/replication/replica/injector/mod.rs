@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use parking_lot::Mutex;
 use rusqlite::OpenFlags;
+use sqld_libsql_bindings::wal_hook::TRANSPARENT_METHODS;
 
 use crate::error::Error;
 use crate::replication::frame::Frame;
@@ -44,6 +45,24 @@ impl Injector {
         let buffer = FrameBuffer::default();
         let ctx = InjectorHookCtx::new(buffer.clone());
         std::fs::create_dir_all(path)?;
+
+        {
+            // create the replication table if it doesn't exist. We need to do that without hooks.
+            let connection = sqld_libsql_bindings::Connection::open(
+                path,
+                OpenFlags::SQLITE_OPEN_READ_WRITE
+                    | OpenFlags::SQLITE_OPEN_CREATE
+                    | OpenFlags::SQLITE_OPEN_URI
+                    | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+                &TRANSPARENT_METHODS,
+                // safety: hook is dropped after connection
+                (),
+                DEFAULT_AUTO_CHECKPOINT,
+            )?;
+
+            connection.execute("CREATE TABLE IF NOT EXISTS libsql_temp_injection (x)", ())?;
+        }
+
         let connection = sqld_libsql_bindings::Connection::open(
             path,
             OpenFlags::SQLITE_OPEN_READ_WRITE
@@ -55,6 +74,8 @@ impl Injector {
             ctx,
             DEFAULT_AUTO_CHECKPOINT,
         )?;
+
+        connection.execute("CREATE TABLE IF NOT EXISTS libsql_temp_injection (x)", ())?;
 
         Ok(Self {
             is_txn: false,
@@ -97,7 +118,7 @@ impl Injector {
         drop(lock);
 
         let connection = self.connection.lock();
-        connection.execute("INSERT INTO __DUMMY__ VALUES (42)", ())?;
+        connection.execute("INSERT INTO libsql_temp_injection VALUES (42)", ())?;
         // force call to xframe
         match connection.cache_flush() {
             Ok(_) => panic!("replication hook was not called"),
@@ -119,7 +140,7 @@ impl Injector {
                     }
                 }
 
-                return Err(Error::FatalReplicationError);
+                Err(Error::FatalReplicationError)
             }
         }
     }
@@ -127,7 +148,6 @@ impl Injector {
     fn begin_txn(&mut self) -> crate::Result<()> {
         let conn = self.connection.lock();
         conn.execute("BEGIN IMMEDIATE", ())?;
-        conn.execute("CREATE TABLE __DUMMY__ (__dummy__)", ())?;
         Ok(())
     }
 

@@ -5,8 +5,8 @@ use sqld_libsql_bindings::ffi::types::XWalFrameFn;
 use sqld_libsql_bindings::init_static_wal_method;
 use sqld_libsql_bindings::wal_hook::WalHook;
 
-use crate::LIBSQL_PAGE_SIZE;
 use crate::replication::frame::FrameBorrowed;
+use crate::LIBSQL_PAGE_SIZE;
 
 use super::headers::Headers;
 use super::FrameBuffer;

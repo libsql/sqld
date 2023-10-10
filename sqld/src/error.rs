@@ -131,6 +131,7 @@ impl IntoResponse for Error {
             LoadDumpExistingDb => self.format_err(StatusCode::BAD_REQUEST),
             ConflictingRestoreParameters => self.format_err(StatusCode::BAD_REQUEST),
             Fork(e) => e.into_response(),
+            FatalReplicationError => self.format_err(StatusCode::INTERNAL_SERVER_ERROR),
         }
     }
 }

@@ -69,7 +69,7 @@ impl TryFrom<&[u8]> for FrameMut {
         let inner = unsafe {
             let layout = Layout::new::<FrameBorrowed>();
             let ptr = std::alloc::alloc(layout);
-            (ptr as *mut u8).copy_from(data.as_ptr(), data.len());
+            ptr.copy_from(data.as_ptr(), data.len());
             Box::from_raw(ptr as *mut FrameBorrowed)
         };
 

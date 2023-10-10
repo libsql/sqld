@@ -203,8 +203,7 @@ impl Replicator {
 
     async fn inject_frame(&mut self, frame: Frame) -> anyhow::Result<()> {
         let injector = self.injector.clone();
-        match spawn_blocking(move || injector.lock().inject_frame(frame)).await?
-        {
+        match spawn_blocking(move || injector.lock().inject_frame(frame)).await? {
             Ok(Some(commit_fno)) => {
                 self.meta.set_commit_frame_no(commit_fno).await?;
                 self.current_frame_no_notifier
