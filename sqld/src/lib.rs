@@ -65,6 +65,7 @@ mod stats;
 #[cfg(test)]
 mod test;
 mod utils;
+mod metrics;
 
 const MAX_CONCURRENT_DBS: usize = 128;
 const DB_CREATE_TIMEOUT: Duration = Duration::from_secs(1);
