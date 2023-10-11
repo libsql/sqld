@@ -1,25 +1,9 @@
-# build sqld
-FROM rust:slim-bullseye AS chef
-RUN apt update \
-    && apt install -y libclang-dev clang \
-        build-essential tcl protobuf-compiler file \
-        libssl-dev pkg-config git\
-    && apt clean \
-    && cargo install cargo-chef
-# We need to install and set as default the toolchain specified in rust-toolchain.toml
-# Otherwise cargo-chef will build dependencies using wrong toolchain
-# This also prevents planner and builder steps from installing the toolchain over and over again
-COPY rust-toolchain.toml rust-toolchain.toml
-RUN cat rust-toolchain.toml | grep "channel" | awk '{print $3}' | sed 's/\"//g' > toolchain.txt \
-    && rustup update $(cat toolchain.txt) \
-    && rustup default $(cat toolchain.txt) \
-    && rm toolchain.txt rust-toolchain.toml
-
-FROM chef AS planner
+# TODO: replace athosturso/sqld-builder with something like ghcr.io/libsql/sqld-builder
+FROM athosturso/sqld-builder AS planner
 COPY . .
 RUN cargo chef prepare --recipe-path recipe.json
 
-FROM chef AS builder
+FROM athosturso/sqld-builder AS builder
 COPY --from=planner /recipe.json recipe.json
 RUN cargo chef cook --release --recipe-path recipe.json
 COPY . .
