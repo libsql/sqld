@@ -1,4 +1,5 @@
 use std::env;
+use std::ffi::c_void;
 use std::fs::OpenOptions;
 use std::io::{stdout, Write};
 use std::net::SocketAddr;
@@ -509,6 +510,14 @@ async fn main() -> Result<()> {
         .init();
 
     std::panic::set_hook(Box::new(tracing_panic::panic_hook));
+
+    std::thread::spawn(move || loop {
+        std::thread::sleep(std::time::Duration::from_secs(1));
+
+        unsafe {
+            libmimalloc_sys::mi_stats_print(std::ptr::null_mut() as *mut c_void);
+        }
+    });
 
     let args = Cli::parse();
 
