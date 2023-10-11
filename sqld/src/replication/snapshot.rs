@@ -154,7 +154,9 @@ impl SnapshotFile {
         })
     }
 
-    /// Like `frames_iter`, but stops as soon as a frame with frame_no <= `frame_no` is reached
+    /// Like `frames_iter`, but stops as soon as a frame with frame_no <= `frame_no` is reached.
+    /// The frames are returned in monotonically strictly decreasing frame_no. In other words, the
+    /// most recent frames come first.
     pub fn frames_iter_from(
         &self,
         frame_no: u64,
