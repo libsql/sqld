@@ -57,7 +57,7 @@ impl Injector {
                 &TRANSPARENT_METHODS,
                 // safety: hook is dropped after connection
                 (),
-                DEFAULT_AUTO_CHECKPOINT,
+                u32::MAX,
             )?;
 
             connection.execute("CREATE TABLE IF NOT EXISTS libsql_temp_injection (x)", ())?;
@@ -118,7 +118,9 @@ impl Injector {
         drop(lock);
 
         let connection = self.connection.lock();
-        connection.execute("INSERT INTO libsql_temp_injection VALUES (42)", ())?;
+        // use prepare cached to avoid parsing the same statement over and over again.
+        let mut stmt = connection.prepare_cached("INSERT INTO libsql_temp_injection VALUES (42)")?;
+        stmt.execute(())?;
         // force call to xframe
         match connection.cache_flush() {
             Ok(_) => panic!("replication hook was not called"),
@@ -127,7 +129,12 @@ impl Injector {
                     if e.extended_code == LIBSQL_INJECT_OK {
                         // refresh schema
                         connection.pragma_update(None, "writable_schema", "reset")?;
-                        let _ = connection.execute("COMMIT", ()); // TODO: Handle error?
+                        if let Err(e) = connection.execute("COMMIT", ()) { 
+                            if !matches!(e.sqlite_error(), Some(rusqlite::ffi::Error{ extended_code, .. }) if *extended_code == 201) {
+                                tracing::error!("injector failed to commit: {e}");
+                                return Err(Error::FatalReplicationError);
+                            }
+                        }
                         self.is_txn = false;
                         assert!(self.buffer.lock().is_empty());
                         return Ok(Some(last_frame_no));
