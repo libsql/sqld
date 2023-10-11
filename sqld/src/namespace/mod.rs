@@ -18,7 +18,7 @@ use sqld_libsql_bindings::wal_hook::TRANSPARENT_METHODS;
 use tokio::io::AsyncBufReadExt;
 use tokio::sync::watch;
 use tokio::task::JoinSet;
-use tokio::time::Duration;
+use tokio::time::{Duration, Instant};
 use tokio_util::io::StreamReader;
 use tonic::transport::Channel;
 use uuid::Uuid;
@@ -30,6 +30,7 @@ use crate::connection::write_proxy::MakeWriteProxyConn;
 use crate::connection::MakeConnection;
 use crate::database::{Database, PrimaryDatabase, ReplicaDatabase};
 use crate::error::{Error, LoadDumpError};
+use crate::metrics::NAMESPACE_LOAD_LATENCY;
 use crate::replication::primary::logger::{ReplicationLoggerHookCtx, REPLICATION_METHODS};
 use crate::replication::replica::Replicator;
 use crate::replication::{FrameNo, NamespacedSnapshotCallback, ReplicationLogger};
@@ -433,6 +434,7 @@ impl<M: MakeNamespace> NamespaceStore<M> {
     where
         Fun: FnOnce(&Namespace<M::Database>) -> R,
     {
+        let before_load = Instant::now();
         let lock = self.inner.store.upgradable_read().await;
         if let Some(ns) = lock.get(&namespace) {
             Ok(f(ns))
@@ -451,6 +453,9 @@ impl<M: MakeNamespace> NamespaceStore<M> {
             let ret = f(&ns);
             tracing::info!("loaded namespace: `{namespace}`");
             lock.insert(namespace, ns);
+
+            NAMESPACE_LOAD_LATENCY.record(before_load.elapsed().as_millis() as f64);
+
             Ok(ret)
         }
     }
