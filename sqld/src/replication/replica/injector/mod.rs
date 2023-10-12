@@ -119,7 +119,8 @@ impl Injector {
 
         let connection = self.connection.lock();
         // use prepare cached to avoid parsing the same statement over and over again.
-        let mut stmt = connection.prepare_cached("INSERT INTO libsql_temp_injection VALUES (42)")?;
+        let mut stmt =
+            connection.prepare_cached("INSERT INTO libsql_temp_injection VALUES (42)")?;
         stmt.execute(())?;
         // force call to xframe
         match connection.cache_flush() {
@@ -129,8 +130,9 @@ impl Injector {
                     if e.extended_code == LIBSQL_INJECT_OK {
                         // refresh schema
                         connection.pragma_update(None, "writable_schema", "reset")?;
-                        if let Err(e) = connection.execute("COMMIT", ()) { 
-                            if !matches!(e.sqlite_error(), Some(rusqlite::ffi::Error{ extended_code, .. }) if *extended_code == 201) {
+                        if let Err(e) = connection.execute("COMMIT", ()) {
+                            if !matches!(e.sqlite_error(), Some(rusqlite::ffi::Error{ extended_code, .. }) if *extended_code == 201)
+                            {
                                 tracing::error!("injector failed to commit: {e}");
                                 return Err(Error::FatalReplicationError);
                             }

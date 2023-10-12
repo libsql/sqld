@@ -212,7 +212,10 @@ impl Replicator {
             Ok(None) => (),
             Err(e @ crate::Error::FatalReplicationError) => {
                 // we conservatively nuke the replica and start replicating from scractch
-                tracing::error!("fatal error replicating `{}` from primary, reseting namespace...", self.namespace);
+                tracing::error!(
+                    "fatal error replicating `{}` from primary, reseting namespace...",
+                    self.namespace
+                );
                 (self.reset)(ResetOp::Destroy(self.namespace.clone()));
                 Err(e)?
             }
