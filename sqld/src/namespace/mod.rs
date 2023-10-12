@@ -12,6 +12,7 @@ use chrono::NaiveDateTime;
 use enclose::enclose;
 use futures_core::Stream;
 use hyper::Uri;
+use metrics::histogram;
 use parking_lot::Mutex;
 use rusqlite::ErrorCode;
 use sqld_libsql_bindings::wal_hook::TRANSPARENT_METHODS;
@@ -30,7 +31,6 @@ use crate::connection::write_proxy::MakeWriteProxyConn;
 use crate::connection::MakeConnection;
 use crate::database::{Database, PrimaryDatabase, ReplicaDatabase};
 use crate::error::{Error, LoadDumpError};
-use crate::metrics::NAMESPACE_LOAD_LATENCY;
 use crate::replication::primary::logger::{ReplicationLoggerHookCtx, REPLICATION_METHODS};
 use crate::replication::replica::Replicator;
 use crate::replication::{FrameNo, NamespacedSnapshotCallback, ReplicationLogger};
@@ -454,7 +454,8 @@ impl<M: MakeNamespace> NamespaceStore<M> {
             tracing::info!("loaded namespace: `{namespace}`");
             lock.insert(namespace, ns);
 
-            NAMESPACE_LOAD_LATENCY.record(before_load.elapsed().as_millis() as f64);
+            // NAMESPACE_LOAD_LATENCY.record(before_load.elapsed());
+            histogram!("namespace_load_latency", before_load.elapsed());
 
             Ok(ret)
         }

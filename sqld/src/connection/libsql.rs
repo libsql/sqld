@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
+use metrics::histogram;
 use parking_lot::{Mutex, RwLock};
 use rusqlite::{DatabaseName, ErrorCode, OpenFlags, StatementStatus};
 use sqld_libsql_bindings::wal_hook::{TransparentMethods, WalMethodsHook};
@@ -12,7 +13,7 @@ use tokio::time::{Duration, Instant};
 use crate::auth::{Authenticated, Authorized, Permission};
 use crate::error::Error;
 use crate::libsql_bindings::wal_hook::WalHook;
-use crate::metrics::{READ_QUERY_COUNT, WRITE_QUERY_COUNT, WRITE_TXN_DURATION};
+use crate::metrics::{READ_QUERY_COUNT, WRITE_QUERY_COUNT};
 use crate::query::Query;
 use crate::query_analysis::{State, StmtKind};
 use crate::query_result_builder::{QueryBuilderConfig, QueryResultBuilder};
@@ -264,7 +265,8 @@ impl<T: WalHook> TxnSlot<T> {
         // we have a lock on the connection, we don't need mode than a
         // Relaxed store.
         conn.rollback();
-        WRITE_TXN_DURATION.record(self.created_at.elapsed().as_millis() as f64);
+        histogram!("write_txn_duration", self.created_at.elapsed())
+        // WRITE_TXN_DURATION.record(self.created_at.elapsed());
     }
 }
 

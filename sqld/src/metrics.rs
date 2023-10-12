@@ -1,4 +1,8 @@
-use metrics::{Counter, register_counter, register_gauge, register_histogram, Gauge, Histogram, describe_counter, describe_gauge, describe_histogram};
+#![allow(dead_code)]
+use metrics::{
+    describe_counter, describe_gauge, describe_histogram, register_counter, register_gauge,
+    register_histogram, Counter, Gauge, Histogram,
+};
 use once_cell::sync::Lazy;
 
 pub static WRITE_QUERY_COUNT: Lazy<Counter> = Lazy::new(|| {

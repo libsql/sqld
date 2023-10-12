@@ -1,5 +1,5 @@
 use anyhow::Context as _;
-use axum::extract::{Path, State, FromRef};
+use axum::extract::{FromRef, Path, State};
 use axum::routing::delete;
 use axum::Json;
 use chrono::NaiveDateTime;
@@ -27,7 +27,7 @@ type UserHttpServer<M> =
 
 #[derive(Clone)]
 struct Metrics {
-    handle: PrometheusHandle
+    handle: PrometheusHandle,
 }
 
 struct AppState<M: MakeNamespace, C> {
@@ -39,7 +39,9 @@ struct AppState<M: MakeNamespace, C> {
 
 impl<M: MakeNamespace, C> FromRef<Arc<AppState<M, C>>> for Metrics {
     fn from_ref(input: &Arc<AppState<M, C>>) -> Self {
-        Metrics { handle: input.metrics.clone() }
+        Metrics {
+            handle: input.metrics.clone(),
+        }
     }
 }
 

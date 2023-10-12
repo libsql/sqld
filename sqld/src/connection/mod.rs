@@ -1,3 +1,4 @@
+use metrics::histogram;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use tokio::time::{Duration, Instant};
@@ -7,7 +8,7 @@ use tokio::{sync::Semaphore, time::timeout};
 
 use crate::auth::Authenticated;
 use crate::error::Error;
-use crate::metrics::{CONCCURENT_CONNECTIONS_COUNT, CONNECTION_CREATE_TIME, CONNECTION_ALIVE_DURATION};
+use crate::metrics::CONCCURENT_CONNECTIONS_COUNT;
 use crate::query::{Params, Query};
 use crate::query_analysis::{State, Statement};
 use crate::query_result_builder::{IgnoreResult, QueryResultBuilder};
@@ -283,7 +284,8 @@ impl<F: MakeConnection> MakeConnection for MakeThrottledConnection<F> {
         let inner = self.connection_maker.create().await?;
 
         CONCCURENT_CONNECTIONS_COUNT.increment(1.0);
-        CONNECTION_CREATE_TIME.record(before_create.elapsed().as_micros() as f64);
+        // CONNECTION_CREATE_TIME.record(before_create.elapsed());
+        histogram!("connection_create_time", before_create.elapsed());
 
         Ok(TrackedConnection {
             permit,
@@ -306,7 +308,8 @@ pub struct TrackedConnection<DB> {
 impl<T> Drop for TrackedConnection<T> {
     fn drop(&mut self) {
         CONCCURENT_CONNECTIONS_COUNT.decrement(1.0);
-        CONNECTION_ALIVE_DURATION.record(self.created_at.elapsed().as_millis() as f64);
+        histogram!("connection_create_time", self.created_at.elapsed());
+        // CONNECTION_ALIVE_DURATION.record();
     }
 }
 
