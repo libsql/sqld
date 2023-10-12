@@ -4,7 +4,8 @@ RUN apt update \
     && apt install -y libclang-dev clang \
         build-essential tcl protobuf-compiler file \
         libssl-dev pkg-config git\
-    && apt clean && rm -rf /var/lib/apt/lists/*
+    && apt clean \
+    && rm -rf /var/lib/apt/lists/*
 
 # We need to install and set as default the toolchain specified in rust-toolchain.toml
 # Otherwise cargo-chef will build dependencies using wrong toolchain
