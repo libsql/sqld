@@ -72,7 +72,7 @@ where
         .route("/v1/namespaces/:namespace", delete(handle_delete_namespace))
         .route("/v1/namespaces/:namespace/stats", get(stats::handle_stats))
         .route("/v1/diagnostics", get(handle_diagnostics))
-        .route("/v1/metrics", get(handle_metrics))
+        .route("/metrics", get(handle_metrics))
         .with_state(Arc::new(AppState {
             namespaces,
             connector,
