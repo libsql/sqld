@@ -121,9 +121,12 @@ impl Injector {
         // use prepare cached to avoid parsing the same statement over and over again.
         let mut stmt =
             connection.prepare_cached("INSERT INTO libsql_temp_injection VALUES (42)")?;
-        stmt.execute(())?;
-        // force call to xframe
-        match connection.cache_flush() {
+
+        // We execute the statement, and then force a call to xframe if necesacary. If the execute
+        // succeeds, then xframe wasn't called, in this case, we call cache_flush, and then process
+        // the error.
+        // It is unexpected that execute flushes, but it is possible, so we handle that case.
+        match stmt.execute(()).and_then(|_| connection.cache_flush()) {
             Ok(_) => panic!("replication hook was not called"),
             Err(e) => {
                 if let Some(e) = e.sqlite_error() {
