@@ -6,6 +6,7 @@ use libsql::Database;
 use serde_json::json;
 use sqld::config::{AdminApiConfig, RpcServerConfig, UserApiConfig};
 use turmoil::{Builder, Sim};
+use uuid::Uuid;
 
 fn make_primary(sim: &mut Sim, path: PathBuf) {
     init_tracing();
@@ -21,6 +22,7 @@ fn make_primary(sim: &mut Sim, path: PathBuf) {
                 admin_api_config: Some(AdminApiConfig {
                     acceptor: TurmoilAcceptor::bind(([0, 0, 0, 0], 9090)).await?,
                     connector: TurmoilConnector,
+                    disable_metrics: false,
                 }),
                 rpc_server_config: Some(RpcServerConfig {
                     acceptor: TurmoilAcceptor::bind(([0, 0, 0, 0], 4567)).await?,
@@ -42,7 +44,11 @@ fn make_primary(sim: &mut Sim, path: PathBuf) {
 fn embedded_replica() {
     let mut sim = Builder::new().build();
 
-    let tmp = std::env::temp_dir();
+    let tmp_dir_name = Uuid::new_v4().simple().to_string();
+
+    let tmp = std::env::temp_dir().join(tmp_dir_name);
+
+    tracing::debug!("tmp dir: {:?}", tmp);
 
     // We need to ensure that libsql's init code runs before we do anything
     // with rusqlite in sqld. This is because libsql has saftey checks and
@@ -71,8 +77,28 @@ fn embedded_replica() {
             TurmoilConnector,
         )?;
 
-        let n = db.sync().await.unwrap();
+        let n = db.sync().await?;
+        assert_eq!(n, 0);
+
+        let conn = db.connect()?;
+
+        conn.execute("CREATE TABLE user (id INTEGER NOT NULL PRIMARY KEY)", ())
+            .await?;
+
+        let n = db.sync().await?;
         assert_eq!(n, 2);
+
+        let err = conn
+            .execute("INSERT INTO user(id) VALUES (1), (1)", ())
+            .await
+            .unwrap_err();
+
+        let libsql::Error::RemoteSqliteFailure(code, extended_code, _) = err else {
+            panic!()
+        };
+
+        assert_eq!(code, 3);
+        assert_eq!(extended_code, 1555);
 
         Ok(())
     });
