@@ -218,7 +218,8 @@ async fn main() {
 
 ## Multitenancy
 
-The `sqld` server supports more than one databases. Currently, databases are created lazily when a HTTP request arrives.
+The `sqld` server supports more than one databases when you start it with `--enable-namespaces` flag. 
+Currently, databases are created lazily when a HTTP request arrives.
 The name of the database is determined from the `Host` header in the HTTP request.
 
 For example, if you have the following entries in your `/etc/hosts` file:
