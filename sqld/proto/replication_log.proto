@@ -19,9 +19,14 @@ message Frames {
     repeated Frame frames = 1;
 }
 
+message BatchEntriesResponse {
+    Frames frames = 1;
+    HelloResponse hs_response = 2;
+}
+
 service ReplicationLog {
     rpc Hello(HelloRequest) returns (HelloResponse) {}
     rpc LogEntries(LogOffset) returns (stream Frame) {}
-    rpc BatchLogEntries(LogOffset) returns (Frames) {}
+    rpc BatchLogEntries(LogOffset) returns (BatchEntriesResponse) {}
     rpc Snapshot(LogOffset) returns (stream Frame) {}
 }

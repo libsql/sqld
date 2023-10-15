@@ -91,6 +91,11 @@ impl NamespaceName {
     pub fn as_slice(&self) -> &[u8] {
         &self.0
     }
+
+    /// return the u128 hash of the namespace
+    pub fn id(&self) -> u128{
+        todo!();
+    }
 }
 
 impl fmt::Display for NamespaceName {
