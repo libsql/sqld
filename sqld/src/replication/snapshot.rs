@@ -1,6 +1,7 @@
 use std::collections::HashSet;
 use std::fs::File;
 use std::io::BufWriter;
+use std::io::SeekFrom;
 use std::io::Write;
 use std::mem::size_of;
 use std::os::unix::prelude::FileExt;
@@ -14,9 +15,13 @@ use anyhow::Context;
 use bytemuck::{bytes_of, pod_read_unaligned, Pod, Zeroable};
 use bytes::BytesMut;
 use crossbeam::channel::bounded;
+use futures::StreamExt;
+use futures_core::Stream;
 use once_cell::sync::Lazy;
 use regex::Regex;
 use tempfile::NamedTempFile;
+use tokio::io::AsyncReadExt;
+use tokio::io::AsyncSeekExt;
 use uuid::Uuid;
 
 use crate::namespace::NamespaceName;
@@ -35,7 +40,7 @@ const MAX_SNAPSHOT_NUMBER: usize = 32;
 #[repr(C)]
 pub struct SnapshotFileHeader {
     /// id of the database
-    pub log_id: u128,
+    pub namespace_id: u128,
     /// first frame in the snapshot
     pub start_frame_no: u64,
     /// end frame in the snapshot
@@ -172,6 +177,35 @@ impl SnapshotFile {
             }
             other => other,
         })
+    }
+
+    pub fn into_stream(self) -> impl Stream<Item = crate::Result<FrameMut>> {
+        async_stream::try_stream! {
+            let mut current_offset = 0;
+            let mut file = tokio::fs::File::from_std(self.file);
+            loop {
+                if current_offset >= self.header.frame_count {
+                    break;
+                }
+                let read_offset = size_of::<SnapshotFileHeader>() as u64
+                    + current_offset * LogFile::FRAME_SIZE as u64;
+                current_offset += 1;
+                let mut buf = BytesMut::zeroed(LogFile::FRAME_SIZE);
+                file.seek(SeekFrom::Start(read_offset)).await?;
+                file.read_exact(&mut buf).await?;
+                let frame = FrameMut::try_from(&*buf)?;
+                yield frame;
+            }
+        }
+    }
+
+    pub fn into_stream_from(self, from: FrameNo) -> impl Stream<Item = crate::Result<FrameMut>> {
+        self.into_stream().take_while(move |frame| std::future::ready({
+            match frame {
+                Ok(f) => f.header().frame_no >= from,
+                Err(_) => true,
+            }
+        }))
     }
 
     pub fn header(&self) -> &SnapshotFileHeader {
@@ -409,7 +443,7 @@ impl SnapshotBuilder {
         Ok(Self {
             seen_pages: HashSet::new(),
             header: SnapshotFileHeader {
-                log_id: log_id.as_u128(),
+                namespace_id: log_id.as_u128(),
                 start_frame_no: u64::MAX,
                 end_frame_no: u64::MIN,
                 frame_count: 0,
@@ -468,7 +502,7 @@ impl SnapshotBuilder {
         file.as_file().write_all_at(bytes_of(&self.header), 0)?;
         let snapshot_name = format!(
             "{}-{}-{}.snap",
-            Uuid::from_u128(self.header.log_id),
+            Uuid::from_u128(self.header.namespace_id),
             self.header.start_frame_no,
             self.header.end_frame_no,
         );
@@ -544,7 +578,7 @@ mod test {
         assert_eq!(header.start_frame_no, 0);
         assert_eq!(header.end_frame_no, 49);
         assert_eq!(header.frame_count, 25);
-        assert_eq!(header.log_id, log_id.as_u128());
+        assert_eq!(header.namespace_id, log_id.as_u128());
         assert_eq!(header.size_after, 25);
 
         let mut seen_frames = HashSet::new();
