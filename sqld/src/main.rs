@@ -10,6 +10,7 @@ use bytesize::ByteSize;
 use clap::Parser;
 use hyper::client::HttpConnector;
 use mimalloc::MiMalloc;
+use tokio::signal::unix::{signal, SignalKind};
 use tokio::sync::Notify;
 use tokio::time::Duration;
 use tracing_subscriber::prelude::*;
@@ -457,13 +458,19 @@ async fn build_server(config: &Cli) -> anyhow::Result<Server> {
     tokio::spawn({
         let shutdown = shutdown.clone();
         async move {
+            let mut sigint =
+                signal(SignalKind::interrupt()).expect("failed to setup SIGINT handler");
+            let mut sigterm =
+                signal(SignalKind::terminate()).expect("failed to setup SIGTERM handler");
             loop {
-                tokio::signal::ctrl_c()
-                    .await
-                    .expect("failed to listen to CTRL-C");
-                tracing::info!(
-                    "received CTRL-C, shutting down gracefully... This may take some time"
-                );
+                tokio::select! {
+                    _ = sigint.recv() => tracing::info!(
+                        "received INT signal (CTRL-C), shutting down gracefully... This may take some time"
+                    ),
+                    _ = sigterm.recv() => tracing::info!(
+                        "received TERM signal, shutting down gracefully... This may take some time"
+                    ),
+                }
                 shutdown.notify_waiters();
             }
         }
