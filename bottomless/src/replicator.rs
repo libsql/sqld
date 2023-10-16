@@ -171,7 +171,7 @@ impl Options {
         let secret_access_key = env_var("LIBSQL_BOTTOMLESS_AWS_SECRET_ACCESS_KEY").ok();
         let region = env_var("LIBSQL_BOTTOMLESS_AWS_DEFAULT_REGION").ok();
         let max_frames_per_batch =
-            env_var_or("LIBSQL_BOTTOMLESS_BATCH_MAX_FRAMES", 500).parse::<usize>()?;
+            env_var_or("LIBSQL_BOTTOMLESS_BATCH_MAX_FRAMES", 10000).parse::<usize>()?;
         let s3_upload_max_parallelism =
             env_var_or("LIBSQL_BOTTOMLESS_S3_PARALLEL_MAX", 32).parse::<usize>()?;
         let restore_transaction_page_swap_after =
