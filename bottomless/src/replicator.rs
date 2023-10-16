@@ -5,7 +5,7 @@ use crate::uuid_utils::decode_unix_timestamp;
 use crate::wal::WalFileReader;
 use anyhow::{anyhow, bail};
 use arc_swap::ArcSwapOption;
-use async_compression::tokio::write::GzipEncoder;
+use async_compression::tokio::write::{GzipEncoder, XzEncoder};
 use aws_sdk_s3::config::{Credentials, Region};
 use aws_sdk_s3::error::SdkError;
 use aws_sdk_s3::operation::get_object::builders::GetObjectFluentBuilder;
@@ -653,7 +653,7 @@ impl Replicator {
             CompressionKind::None => Ok(ByteStream::from_path(db_path).await?),
             CompressionKind::Gzip => {
                 let mut reader = File::open(db_path).await?;
-                let gzip_path = Self::db_gzip_path(db_path);
+                let gzip_path = Self::db_compressed_path(db_path, "gz");
                 let compressed_file = OpenOptions::new()
                     .create(true)
                     .write(true)
@@ -671,13 +671,34 @@ impl Replicator {
                 );
                 Ok(ByteStream::from_path(gzip_path).await?)
             }
+            CompressionKind::Xz => {
+                let mut reader = File::open(db_path).await?;
+                let xz_path = Self::db_compressed_path(db_path, "xz");
+                let compressed_file = OpenOptions::new()
+                    .create(true)
+                    .write(true)
+                    .read(true)
+                    .truncate(true)
+                    .open(&xz_path)
+                    .await?;
+                let mut writer =
+                    XzEncoder::with_quality(compressed_file, async_compression::Level::Best);
+                let size = tokio::io::copy(&mut reader, &mut writer).await?;
+                writer.shutdown().await?;
+                tracing::debug!(
+                    "Compressed database file ({} bytes) into `{}`",
+                    size,
+                    xz_path.display()
+                );
+                Ok(ByteStream::from_path(xz_path).await?)
+            }
         }
     }
 
-    fn db_gzip_path(db_path: &Path) -> PathBuf {
-        let mut gzip_path = db_path.to_path_buf();
-        gzip_path.pop();
-        gzip_path.join("db.gz")
+    fn db_compressed_path(db_path: &Path, suffix: &'static str) -> PathBuf {
+        let mut compressed_path: PathBuf = db_path.to_path_buf();
+        compressed_path.pop();
+        compressed_path.join(format!("db.{suffix}"))
     }
 
     fn restore_db_path(&self) -> PathBuf {
@@ -816,9 +837,10 @@ impl Replicator {
             let _ = snapshot_notifier.send(Ok(Some(generation)));
             let elapsed = Instant::now() - start;
             tracing::debug!("Snapshot upload finished (took {:?})", elapsed);
-            // cleanup gzip database snapshot if exists
-            let gzip_path = Self::db_gzip_path(&db_path);
-            let _ = tokio::fs::remove_file(gzip_path).await;
+            // cleanup gzip/xz database snapshot if exists
+            for suffix in &["gz", "xz"] {
+                let _ = tokio::fs::remove_file(Self::db_compressed_path(&db_path, suffix)).await;
+            }
         });
         let elapsed = Instant::now() - start_ts;
         tracing::debug!("Scheduled DB snapshot {} (took {:?})", generation, elapsed);
@@ -1163,6 +1185,7 @@ impl Replicator {
         let main_db_path = match self.use_compression {
             CompressionKind::None => format!("{}-{}/db.db", self.db_name, generation),
             CompressionKind::Gzip => format!("{}-{}/db.gz", self.db_name, generation),
+            CompressionKind::Xz => format!("{}-{}/db.xz", self.db_name, generation),
         };
 
         if let Ok(db_file) = self.get_object(main_db_path).send().await {
@@ -1171,6 +1194,12 @@ impl Replicator {
                 CompressionKind::None => tokio::io::copy(&mut body_reader, db).await?,
                 CompressionKind::Gzip => {
                     let mut decompress_reader = async_compression::tokio::bufread::GzipDecoder::new(
+                        tokio::io::BufReader::new(body_reader),
+                    );
+                    tokio::io::copy(&mut decompress_reader, db).await?
+                }
+                CompressionKind::Xz => {
+                    let mut decompress_reader = async_compression::tokio::bufread::XzDecoder::new(
                         tokio::io::BufReader::new(body_reader),
                     );
                     tokio::io::copy(&mut decompress_reader, db).await?
@@ -1235,6 +1264,7 @@ impl Replicator {
                         Some(result) => result,
                         None => {
                             if !key.ends_with(".gz")
+                                && !key.ends_with(".xz")
                                 && !key.ends_with(".db")
                                 && !key.ends_with(".meta")
                                 && !key.ends_with(".dep")
@@ -1423,6 +1453,7 @@ impl Replicator {
         let str = fpath.to_str()?;
         if str.ends_with(".db")
             | str.ends_with(".gz")
+            | str.ends_with(".xz")
             | str.ends_with(".raw")
             | str.ends_with(".meta")
             | str.ends_with(".dep")
@@ -1670,6 +1701,7 @@ pub enum CompressionKind {
     #[default]
     None,
     Gzip,
+    Xz,
 }
 
 impl CompressionKind {
@@ -1677,6 +1709,7 @@ impl CompressionKind {
         match kind {
             "gz" | "gzip" => Ok(CompressionKind::Gzip),
             "raw" | "" => Ok(CompressionKind::None),
+            "xz" => Ok(CompressionKind::Xz),
             other => Err(other),
         }
     }
@@ -1687,6 +1720,7 @@ impl std::fmt::Display for CompressionKind {
         match self {
             CompressionKind::None => write!(f, "raw"),
             CompressionKind::Gzip => write!(f, "gz"),
+            CompressionKind::Xz => write!(f, "xz"),
         }
     }
 }

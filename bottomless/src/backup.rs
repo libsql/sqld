@@ -116,6 +116,14 @@ impl WalCopier {
                     wal.copy_frames(&mut gzip, len).await?;
                     gzip.shutdown().await?;
                 }
+                CompressionKind::Xz => {
+                    let mut xz = async_compression::tokio::write::XzEncoder::with_quality(
+                        &mut out,
+                        async_compression::Level::Best,
+                    );
+                    wal.copy_frames(&mut xz, len).await?;
+                    xz.shutdown().await?;
+                }
             }
             if tracing::enabled!(tracing::Level::DEBUG) {
                 let elapsed = Instant::now() - period_start;
