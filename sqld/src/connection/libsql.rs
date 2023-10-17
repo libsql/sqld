@@ -212,6 +212,26 @@ where
             )?;
             conn.conn
                 .pragma_update(None, "max_page_count", max_db_size)?;
+            let dbs_path = path
+                .as_ref()
+                .parent()
+                .unwrap_or_else(|| std::path::Path::new(".."))
+                .canonicalize()
+                .unwrap_or_else(|_| std::path::PathBuf::from(".."));
+            for entry in (std::fs::read_dir(&dbs_path)?).flatten() {
+                if let Some(namespace) = entry.file_name().to_str() {
+                    let db_path = entry.path().join("data");
+                    let query = format!(
+                        "ATTACH DATABASE 'file:{}?mode=ro' AS \"{namespace}\"",
+                        db_path.display()
+                    );
+                    if let Err(e) = conn.conn.execute(&query, ()) {
+                        tracing::warn!("Failed to attach database {}: {}", db_path.display(), e);
+                    } else {
+                        tracing::debug!("Attached {} as {namespace}", db_path.display());
+                    }
+                }
+            }
             Ok(conn)
         })
         .await
