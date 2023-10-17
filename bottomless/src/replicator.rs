@@ -681,8 +681,7 @@ impl Replicator {
                     .truncate(true)
                     .open(&xz_path)
                     .await?;
-                let mut writer =
-                    XzEncoder::with_quality(compressed_file, async_compression::Level::Best);
+                let mut writer = XzEncoder::new(compressed_file);
                 let size = tokio::io::copy(&mut reader, &mut writer).await?;
                 writer.shutdown().await?;
                 tracing::debug!(
