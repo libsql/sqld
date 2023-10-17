@@ -1181,38 +1181,58 @@ impl Replicator {
     }
 
     async fn restore_from_snapshot(&mut self, generation: &Uuid, db: &mut File) -> Result<bool> {
-        let main_db_path = match self.use_compression {
-            CompressionKind::None => format!("{}-{}/db.db", self.db_name, generation),
-            CompressionKind::Gzip => format!("{}-{}/db.gz", self.db_name, generation),
-            CompressionKind::Xz => format!("{}-{}/db.xz", self.db_name, generation),
+        let algos_to_try = match self.use_compression {
+            CompressionKind::None => &[
+                CompressionKind::None,
+                CompressionKind::Xz,
+                CompressionKind::Gzip,
+            ],
+            CompressionKind::Gzip => &[
+                CompressionKind::Gzip,
+                CompressionKind::Xz,
+                CompressionKind::None,
+            ],
+            CompressionKind::Xz => &[
+                CompressionKind::Xz,
+                CompressionKind::Gzip,
+                CompressionKind::None,
+            ],
         };
 
-        if let Ok(db_file) = self.get_object(main_db_path).send().await {
-            let mut body_reader = db_file.body.into_async_read();
-            let db_size = match self.use_compression {
-                CompressionKind::None => tokio::io::copy(&mut body_reader, db).await?,
-                CompressionKind::Gzip => {
-                    let mut decompress_reader = async_compression::tokio::bufread::GzipDecoder::new(
-                        tokio::io::BufReader::new(body_reader),
-                    );
-                    tokio::io::copy(&mut decompress_reader, db).await?
-                }
-                CompressionKind::Xz => {
-                    let mut decompress_reader = async_compression::tokio::bufread::XzDecoder::new(
-                        tokio::io::BufReader::new(body_reader),
-                    );
-                    tokio::io::copy(&mut decompress_reader, db).await?
-                }
+        for algo in algos_to_try {
+            let main_db_path = match algo {
+                CompressionKind::None => format!("{}-{}/db.db", self.db_name, generation),
+                CompressionKind::Gzip => format!("{}-{}/db.gz", self.db_name, generation),
+                CompressionKind::Xz => format!("{}-{}/db.xz", self.db_name, generation),
             };
-            db.flush().await?;
+            if let Ok(db_file) = self.get_object(main_db_path).send().await {
+                let mut body_reader = db_file.body.into_async_read();
+                let db_size = match algo {
+                    CompressionKind::None => tokio::io::copy(&mut body_reader, db).await?,
+                    CompressionKind::Gzip => {
+                        let mut decompress_reader =
+                            async_compression::tokio::bufread::GzipDecoder::new(
+                                tokio::io::BufReader::new(body_reader),
+                            );
+                        tokio::io::copy(&mut decompress_reader, db).await?
+                    }
+                    CompressionKind::Xz => {
+                        let mut decompress_reader =
+                            async_compression::tokio::bufread::XzDecoder::new(
+                                tokio::io::BufReader::new(body_reader),
+                            );
+                        tokio::io::copy(&mut decompress_reader, db).await?
+                    }
+                };
+                db.flush().await?;
 
-            let page_size = Self::read_page_size(db).await?;
-            self.set_page_size(page_size)?;
-            tracing::info!("Restored the main database file ({} bytes)", db_size);
-            Ok(true)
-        } else {
-            Ok(false)
+                let page_size = Self::read_page_size(db).await?;
+                self.set_page_size(page_size)?;
+                tracing::info!("Restored the main database file ({} bytes)", db_size);
+                return Ok(true);
+            }
         }
+        Ok(false)
     }
 
     async fn restore_wal(
